@@ -145,6 +145,8 @@ impl ImageRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ImagesIndex {
     pub schema_version: u32,
+    #[serde(default)]
+    pub image_count: usize,
     pub images_by_hash: BTreeMap<String, ImageRecord>,
 }
 
@@ -152,6 +154,7 @@ impl Default for ImagesIndex {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            image_count: 0,
             images_by_hash: BTreeMap::new(),
         }
     }

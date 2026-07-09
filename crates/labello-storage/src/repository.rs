@@ -5,11 +5,14 @@ use std::{
 };
 
 use labello_domain::{
-    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageState,
-    ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
+    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageRecord,
+    ImageState, ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
 };
 use parking_lot::Mutex;
-use tokio::{io::AsyncWriteExt, sync::Mutex as AsyncMutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex as AsyncMutex,
+};
 
 use crate::{
     error::{PathIo, PathJson, StorageError, StorageResult},
@@ -116,6 +119,12 @@ impl DatasetRepository {
         Ok(config.into_metadata(images))
     }
 
+    pub async fn load_dataset_config(&self) -> StorageResult<DatasetMetadata> {
+        let config: DatasetConfig = read_toml(&self.dataset_path()).await?;
+        labello_domain::validate_schema_version(config.schema_version)?;
+        Ok(config.into_metadata(BTreeMap::new()))
+    }
+
     pub async fn save_dataset(&self, metadata: &DatasetMetadata) -> StorageResult<()> {
         labello_domain::validate_schema_version(metadata.schema_version)?;
         write_toml_atomic(
@@ -137,9 +146,42 @@ impl DatasetRepository {
         Ok(index)
     }
 
+    pub async fn image_count(&self) -> StorageResult<usize> {
+        if !tokio::fs::try_exists(self.images_index_path())
+            .await
+            .with_path(self.images_index_path())?
+        {
+            return Ok(0);
+        }
+        if let Some(count) = self.read_image_count_hint().await? {
+            return Ok(count);
+        }
+        Ok(self.load_images_index().await?.images_by_hash.len())
+    }
+
+    pub async fn load_image_record(&self, image_id: &ImageId) -> StorageResult<ImageRecord> {
+        self.load_images_index()
+            .await?
+            .images_by_hash
+            .into_values()
+            .find(|record| &record.image_id == image_id)
+            .ok_or_else(|| StorageError::NotFound(self.images_index_path()))
+    }
+
     pub async fn save_images_index(&self, index: &ImagesIndex) -> StorageResult<()> {
         labello_domain::validate_schema_version(index.schema_version)?;
-        write_json_atomic(&self.images_index_path(), index).await
+        let mut index = index.clone();
+        index.image_count = index.images_by_hash.len();
+        write_json_atomic(&self.images_index_path(), &index).await
+    }
+
+    async fn read_image_count_hint(&self) -> StorageResult<Option<usize>> {
+        let path = self.images_index_path();
+        let mut file = tokio::fs::File::open(&path).await.with_path(&path)?;
+        let mut buffer = vec![0; 4096];
+        let read = file.read(&mut buffer).await.with_path(&path)?;
+        let prefix = String::from_utf8_lossy(&buffer[..read]);
+        Ok(extract_image_count_hint(&prefix))
     }
 
     pub async fn load_events(&self, image_id: &ImageId) -> StorageResult<Vec<EventLogEntry>> {
@@ -168,7 +210,8 @@ impl DatasetRepository {
             labello_domain::validate_schema_version(state.schema_version)?;
             Ok(state)
         } else {
-            self.rebuild_image_state(image_id).await
+            rebuild_state(image_id.clone(), &self.load_events(image_id).await?)
+                .map_err(StorageError::from)
         }
     }
 
@@ -241,6 +284,21 @@ impl DatasetRepository {
     }
 }
 
+fn extract_image_count_hint(text: &str) -> Option<usize> {
+    let key = "\"imageCount\"";
+    let rest = text.get(text.find(key)? + key.len()..)?;
+    let rest = rest.get(rest.find(':')? + 1..)?.trim_start();
+    let digits = rest
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use labello_domain::{
@@ -284,11 +342,43 @@ mod tests {
         assert_eq!(rebuilt.current_sequence, 1);
     }
 
+    #[tokio::test]
+    async fn loading_missing_image_state_does_not_create_state_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_empty");
+
+        let state = repo.load_image_state(&image_id).await.unwrap();
+
+        assert_eq!(state.current_sequence, 0);
+        assert!(
+            !tokio::fs::try_exists(repo.state_path(&image_id))
+                .await
+                .unwrap()
+        );
+    }
+
     #[test]
     fn rejects_image_path_traversal() {
         let repo = DatasetRepository::new("/tmp/labello-dataset");
         assert!(repo.image_path("images/frame.png").is_ok());
         assert!(repo.image_path("../secret.png").is_err());
         assert!(repo.image_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn extracts_image_count_hint_from_index_prefix() {
+        assert_eq!(
+            extract_image_count_hint(r#"{"schemaVersion":1,"imageCount":42,"imagesByHash":{}}"#),
+            Some(42)
+        );
+        assert_eq!(extract_image_count_hint(r#"{"imagesByHash":{}}"#), None);
     }
 }

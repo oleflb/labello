@@ -159,8 +159,15 @@ impl LabelloApp {
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
+                UiMessage::FolderUploadProgress(progress) => {
+                    self.loading.uploading = true;
+                    self.loading.upload_progress = Some(progress);
+                    self.runtime.error = None;
+                    ctx.request_repaint();
+                }
                 UiMessage::FolderUploadFinished(result) => {
                     self.loading.uploading = false;
+                    self.loading.upload_progress = None;
                     match result {
                         Ok(message) => {
                             self.runtime.error = Some(message);
@@ -209,11 +216,9 @@ impl LabelloApp {
                 let result = async {
                     let metadata = api.get_dataset(&dataset_id).await?;
                     let keybindings = api.get_keybindings(&dataset_id, &user_id).await?;
-                    let stats = api.dataset_stats(&dataset_id).await?;
                     Ok::<_, labello_client::ClientError>(LoadedDataset {
                         metadata,
                         keybindings,
-                        stats,
                     })
                 }
                 .await
@@ -268,6 +273,7 @@ impl LabelloApp {
             || self.datasets.metadata.is_none()
             || self.loading.stats
             || matches!(self.view, AppView::Setup)
+            || !matches!(self.view, AppView::Stats)
         {
             return;
         }
@@ -364,7 +370,6 @@ impl LabelloApp {
         self.tasks = loaded.metadata.tasks.clone();
         self.datasets.metadata = Some(loaded.metadata);
         self.keybindings = loaded.keybindings;
-        self.datasets.stats = loaded.stats;
         self.selected_task = self.selected_task.min(self.tasks.len().saturating_sub(1));
         self.view = AppView::Annotate;
         self.runtime.error = None;

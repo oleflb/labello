@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -103,6 +103,7 @@ pub fn router(state: ApiState) -> Router {
             "/datasets/{dataset_id}/prelabel-suggestions",
             post(workflow::prelabel_suggestions),
         )
+        .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -182,7 +183,7 @@ async fn list_datasets(
         }
         let dataset_id = DatasetId::from(entry.file_name().to_string_lossy().to_string());
         let repo = state.repo(&dataset_id);
-        let Ok(metadata) = repo.load_dataset().await else {
+        let Ok(metadata) = repo.load_dataset_config().await else {
             continue;
         };
         let roles = actor_roles(&metadata, &actor);
@@ -193,7 +194,7 @@ async fn list_datasets(
             dataset_id: metadata.dataset_id,
             name: metadata.name,
             roles,
-            total_images: metadata.images.len(),
+            total_images: repo.image_count().await.unwrap_or_default(),
         });
     }
     Ok(Json(summaries))
@@ -206,7 +207,7 @@ async fn get_dataset(
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(sanitize_dataset(metadata, &actor)))
 }
@@ -218,7 +219,7 @@ async fn get_admin_dataset(
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     Ok(Json(config_response(metadata)))
 }
@@ -231,7 +232,7 @@ async fn update_dataset_config(
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let mut metadata = repo.load_dataset().await?;
+    let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     validate_config_update(&metadata, &request, &actor)?;
     for root in &request.image_roots {
@@ -256,7 +257,7 @@ async fn ingest_dataset(
 ) -> ApiResult<Json<labello_client::IngestReport>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     Ok(Json(storage_ingest_to_client(repo.ingest_images().await?)))
 }
@@ -282,7 +283,7 @@ async fn upload_images(
 ) -> ApiResult<Json<labello_client::IngestReport>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let mut metadata = repo.load_dataset().await?;
+    let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     let root = normalize_upload_root(&query.root)?;
     repo.safe_relative_root(&root)?;
@@ -393,7 +394,7 @@ async fn list_tasks(
 ) -> ApiResult<Json<Vec<TaskDefinition>>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(metadata.tasks))
 }
@@ -406,7 +407,7 @@ async fn add_task(
 ) -> ApiResult<Json<TaskDefinition>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let mut metadata = repo.load_dataset().await?;
+    let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     metadata
         .tasks
@@ -424,7 +425,7 @@ async fn list_prelabel_configs(
 ) -> ApiResult<Json<Vec<PrelabelConfig>>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(metadata.prelabel_configs))
 }
@@ -437,7 +438,7 @@ async fn add_prelabel_config(
 ) -> ApiResult<Json<PrelabelConfig>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let mut metadata = repo.load_dataset().await?;
+    let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     metadata
         .prelabel_configs

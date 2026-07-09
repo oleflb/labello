@@ -23,7 +23,9 @@ use labello_domain::{
     TaskDefinition, TaskId, TutorialContent, UserAccount, UserId,
 };
 
-use crate::app::{AppConfig, AppView, LabelloApp, QueueMode, SaveStatus, UiMessage};
+use crate::app::{
+    AppConfig, AppView, FolderUploadProgress, LabelloApp, QueueMode, SaveStatus, UiMessage,
+};
 
 #[test]
 fn setup_create_open_and_admin_workflows_use_live_commands() {
@@ -195,13 +197,14 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
+    assert_eq!(api.counts().dataset_stats, 0);
 
     click(&mut harness, "Stats");
     harness.step();
     assert!(harness.query_by_label("Live Statistics").is_some());
     click(&mut harness, "Refresh now");
     step_until(&mut harness, 8, |app| !app.loading.stats);
-    assert!(api.counts().dataset_stats >= 2);
+    assert!(api.counts().dataset_stats >= 1);
 
     harness.set_size(egui::vec2(390.0, 760.0));
     harness.step();
@@ -246,6 +249,25 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
     assert_eq!(app.datasets.stats.total_images, 7);
     app.process_messages(&egui::Context::default());
     assert_eq!(app.datasets.stats.total_images, 15);
+
+    app.runtime
+        .tx
+        .send(UiMessage::FolderUploadProgress(FolderUploadProgress {
+            uploaded_files: 12,
+            total_files: 24,
+            current_batch: 2,
+            message: "Uploading batch 2".to_string(),
+        }))
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.loading.uploading);
+    assert_eq!(
+        app.loading
+            .upload_progress
+            .as_ref()
+            .map(|progress| progress.fraction()),
+        Some(0.5)
+    );
 }
 
 fn live_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {

@@ -228,6 +228,39 @@ async fn rejects_dev_header_identity_without_configured_token() {
 }
 
 #[tokio::test]
+async fn config_endpoints_do_not_parse_image_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    tokio::fs::write(
+        temp.path().join("ds").join("images-index.json"),
+        b"not json",
+    )
+    .await
+    .unwrap();
+
+    for uri in [
+        "/datasets/ds",
+        "/datasets/ds/admin",
+        "/datasets/ds/keybindings",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-user-id", "admin")
+                    .header("x-user-role", "data_admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+#[tokio::test]
 async fn uploads_images_and_serves_record_and_preview() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

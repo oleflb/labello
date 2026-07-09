@@ -60,8 +60,9 @@ pub(crate) async fn get_image_state(
 ) -> ApiResult<Json<labello_domain::ImageState>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
+    repo.load_image_record(&image_id).await?;
     Ok(Json(repo.load_image_state(&image_id).await?))
 }
 
@@ -72,13 +73,9 @@ pub(crate) async fn get_image_record(
 ) -> ApiResult<Json<labello_domain::ImageRecord>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
-    let record = metadata
-        .images
-        .get(&image_id)
-        .cloned()
-        .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
+    let record = repo.load_image_record(&image_id).await?;
     Ok(Json(record))
 }
 
@@ -89,12 +86,9 @@ pub(crate) async fn get_image_file(
 ) -> ApiResult<impl IntoResponse> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
-    let record = metadata
-        .images
-        .get(&image_id)
-        .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
+    let record = repo.load_image_record(&image_id).await?;
     let path = repo.image_path(&record.canonical_path)?;
     let bytes =
         tokio::fs::read(&path)
@@ -118,12 +112,9 @@ pub(crate) async fn get_image_preview(
 ) -> ApiResult<impl IntoResponse> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
-    let record = metadata
-        .images
-        .get(&image_id)
-        .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
+    let record = repo.load_image_record(&image_id).await?;
     let path = repo.image_path(&record.canonical_path)?;
     let max = query.max.clamp(256, 4096);
     let (width, height, rgba) = tokio::task::spawn_blocking(move || preview_rgba(path, max))
@@ -189,8 +180,9 @@ pub(crate) async fn rebuild_image(
 ) -> ApiResult<Json<labello_domain::ImageState>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
+    repo.load_image_record(&image_id).await?;
     Ok(Json(repo.rebuild_image_state(&image_id).await?))
 }
 
@@ -359,7 +351,7 @@ pub(crate) async fn stats(
 ) -> ApiResult<Json<labello_domain::DatasetStats>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(repo.dataset_stats().await?))
 }
@@ -371,7 +363,7 @@ pub(crate) async fn get_keybindings(
 ) -> ApiResult<Json<KeybindingSet>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(repo.load_keybindings(&actor.user_id).await?))
 }
@@ -389,7 +381,7 @@ pub(crate) async fn put_keybindings(
         ));
     }
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     repo.save_keybindings(&bindings).await?;
     Ok(Json(bindings))
@@ -403,7 +395,7 @@ pub(crate) async fn prelabel_suggestions(
 ) -> ApiResult<Json<Vec<PrelabelSuggestion>>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id);
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Annotator)?;
     let config = metadata
         .prelabel_configs

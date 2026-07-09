@@ -1,18 +1,23 @@
 use crate::app::LabelloApp;
 #[cfg(target_arch = "wasm32")]
-use crate::app::UiMessage;
+use crate::app::{FolderUploadProgress, UiMessage};
+
+#[cfg(target_arch = "wasm32")]
+const MAX_FILES_PER_BATCH: u32 = 24;
+#[cfg(target_arch = "wasm32")]
+const MAX_BATCH_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
 
 impl LabelloApp {
     pub(crate) fn request_folder_upload(&mut self) {
         if self.loading.uploading {
             return;
         }
-        self.loading.uploading = true;
         let root = upload_root();
         match open_folder_picker(self, root.clone()) {
             Ok(()) => {}
             Err(error) => {
                 self.loading.uploading = false;
+                self.loading.upload_progress = None;
                 self.runtime.error = Some(error);
             }
         }
@@ -79,7 +84,7 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
         let tx = tx.clone();
         let config = config.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = upload_files(files, config).await;
+            let result = upload_files(files, config, tx.clone()).await;
             let _ = tx.send(UiMessage::FolderUploadFinished(result));
         });
     }));
@@ -104,35 +109,154 @@ struct UploadConfig {
 async fn upload_files(
     files: Option<web_sys::FileList>,
     config: UploadConfig,
+    tx: std::sync::mpsc::Sender<UiMessage>,
 ) -> Result<String, String> {
     use wasm_bindgen::JsCast;
 
     let files = files.ok_or_else(|| "no folder selected".to_string())?;
-    if files.length() == 0 {
+    let total_files = files.length();
+    if total_files == 0 {
         return Err("selected folder contains no files".to_string());
     }
-    let form = web_sys::FormData::new().map_err(js_error)?;
-    for index in 0..files.length() {
-        if index > 0 && index % 100 == 0 {
-            yield_to_browser().await;
+
+    send_progress(
+        &tx,
+        total_files,
+        0,
+        0,
+        "Preparing folder upload".to_string(),
+    );
+    yield_to_browser().await?;
+
+    let mut next_index = 0;
+    let mut uploaded_files = 0;
+    let mut current_batch = 0;
+    while next_index < total_files {
+        current_batch += 1;
+        let mut batch = UploadBatch::new()?;
+        while next_index < total_files && batch.file_count < MAX_FILES_PER_BATCH {
+            let Some(file) = files.item(next_index) else {
+                next_index += 1;
+                continue;
+            };
+            let size = file.unchecked_ref::<web_sys::Blob>().size();
+            if batch.file_count > 0 && batch.byte_size + size > MAX_BATCH_BYTES {
+                break;
+            }
+            batch.append(file)?;
+            next_index += 1;
         }
-        let Some(file) = files.item(index) else {
-            continue;
-        };
+        if batch.file_count == 0 {
+            return Err("selected folder contained no readable files".to_string());
+        }
+
+        send_progress(
+            &tx,
+            total_files,
+            uploaded_files,
+            current_batch,
+            format!("Uploading batch {current_batch}"),
+        );
+        yield_to_browser().await?;
+
+        upload_batch(&config, &batch.form).await?;
+        uploaded_files += batch.file_count;
+        send_progress(
+            &tx,
+            total_files,
+            uploaded_files,
+            current_batch,
+            format!("Uploaded batch {current_batch}"),
+        );
+        yield_to_browser().await?;
+    }
+
+    send_progress(
+        &tx,
+        total_files,
+        uploaded_files,
+        current_batch,
+        "Running ingest".to_string(),
+    );
+    yield_to_browser().await?;
+    run_ingest(&config).await?;
+
+    Ok(format!(
+        "Uploaded {total_files} files into {} and completed ingest",
+        config.root
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+struct UploadBatch {
+    form: web_sys::FormData,
+    file_count: u32,
+    byte_size: f64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl UploadBatch {
+    fn new() -> Result<Self, String> {
+        Ok(Self {
+            form: web_sys::FormData::new().map_err(js_error)?,
+            file_count: 0,
+            byte_size: 0.0,
+        })
+    }
+
+    fn append(&mut self, file: web_sys::File) -> Result<(), String> {
+        use wasm_bindgen::JsCast;
+
         let path = relative_file_path(&file);
         let blob = file.unchecked_ref::<web_sys::Blob>();
-        form.append_with_blob_and_filename("files", blob, &path)
+        self.byte_size += blob.size();
+        self.form
+            .append_with_blob_and_filename("files", blob, &path)
             .map_err(js_error)?;
+        self.file_count += 1;
+        Ok(())
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn upload_batch(config: &UploadConfig, form: &web_sys::FormData) -> Result<(), String> {
     let url = format!(
-        "{}/datasets/{}/uploads?root={}&ingest=true",
+        "{}/datasets/{}/uploads?root={}&ingest=false",
         config.api_base_url.trim_end_matches('/'),
         encode_component(&config.dataset_id),
         encode_component(&config.root),
     );
+    let init = request_init("POST");
+    init.set_body(form);
+    fetch(config, &url, &init).await.map(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_ingest(config: &UploadConfig) -> Result<(), String> {
+    let url = format!(
+        "{}/datasets/{}/ingest",
+        config.api_base_url.trim_end_matches('/'),
+        encode_component(&config.dataset_id),
+    );
+    let init = request_init("POST");
+    fetch(config, &url, &init).await.map(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn request_init(method: &str) -> web_sys::RequestInit {
     let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    init.set_body(&form);
+    init.set_method(method);
+    init
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch(
+    config: &UploadConfig,
+    url: &str,
+    init: &web_sys::RequestInit,
+) -> Result<web_sys::Response, String> {
+    use wasm_bindgen::JsCast;
+
     let request = web_sys::Request::new_with_str_and_init(&url, &init).map_err(js_error)?;
     request
         .headers()
@@ -155,11 +279,7 @@ async fn upload_files(
         .dyn_into::<web_sys::Response>()
         .map_err(|_| "upload response was not an HTTP response".to_string())?;
     if response.ok() {
-        Ok(format!(
-            "Uploaded {} files into {} and started ingest",
-            files.length(),
-            config.root
-        ))
+        Ok(response)
     } else {
         let text = wasm_bindgen_futures::JsFuture::from(response.text().map_err(js_error)?)
             .await
@@ -171,11 +291,39 @@ async fn upload_files(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn yield_to_browser() {
-    let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(
-        &wasm_bindgen::JsValue::NULL,
-    ))
-    .await;
+fn send_progress(
+    tx: &std::sync::mpsc::Sender<UiMessage>,
+    total_files: u32,
+    uploaded_files: u32,
+    current_batch: u32,
+    message: String,
+) {
+    let _ = tx.send(UiMessage::FolderUploadProgress(FolderUploadProgress {
+        uploaded_files,
+        total_files,
+        current_batch,
+        message,
+    }));
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn yield_to_browser() -> Result<(), String> {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let Some(window) = web_sys::window() else {
+            let _ = reject.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str("missing browser window"),
+            );
+            return;
+        };
+        if let Err(error) = window.request_animation_frame(&resolve) {
+            let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
+        }
+    });
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(js_error)
 }
 
 #[cfg(target_arch = "wasm32")]

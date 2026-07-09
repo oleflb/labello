@@ -23,6 +23,7 @@ impl LabelloApp {
         let current_user = self.config.user_id.clone();
         let ingesting_now = self.loading.ingesting;
         let uploading_now = self.loading.uploading;
+        let upload_progress = self.loading.upload_progress.clone();
         let Some(config) = self.datasets.admin_config.as_mut() else {
             ui.label(RichText::new("Admin config is not loaded.").color(theme::MUTED));
             if ui.button("Load admin config").clicked() {
@@ -56,6 +57,16 @@ impl LabelloApp {
                         ui.spinner();
                     }
                 });
+                if let Some(progress) = upload_progress.as_ref() {
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction())
+                            .desired_width(ui.available_width().min(460.0))
+                            .text(progress.label()),
+                    );
+                    if progress.current_batch > 0 {
+                        ui.small(format!("Batch {}", progress.current_batch));
+                    }
+                }
                 ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
             });
 

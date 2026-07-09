@@ -87,6 +87,8 @@ pub(crate) enum UiMessage {
     IngestFinished(Result<IngestReport, String>),
     StatsLoaded(Result<DatasetStats, String>),
     #[allow(dead_code)]
+    FolderUploadProgress(FolderUploadProgress),
+    #[allow(dead_code)]
     FolderUploadFinished(Result<String, String>),
 }
 
@@ -144,7 +146,6 @@ pub(crate) enum UiCommand {
 pub(crate) struct LoadedDataset {
     pub metadata: DatasetMetadata,
     pub keybindings: KeybindingSet,
-    pub stats: DatasetStats,
 }
 
 #[derive(Debug)]
@@ -153,6 +154,35 @@ pub(crate) struct LoadedImage {
     pub annotations: Vec<labello_domain::AnnotationVersion>,
     pub state: ImageState,
     pub color_image: Option<egui::ColorImage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FolderUploadProgress {
+    pub uploaded_files: u32,
+    pub total_files: u32,
+    pub current_batch: u32,
+    pub message: String,
+}
+
+impl FolderUploadProgress {
+    pub(crate) fn fraction(&self) -> f32 {
+        if self.total_files == 0 {
+            0.0
+        } else {
+            (self.uploaded_files as f32 / self.total_files as f32).clamp(0.0, 1.0)
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        if self.total_files == 0 {
+            self.message.clone()
+        } else {
+            format!(
+                "{} of {} files - {}",
+                self.uploaded_files, self.total_files, self.message
+            )
+        }
+    }
 }
 
 pub(crate) struct RuntimeState {
@@ -185,6 +215,7 @@ pub(crate) struct LoadingState {
     pub saving: bool,
     pub ingesting: bool,
     pub uploading: bool,
+    pub upload_progress: Option<FolderUploadProgress>,
     pub stats: bool,
 }
 

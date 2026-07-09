@@ -71,8 +71,11 @@ impl LabelloApp {
         theme::card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Datasets");
-                if self.loading.datasets {
+                if self.loading.datasets || self.loading.dataset {
                     ui.spinner();
+                }
+                if self.loading.dataset {
+                    ui.small("Opening dataset...");
                 }
                 if ui
                     .button("Refresh")
