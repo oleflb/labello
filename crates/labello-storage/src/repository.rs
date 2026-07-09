@@ -5,8 +5,8 @@ use std::{
 };
 
 use labello_domain::{
-    Actor, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageState, ImagesIndex,
-    SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
+    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageState,
+    ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
 };
 use parking_lot::Mutex;
 use tokio::{io::AsyncWriteExt, sync::Mutex as AsyncMutex};
@@ -14,6 +14,7 @@ use tokio::{io::AsyncWriteExt, sync::Mutex as AsyncMutex};
 use crate::{
     error::{PathIo, PathJson, StorageError, StorageResult},
     fsjson::{read_json, write_json_atomic},
+    fstoml::{read_toml, write_toml_atomic},
     paths,
 };
 
@@ -103,14 +104,25 @@ impl DatasetRepository {
     }
 
     pub async fn load_dataset(&self) -> StorageResult<DatasetMetadata> {
-        let metadata: DatasetMetadata = read_json(&self.dataset_path()).await?;
-        labello_domain::validate_schema_version(metadata.schema_version)?;
-        Ok(metadata)
+        let config: DatasetConfig = read_toml(&self.dataset_path()).await?;
+        labello_domain::validate_schema_version(config.schema_version)?;
+        let images = self
+            .load_images_index()
+            .await?
+            .images_by_hash
+            .into_values()
+            .map(|record| (record.image_id.clone(), record))
+            .collect();
+        Ok(config.into_metadata(images))
     }
 
     pub async fn save_dataset(&self, metadata: &DatasetMetadata) -> StorageResult<()> {
         labello_domain::validate_schema_version(metadata.schema_version)?;
-        write_json_atomic(&self.dataset_path(), metadata).await
+        write_toml_atomic(
+            &self.dataset_path(),
+            &DatasetConfig::from_metadata(metadata),
+        )
+        .await
     }
 
     pub async fn load_images_index(&self) -> StorageResult<ImagesIndex> {

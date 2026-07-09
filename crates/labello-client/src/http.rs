@@ -9,15 +9,17 @@ use url::Url;
 
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
-    ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, ImageApi, ImageFile,
-    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
+    ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi,
+    ImageFile, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
     OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
+    UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct AuthHeaders {
     pub user_id: Option<UserId>,
     pub role: Option<labello_domain::DatasetRole>,
+    pub dev_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -53,6 +55,9 @@ impl HttpLabelloApi {
         if let Some(role) = &self.auth.role {
             request = request.header("x-user-role", role.to_string());
         }
+        if let Some(token) = &self.auth.dev_token {
+            request = request.header("x-dev-token", token);
+        }
         Ok(request)
     }
 
@@ -78,6 +83,12 @@ impl HttpLabelloApi {
 }
 
 impl DatasetApi for HttpLabelloApi {
+    fn list_datasets<'a>(&'a self) -> crate::ApiFuture<'a, Vec<DatasetSummary>> {
+        Box::pin(
+            async move { Self::json(self.request(Method::GET, "/datasets")?.send().await?).await },
+        )
+    }
+
     fn create_dataset<'a>(
         &'a self,
         request: CreateDatasetRequest,
@@ -96,6 +107,34 @@ impl DatasetApi for HttpLabelloApi {
                 self.request(Method::GET, &format!("/datasets/{dataset_id}"))?
                     .send()
                     .await?,
+            )
+            .await
+        })
+    }
+
+    fn get_admin_dataset<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, DatasetMetadata> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::GET, &format!("/datasets/{dataset_id}/admin"))?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
+    fn update_dataset_config<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: UpdateDatasetConfigRequest,
+    ) -> crate::ApiFuture<'a, DatasetMetadata> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(Method::PUT, &format!("/datasets/{dataset_id}/admin"))?,
+                &request,
             )
             .await
         })

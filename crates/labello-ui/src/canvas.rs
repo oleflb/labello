@@ -18,6 +18,7 @@ pub struct CanvasState {
 pub fn show_canvas(
     ui: &mut Ui,
     state: &mut CanvasState,
+    texture: Option<&egui::TextureHandle>,
     annotations: &[AnnotationVersion],
     image_size: [u32; 2],
     bounding_box_tool: bool,
@@ -31,18 +32,27 @@ pub fn show_canvas(
         canvas_size.y = canvas_size.x / image_ratio;
     }
     let (rect, response) = ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
-    paint_canvas(ui, rect, annotations, state.draft_box);
+    paint_canvas(ui, rect, texture, annotations, state.draft_box);
     handle_pointer(response, rect, state, annotations, bounding_box_tool)
 }
 
 fn paint_canvas(
     ui: &Ui,
     rect: Rect,
+    texture: Option<&egui::TextureHandle>,
     annotations: &[AnnotationVersion],
     draft_box: Option<BoundingBox>,
 ) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::same(18), Color32::from_rgb(18, 23, 34));
+    if let Some(texture) = texture {
+        painter.image(
+            texture.id(),
+            rect,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
     painter.rect_stroke(
         rect,
         CornerRadius::same(18),

@@ -3,6 +3,7 @@
 pub mod assignment;
 pub mod error;
 pub mod fsjson;
+pub mod fstoml;
 pub mod ingest;
 pub mod keybindings;
 pub mod paths;

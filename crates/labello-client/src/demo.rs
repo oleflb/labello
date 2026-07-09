@@ -9,9 +9,10 @@ use labello_domain::{
 
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
-    CorrectionRequest, CreateDatasetRequest, DatasetApi, ImageApi, ImageFile, IngestReport,
-    KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
-    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
+    CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi, ImageFile,
+    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
+    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
+    UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Default)]
@@ -49,6 +50,23 @@ impl DemoLabelloApi {
 }
 
 impl DatasetApi for DemoLabelloApi {
+    fn list_datasets<'a>(&'a self) -> crate::ApiFuture<'a, Vec<DatasetSummary>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .borrow()
+                .datasets
+                .values()
+                .map(|metadata| DatasetSummary {
+                    dataset_id: metadata.dataset_id.clone(),
+                    name: metadata.name.clone(),
+                    roles: Vec::new(),
+                    total_images: metadata.images.len(),
+                })
+                .collect())
+        })
+    }
+
     fn create_dataset<'a>(
         &'a self,
         request: CreateDatasetRequest,
@@ -72,6 +90,36 @@ impl DatasetApi for DemoLabelloApi {
         dataset_id: &'a DatasetId,
     ) -> crate::ApiFuture<'a, DatasetMetadata> {
         Box::pin(async move { self.dataset(dataset_id) })
+    }
+
+    fn get_admin_dataset<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, DatasetMetadata> {
+        self.get_dataset(dataset_id)
+    }
+
+    fn update_dataset_config<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: UpdateDatasetConfigRequest,
+    ) -> crate::ApiFuture<'a, DatasetMetadata> {
+        Box::pin(async move {
+            let mut state = self.state.borrow_mut();
+            let metadata = state
+                .datasets
+                .get_mut(dataset_id)
+                .ok_or_else(|| ClientError::Demo(format!("dataset {dataset_id} does not exist")))?;
+            metadata.name = request.name;
+            metadata.image_roots = request.image_roots;
+            metadata.label_classes = request.label_classes;
+            metadata.tasks = request.tasks;
+            metadata.role_assignments = request.role_assignments;
+            metadata.imbalance = request.imbalance;
+            metadata.prelabel_configs = request.prelabel_configs;
+            metadata.updated_at = labello_domain::now();
+            Ok(metadata.clone())
+        })
     }
 
     fn ingest_dataset<'a>(

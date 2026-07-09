@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use labello_domain::{ImageId, ImageRecord};
@@ -47,59 +47,70 @@ impl DatasetRepository {
         let mut index = self.load_images_index().await?;
         let mut report = IngestReport::default();
         let mut path_to_hash = path_to_hash(&metadata.images);
-        let scan_root = self.scan_root().await?;
         let mut seen_by_hash: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-        for entry in WalkDir::new(&scan_root)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_path_buf();
-            let Ok(relative_path) = self.relative_path(&path) else {
-                report.unreadable_files.push(path.display().to_string());
-                continue;
-            };
-            if !looks_like_image(&path) {
+        for scan_root in self.scan_roots(&metadata).await? {
+            if !tokio::fs::try_exists(&scan_root)
+                .await
+                .with_path(&scan_root)?
+            {
+                report
+                    .unreadable_files
+                    .push(self.relative_path_lossy(&scan_root));
                 continue;
             }
-            report.discovered_files += 1;
-            match read_image_record(&path, &relative_path).await {
-                Ok((hash, partial)) => {
-                    if let Some(previous_hash) = path_to_hash.get(&relative_path)
-                        && previous_hash != &hash
-                    {
-                        report.changed_paths.push(ChangedPath {
-                            relative_path: relative_path.clone(),
-                            previous_blake3: previous_hash.clone(),
-                            current_blake3: hash.clone(),
-                        });
-                    }
-                    seen_by_hash
-                        .entry(hash.clone())
-                        .or_default()
-                        .insert(relative_path.clone());
-                    if let Some(existing) = index.images_by_hash.get_mut(&hash) {
-                        if !existing.known_paths.contains(&relative_path) {
-                            existing.known_paths.push(relative_path.clone());
-                        }
-                        if relative_path != existing.canonical_path
-                            && !existing.duplicate_paths.contains(&relative_path)
-                        {
-                            existing.duplicate_paths.push(relative_path.clone());
-                        }
-                        report.duplicate_files.push(DuplicateImage {
-                            image_id: existing.image_id.clone(),
-                            canonical_path: existing.canonical_path.clone(),
-                            duplicate_path: relative_path,
-                            blake3: hash,
-                        });
-                    } else {
-                        index.images_by_hash.insert(hash.clone(), partial);
-                        report.new_images += 1;
-                    }
+
+            for entry in WalkDir::new(&scan_root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+            {
+                let path = entry.path().to_path_buf();
+                let Ok(relative_path) = self.relative_path(&path) else {
+                    report.unreadable_files.push(path.display().to_string());
+                    continue;
+                };
+                if !looks_like_image(&path) {
+                    continue;
                 }
-                Err(_) => report.unreadable_files.push(relative_path),
+                report.discovered_files += 1;
+                match read_image_record(&path, &relative_path).await {
+                    Ok((hash, partial)) => {
+                        if let Some(previous_hash) = path_to_hash.get(&relative_path)
+                            && previous_hash != &hash
+                        {
+                            report.changed_paths.push(ChangedPath {
+                                relative_path: relative_path.clone(),
+                                previous_blake3: previous_hash.clone(),
+                                current_blake3: hash.clone(),
+                            });
+                        }
+                        seen_by_hash
+                            .entry(hash.clone())
+                            .or_default()
+                            .insert(relative_path.clone());
+                        if let Some(existing) = index.images_by_hash.get_mut(&hash) {
+                            if !existing.known_paths.contains(&relative_path) {
+                                existing.known_paths.push(relative_path.clone());
+                            }
+                            if relative_path != existing.canonical_path
+                                && !existing.duplicate_paths.contains(&relative_path)
+                            {
+                                existing.duplicate_paths.push(relative_path.clone());
+                            }
+                            report.duplicate_files.push(DuplicateImage {
+                                image_id: existing.image_id.clone(),
+                                canonical_path: existing.canonical_path.clone(),
+                                duplicate_path: relative_path,
+                                blake3: hash,
+                            });
+                        } else {
+                            index.images_by_hash.insert(hash.clone(), partial);
+                            report.new_images += 1;
+                        }
+                    }
+                    Err(_) => report.unreadable_files.push(relative_path),
+                }
             }
         }
 
@@ -134,13 +145,35 @@ impl DatasetRepository {
         Ok(report)
     }
 
-    async fn scan_root(&self) -> StorageResult<PathBuf> {
-        let images = self.root().join(paths::IMAGES_DIR);
-        if tokio::fs::try_exists(&images).await.with_path(&images)? {
-            Ok(images)
+    async fn scan_roots(
+        &self,
+        metadata: &labello_domain::DatasetMetadata,
+    ) -> StorageResult<Vec<PathBuf>> {
+        let roots = if metadata.image_roots.is_empty() {
+            vec![paths::IMAGES_DIR.to_string()]
         } else {
-            Ok(self.root().to_path_buf())
+            metadata.image_roots.clone()
+        };
+        roots
+            .into_iter()
+            .map(|root| self.safe_relative_root(&root))
+            .collect()
+    }
+
+    pub fn safe_relative_root(&self, relative_root: &str) -> StorageResult<PathBuf> {
+        let path = Path::new(relative_root);
+        if relative_root.trim().is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(StorageError::OutsideDatasetRoot(path.to_path_buf()));
         }
+        Ok(self.root().join(path))
     }
 
     fn relative_path(&self, path: &Path) -> StorageResult<String> {
@@ -152,6 +185,11 @@ impl DatasetRepository {
             .map(|component| component.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/"))
+    }
+
+    fn relative_path_lossy(&self, path: &Path) -> String {
+        self.relative_path(path)
+            .unwrap_or_else(|_| path.display().to_string())
     }
 }
 
@@ -245,6 +283,33 @@ mod tests {
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 2);
         assert_eq!(image.duplicate_paths.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scans_configured_image_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        let mut metadata = DatasetMetadata::new(DatasetId::from("ds"), "Dataset", now());
+        metadata.image_roots = vec!["images".to_string(), "imports/batch-1".to_string()];
+        repo.initialize(metadata).await.unwrap();
+        tokio::fs::create_dir_all(temp.path().join("imports/batch-1"))
+            .await
+            .unwrap();
+        write_png(&temp.path().join("imports/batch-1/a.png"));
+
+        let report = repo.ingest_images().await.unwrap();
+        let metadata = repo.load_dataset().await.unwrap();
+        assert_eq!(report.new_images, 1);
+        let image = metadata.images.values().next().unwrap();
+        assert_eq!(image.canonical_path, "imports/batch-1/a.png");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_image_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        assert!(repo.safe_relative_root("../outside").is_err());
+        assert!(repo.safe_relative_root("/tmp/images").is_err());
     }
 
     fn write_png(path: &Path) {

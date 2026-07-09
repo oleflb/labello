@@ -2,7 +2,7 @@ use labello_domain::{KeybindingSet, UserId};
 
 use crate::{
     DatasetRepository, StorageResult,
-    fsjson::{read_json, write_json_atomic},
+    fstoml::{read_toml, write_toml_atomic},
     paths,
 };
 
@@ -16,7 +16,7 @@ impl DatasetRepository {
                 source,
             })?
         {
-            read_json(&path).await
+            read_toml(&path).await
         } else {
             Ok(KeybindingSet::defaults_for(user_id.clone()))
         }
@@ -24,7 +24,7 @@ impl DatasetRepository {
 
     pub async fn save_keybindings(&self, keybindings: &KeybindingSet) -> StorageResult<()> {
         keybindings.validate_conflicts()?;
-        write_json_atomic(&self.keybindings_path(&keybindings.user_id), keybindings).await
+        write_toml_atomic(&self.keybindings_path(&keybindings.user_id), keybindings).await
     }
 
     fn keybindings_path(&self, user_id: &UserId) -> std::path::PathBuf {

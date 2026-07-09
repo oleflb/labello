@@ -1,9 +1,21 @@
 use axum::http::HeaderMap;
 use labello_domain::{Actor, DatasetMetadata, DatasetRole, UserId};
 
-use crate::error::{ApiError, ApiResult};
+use crate::{
+    ApiState,
+    error::{ApiError, ApiResult},
+};
 
-pub fn actor_from_headers(headers: &HeaderMap) -> ApiResult<Actor> {
+pub fn actor_from_headers(state: &ApiState, headers: &HeaderMap) -> ApiResult<Actor> {
+    if let Some(expected) = state.dev_auth_token() {
+        let provided = header(headers, "x-dev-token")
+            .ok_or_else(|| ApiError::Unauthorized("missing x-dev-token header".to_string()))?;
+        if provided != expected {
+            return Err(ApiError::Unauthorized(
+                "invalid x-dev-token header".to_string(),
+            ));
+        }
+    }
     let user_id = header(headers, "x-user-id")
         .ok_or_else(|| ApiError::Unauthorized("missing x-user-id header".to_string()))?;
     let role = header(headers, "x-user-role")
@@ -30,6 +42,14 @@ pub fn ensure_dataset_role(
     .map_err(|error| ApiError::Unauthorized(error.to_string()))
 }
 
+pub fn has_dataset_role(metadata: &DatasetMetadata, user_id: &UserId, role: &DatasetRole) -> bool {
+    metadata.role_assignments.iter().any(|assignment| {
+        assignment.dataset_id == metadata.dataset_id
+            && &assignment.user_id == user_id
+            && assignment.has_role(role)
+    })
+}
+
 pub fn ensure_any_dataset_role(metadata: &DatasetMetadata, actor: &Actor) -> ApiResult<()> {
     let allowed = metadata.role_assignments.iter().any(|assignment| {
         assignment.dataset_id == metadata.dataset_id
@@ -42,6 +62,21 @@ pub fn ensure_any_dataset_role(metadata: &DatasetMetadata, actor: &Actor) -> Api
         Err(ApiError::Unauthorized(format!(
             "user {} has no role for dataset {}",
             actor.user_id, metadata.dataset_id
+        )))
+    }
+}
+
+pub fn ensure_bootstrap_admin(
+    state: &crate::ApiState,
+    actor: &Actor,
+    action: &str,
+) -> ApiResult<()> {
+    if state.is_bootstrap_admin(&actor.user_id) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(format!(
+            "user {} cannot {action}",
+            actor.user_id
         )))
     }
 }

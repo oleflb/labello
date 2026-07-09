@@ -1,6 +1,7 @@
 use labello_domain::{
-    AnnotationVersion, AssignmentKind, DatasetId, EventPayload, ImageId, ImageRecord,
-    OfflineSyncRequest, PrelabelConfigId, TaskId, UserId,
+    AnnotationVersion, AssignmentKind, ClassId, DatasetId, DatasetRole, DatasetRoleAssignment,
+    EventPayload, ImageId, ImageRecord, ImbalanceConfig, LabelClass, OfflineSyncRequest,
+    PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,48 @@ pub struct CreateDatasetRequest {
     pub dataset_id: DatasetId,
     pub name: String,
     pub admin_user_id: UserId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetSummary {
+    pub dataset_id: DatasetId,
+    pub name: String,
+    pub roles: Vec<DatasetRole>,
+    pub total_images: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDatasetConfigRequest {
+    pub name: String,
+    pub image_roots: Vec<String>,
+    pub label_classes: Vec<LabelClass>,
+    pub tasks: Vec<TaskDefinition>,
+    pub role_assignments: Vec<DatasetRoleAssignment>,
+    pub imbalance: Option<ImbalanceConfig>,
+    pub prelabel_configs: Vec<PrelabelConfig>,
+}
+
+impl UpdateDatasetConfigRequest {
+    pub fn from_metadata(metadata: &labello_domain::DatasetMetadata) -> Self {
+        Self {
+            name: metadata.name.clone(),
+            image_roots: metadata.image_roots.clone(),
+            label_classes: metadata.label_classes.clone(),
+            tasks: metadata.tasks.clone(),
+            role_assignments: metadata.role_assignments.clone(),
+            imbalance: metadata.imbalance.clone(),
+            prelabel_configs: metadata.prelabel_configs.clone(),
+        }
+    }
+
+    pub fn class_ids(&self) -> Vec<ClassId> {
+        self.label_classes
+            .iter()
+            .map(|class| class.class_id.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

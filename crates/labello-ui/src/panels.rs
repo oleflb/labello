@@ -1,8 +1,8 @@
 use eframe::egui::{self, Color32, RichText};
-use labello_domain::AnnotationType;
+use labello_domain::{AdjudicationDecision, AnnotationType, ReviewDecision};
 
 use crate::{
-    app::{LabelloApp, SaveStatus, Tool},
+    app::{AppView, LabelloApp, QueueMode, SaveStatus, Tool},
     canvas::{CanvasAction, show_canvas},
     theme,
 };
@@ -31,26 +31,37 @@ impl LabelloApp {
                 badge(ui, "Offline bundle", theme::AMBER);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.mode_toolbar(ui);
                 if ui.button("Next image").clicked() {
                     self.next_image();
                 }
                 if ui.button("Save").clicked() {
                     self.autosave();
                 }
+                if ui.button("Submit").clicked() {
+                    self.request_save(true);
+                }
                 ui.toggle_value(&mut self.show_tutorial, "Tutorial");
                 ui.toggle_value(&mut self.offline, "Offline");
             });
         });
+        if let Some(error) = &self.runtime.error {
+            ui.colored_label(theme::AMBER, error);
+        }
     }
 
     pub(crate) fn task_panel(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.view, AppView::Setup | AppView::Admin | AppView::Stats) {
+            return;
+        }
         ui.heading(RichText::new("Task Focus").color(theme::TEXT));
         ui.label(
             RichText::new("Only the active task's classes and tools are shown.")
                 .color(theme::MUTED),
         );
         ui.add_space(8.0);
-        for (index, task) in self.tasks.iter().enumerate() {
+        let tasks = self.tasks.clone();
+        for (index, task) in tasks.iter().enumerate() {
             let selected = self.selected_task == index;
             theme::card_frame().show(ui, |ui| {
                 if ui
@@ -67,6 +78,11 @@ impl LabelloApp {
             });
         }
         ui.add_space(10.0);
+        ui.label(RichText::new("Queue Mode").strong());
+        ui.selectable_value(&mut self.queue_mode, QueueMode::Annotate, "Annotate");
+        ui.selectable_value(&mut self.queue_mode, QueueMode::Review, "Review");
+        ui.selectable_value(&mut self.queue_mode, QueueMode::Adjudicate, "Adjudicate");
+        ui.separator();
         ui.label(RichText::new("Tools").strong());
         ui.selectable_value(&mut self.tool, Tool::BoundingBox, "Bounding box");
         ui.selectable_value(&mut self.tool, Tool::Keypoints, "Keypoints");
@@ -83,7 +99,11 @@ impl LabelloApp {
             .changed()
         {
             self.queue.set_queue_size(queue_size);
-            self.replenish_demo_queue();
+            if self.runtime.api.is_some() {
+                self.request_next_image();
+            } else {
+                self.replenish_demo_queue();
+            }
         }
         if self.queue.is_loading() || self.current.is_none() {
             ui.colored_label(theme::AMBER, "Loading next image...");
@@ -93,6 +113,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.view, AppView::Setup | AppView::Admin | AppView::Stats) {
+            return;
+        }
         ui.heading(RichText::new("Review & Sync").color(theme::TEXT));
         let active_count = self
             .annotations
@@ -103,10 +126,26 @@ impl LabelloApp {
         metric(ui, "Review cursor", (self.review_index + 1).to_string());
         ui.horizontal(|ui| {
             if ui.button("Approve y").clicked() {
-                self.review_index = self.review_index.saturating_add(1);
+                if self.runtime.api.is_some() {
+                    self.request_review(ReviewDecision::Approved);
+                } else {
+                    self.review_index = self.review_index.saturating_add(1);
+                }
             }
             if ui.button("Reject n").clicked() {
-                self.save_status = SaveStatus::Dirty;
+                if self.runtime.api.is_some() {
+                    self.request_review(ReviewDecision::Rejected);
+                } else {
+                    self.save_status = SaveStatus::Dirty;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Adjudicate accept").clicked() {
+                self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
+            }
+            if ui.button("Needs correction").clicked() {
+                self.request_adjudication(AdjudicationDecision::NeedsCorrection);
             }
         });
         ui.separator();
@@ -150,6 +189,21 @@ impl LabelloApp {
     }
 
     pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
+        match self.view {
+            AppView::Setup => {
+                self.setup_view(ui);
+                return;
+            }
+            AppView::Admin => {
+                self.admin_view(ui);
+                return;
+            }
+            AppView::Stats => {
+                self.stats_view(ui);
+                return;
+            }
+            AppView::Annotate => {}
+        }
         if self.show_tutorial
             && let Some(task) = self.selected_task()
         {
@@ -162,7 +216,7 @@ impl LabelloApp {
             });
             ui.add_space(12.0);
         }
-        if let Some(current) = &self.current {
+        if let Some(current) = self.current.clone() {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&current.image.file_name)
@@ -178,12 +232,16 @@ impl LabelloApp {
                 );
             });
             ui.add_space(8.0);
+            let texture = self.current_texture.clone();
+            let annotations = self.annotations.clone();
+            let bounding_box_tool = self.tool == Tool::BoundingBox;
             let action = show_canvas(
                 ui,
                 &mut self.canvas,
-                &self.annotations,
+                texture.as_ref(),
+                &annotations,
                 [current.image.width, current.image.height],
-                self.tool == Tool::BoundingBox,
+                bounding_box_tool,
             );
             match action {
                 Some(CanvasAction::CreateBoundingBox(bbox)) => self.create_bbox(bbox),

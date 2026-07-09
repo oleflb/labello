@@ -10,7 +10,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 eframe.workspace = true
+labello-domain = { path = "../../crates/labello-domain" }
 labello-ui = { path = "../../crates/labello-ui" }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys = { workspace = true, features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
+web-sys = { workspace = true, features = ["Document", "Element", "HtmlCanvasElement", "Location", "UrlSearchParams", "Window"] }
