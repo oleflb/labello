@@ -140,11 +140,12 @@ fn handle_pointer(
     if !bounding_box_tool {
         return None;
     }
-    if response.drag_started() {
+    let pointer_down_on_canvas = response.is_pointer_button_down_on();
+    if state.drag_start.is_none() && (response.drag_started() || pointer_down_on_canvas) {
         state.drag_start = response.interact_pointer_pos();
         state.draft_box = None;
     }
-    if response.dragged()
+    if (response.dragged() || pointer_down_on_canvas)
         && let (Some(start), Some(current)) = (state.drag_start, response.interact_pointer_pos())
     {
         state.draft_box = bbox_from_points(rect, start, current);

@@ -5,16 +5,13 @@ use std::{
 };
 
 use eframe::egui;
-use egui_kittest::{
-    Harness,
-    kittest::{NodeT, Queryable},
-};
+use egui_kittest::{Harness, kittest::Queryable};
 use labello_client::{
     AdjudicationApi, AnnotationApi, ApiFuture, AppendEventRequest, AssignNextRequest, AuthApi,
-    ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi,
-    DatasetSummary, ImageApi, ImageFile, ImagePreview, IngestReport, KeybindingApi,
-    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
-    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary,
+    ImageApi, ImageFile, ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
+    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
@@ -36,10 +33,10 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
 
     assert!(harness.query_by_label("Connect To Labello").is_some());
     assert!(harness.query_by_label("Open").is_some());
-    assert!(harness.query_by_label("Admin").is_some());
+    assert!(harness.query_all_by_label("Admin").next().is_some());
 
     click(&mut harness, "Create as current user");
-    step_until(&mut harness, 12, |app| app.datasets.metadata.is_some());
+    step_until(&mut harness, 20, |app| app.current.is_some());
     assert_eq!(api.counts().create_dataset, 1);
     assert_eq!(harness.state().view, AppView::Annotate);
     assert!(harness.state().current.is_some());
@@ -56,44 +53,10 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
 fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_admin_harness(api.clone());
+    harness.set_size(egui::vec2(1180.0, 4000.0));
+    harness.step();
 
     assert!(harness.query_by_label("Dataset Admin").is_some());
-    click(&mut harness, "Add image root");
-    harness.step();
-    click(&mut harness, "Add label");
-    harness.step();
-    click(&mut harness, "Add task");
-    harness.step();
-    click(&mut harness, "Add prelabel config");
-    harness.step();
-    click(&mut harness, "Add role assignment");
-    harness.step();
-
-    let config = harness.state().datasets.admin_config.as_ref().unwrap();
-    assert_eq!(config.image_roots.len(), 2);
-    assert_eq!(config.label_classes.len(), 3);
-    assert_eq!(config.tasks.len(), 3);
-    assert_eq!(config.prelabel_configs.len(), 2);
-    assert_eq!(config.role_assignments.len(), 2);
-
-    click(&mut harness, "Save Admin Config");
-    step_until(&mut harness, 8, |app| !app.loading.admin);
-    assert_eq!(api.counts().update_dataset_config, 1);
-    assert!(api.metadata().label_classes.len() >= 3);
-
-    click(&mut harness, "Run Ingest");
-    step_until(&mut harness, 8, |app| !app.loading.ingesting);
-    assert_eq!(api.counts().ingest_dataset, 1);
-    assert!(
-        harness
-            .state()
-            .runtime
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Ingested")
-    );
-
     click(&mut harness, "Pick folder and upload");
     harness.step();
     assert!(!harness.state().loading.uploading);
@@ -106,6 +69,45 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
             .unwrap_or_default()
             .contains("browser build")
     );
+
+    click_accesskit_button(&mut harness, "Add image root");
+    harness.step();
+    click_accesskit_button(&mut harness, "Add label");
+    harness.step();
+    click_accesskit_button(&mut harness, "Add task");
+    harness.step();
+    click_accesskit_button(&mut harness, "Add browser prelabel config");
+    harness.step();
+    click_accesskit_button(&mut harness, "Add role assignment");
+    harness.step();
+
+    let config = harness.state().datasets.admin_config.as_ref().unwrap();
+    assert_eq!(config.image_roots.len(), 2);
+    assert_eq!(config.label_classes.len(), 3);
+    assert_eq!(config.tasks.len(), 3);
+    assert_eq!(config.prelabel_configs.len(), 2);
+    assert_eq!(config.role_assignments.len(), 2);
+
+    click_accesskit_button(&mut harness, "Save Admin Config");
+    step_until(&mut harness, 8, |_| api.counts().update_dataset_config == 1);
+    assert_eq!(api.counts().update_dataset_config, 1);
+    assert!(api.metadata().label_classes.len() >= 3);
+
+    click(&mut harness, "Admin");
+    step_until(&mut harness, 8, |app| app.view == AppView::Admin);
+    click_scrolling(&mut harness, "Run Ingest");
+    step_until(&mut harness, 8, |_| api.counts().ingest_dataset == 1);
+    assert_eq!(api.counts().ingest_dataset, 1);
+    harness.step();
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Ingested")
+    );
 }
 
 #[test]
@@ -116,7 +118,11 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 
     click(&mut harness, "Tutorial");
     harness.step();
-    assert!(harness.query_by_label("Label every visible person").is_some());
+    assert!(
+        harness
+            .query_by_label("Label every visible person")
+            .is_some()
+    );
 
     click(&mut harness, "Accept");
     harness.step();
@@ -125,9 +131,14 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 
     let canvas = harness.get_by_label("Annotation canvas");
     let rect = canvas.rect();
-    harness.drag_at(rect.left_top() + egui::vec2(40.0, 40.0));
+    assert!(rect.width() > 100.0 && rect.height() > 100.0);
+    let start = rect.left_top() + rect.size() * 0.55;
+    let end = rect.left_top() + rect.size() * 0.82;
+    harness.drag_at(start);
     harness.step();
-    harness.drop_at(rect.left_top() + egui::vec2(180.0, 160.0));
+    harness.hover_at(end);
+    harness.step();
+    harness.drop_at(end);
     harness.step();
     assert_eq!(harness.state().annotations.len(), 2);
 
@@ -138,7 +149,9 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert_eq!(counts.rebuild_image, 1);
 
     click(&mut harness, "Submit");
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved && !app.loading.saving);
+    step_until(&mut harness, 10, |app| {
+        app.save_status == SaveStatus::Saved && !app.loading.saving
+    });
     assert!(api.events().iter().any(|payload| matches!(
         payload,
         EventPayload::TaskStateChanged { task_state }
@@ -221,6 +234,8 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
     app.start_next_command();
     assert_eq!(app.runtime.commands.len(), 62);
 
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    app.setup.started = true;
     for index in 0..20 {
         app.runtime
             .tx
@@ -271,8 +286,60 @@ fn base_live_app(api: Rc<SpyApi>) -> LabelloApp {
 }
 
 fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
-    harness.get_by_label(label).click();
+    let clicked = click_visible(harness, label);
+    assert!(clicked, "button or label {label:?} was not visible");
     harness.step();
+}
+
+fn click_accesskit_button(harness: &mut Harness<'static, LabelloApp>, label: &str) {
+    harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+        .next()
+        .unwrap()
+        .click_accesskit();
+    harness.step();
+}
+
+fn click_scrolling(harness: &mut Harness<'static, LabelloApp>, label: &str) {
+    for _ in 0..16 {
+        let clicked = click_visible(harness, label);
+        if clicked {
+            harness.step();
+            return;
+        }
+        {
+            for anchor in [
+                "Dataset",
+                "Image Roots",
+                "Labels",
+                "Tasks",
+                "Prelabels",
+                "Roles",
+            ] {
+                if let Some(node) = harness.query_all_by_label(anchor).next() {
+                    node.scroll_down();
+                    break;
+                }
+            }
+        }
+        harness.step();
+    }
+    panic!("button {label:?} did not become visible after scrolling");
+}
+
+fn click_visible(harness: &Harness<'static, LabelloApp>, label: &str) -> bool {
+    if let Some(node) = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+        .next()
+    {
+        node.click();
+        true
+    } else if let Some(node) = harness.query_all_by_label(label).next() {
+        node.click();
+        true
+    } else {
+        false
+    }
 }
 
 fn step_until(
@@ -362,7 +429,10 @@ impl SpyState {
             },
         ];
         metadata.prelabel_configs = vec![prelabel_config("demo-prelabel")];
-        metadata.tasks = vec![task("bounding_box:person", "Person boxes", vec!["demo-prelabel"]), task("bounding_box:vehicle", "Vehicle boxes", Vec::new())];
+        metadata.tasks = vec![
+            task("bounding_box:person", "Person boxes", vec!["demo-prelabel"]),
+            task("bounding_box:vehicle", "Vehicle boxes", Vec::new()),
+        ];
         metadata.role_assignments = vec![DatasetRoleAssignment {
             dataset_id: metadata.dataset_id.clone(),
             user_id: UserId::from("admin"),
@@ -425,7 +495,10 @@ impl DatasetApi for SpyApi {
         }]))
     }
 
-    fn create_dataset<'a>(&'a self, request: CreateDatasetRequest) -> ApiFuture<'a, DatasetMetadata> {
+    fn create_dataset<'a>(
+        &'a self,
+        request: CreateDatasetRequest,
+    ) -> ApiFuture<'a, DatasetMetadata> {
         let mut state = self.state.borrow_mut();
         state.counts.create_dataset += 1;
         state.metadata.dataset_id = request.dataset_id;
@@ -439,13 +512,18 @@ impl DatasetApi for SpyApi {
         ready(Ok(state.metadata.clone()))
     }
 
-    fn get_admin_dataset<'a>(&'a self, dataset_id: &'a DatasetId) -> ApiFuture<'a, DatasetMetadata> {
+    fn get_admin_dataset<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, DatasetMetadata> {
         let mut state = self.state.borrow_mut();
         state.counts.get_admin_dataset += 1;
         if dataset_id == &state.metadata.dataset_id {
             ready(Ok(state.metadata.clone()))
         } else {
-            ready(Err(ClientError::Demo(format!("missing dataset {dataset_id}"))))
+            ready(Err(ClientError::Demo(format!(
+                "missing dataset {dataset_id}"
+            ))))
         }
     }
 
@@ -481,7 +559,11 @@ impl TaskApi for SpyApi {
         ready(Ok(self.state.borrow().metadata.tasks.clone()))
     }
 
-    fn add_task<'a>(&'a self, _dataset_id: &'a DatasetId, task: TaskDefinition) -> ApiFuture<'a, TaskDefinition> {
+    fn add_task<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        task: TaskDefinition,
+    ) -> ApiFuture<'a, TaskDefinition> {
         ready(Ok(task))
     }
 }
@@ -514,19 +596,35 @@ impl ImageApi for SpyApi {
         })))
     }
 
-    fn get_image_state<'a>(&'a self, _dataset_id: &'a DatasetId, image_id: &'a ImageId) -> ApiFuture<'a, ImageState> {
+    fn get_image_state<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, ImageState> {
         let mut state = self.state.borrow_mut();
         state.counts.get_image_state += 1;
-        ready(Ok(state.states.get(image_id).cloned().unwrap_or_else(|| ImageState::new(image_id.clone()))))
+        ready(Ok(state
+            .states
+            .get(image_id)
+            .cloned()
+            .unwrap_or_else(|| ImageState::new(image_id.clone()))))
     }
 
-    fn get_image_record<'a>(&'a self, _dataset_id: &'a DatasetId, image_id: &'a ImageId) -> ApiFuture<'a, ImageRecord> {
+    fn get_image_record<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, ImageRecord> {
         let mut state = self.state.borrow_mut();
         state.counts.get_image_record += 1;
         ready(state.record(image_id))
     }
 
-    fn get_image_file<'a>(&'a self, _dataset_id: &'a DatasetId, image_id: &'a ImageId) -> ApiFuture<'a, ImageFile> {
+    fn get_image_file<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, ImageFile> {
         ready(Ok(ImageFile {
             image_id: image_id.clone(),
             media_type: "image/png".to_string(),
@@ -545,14 +643,22 @@ impl ImageApi for SpyApi {
             image_id: image_id.clone(),
             width: 4,
             height: 3,
-            rgba: vec![32, 48, 64, 255].repeat(12),
+            rgba: [32, 48, 64, 255].repeat(12),
         }))
     }
 
-    fn rebuild_image<'a>(&'a self, _dataset_id: &'a DatasetId, image_id: &'a ImageId) -> ApiFuture<'a, ImageState> {
+    fn rebuild_image<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, ImageState> {
         let mut state = self.state.borrow_mut();
         state.counts.rebuild_image += 1;
-        ready(Ok(state.states.get(image_id).cloned().unwrap_or_else(|| ImageState::new(image_id.clone()))))
+        ready(Ok(state
+            .states
+            .get(image_id)
+            .cloned()
+            .unwrap_or_else(|| ImageState::new(image_id.clone()))))
     }
 }
 
@@ -656,7 +762,11 @@ impl AdjudicationApi for SpyApi {
 }
 
 impl OfflineApi for SpyApi {
-    fn offline_bundle<'a>(&'a self, _dataset_id: &'a DatasetId, _request: OfflineBundleRequest) -> ApiFuture<'a, OfflineBundle> {
+    fn offline_bundle<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: OfflineBundleRequest,
+    ) -> ApiFuture<'a, OfflineBundle> {
         let state = self.state.borrow();
         ready(Ok(OfflineBundle {
             schema_version: SCHEMA_VERSION,
@@ -670,7 +780,11 @@ impl OfflineApi for SpyApi {
         }))
     }
 
-    fn sync_offline_events<'a>(&'a self, _dataset_id: &'a DatasetId, _request: OfflineSyncRequest) -> ApiFuture<'a, OfflineSyncResult> {
+    fn sync_offline_events<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: OfflineSyncRequest,
+    ) -> ApiFuture<'a, OfflineSyncResult> {
         ready(Ok(OfflineSyncResult {
             merged_events: 0,
             conflicts: Vec::new(),
@@ -687,22 +801,37 @@ impl StatsApi for SpyApi {
 }
 
 impl KeybindingApi for SpyApi {
-    fn get_keybindings<'a>(&'a self, _dataset_id: &'a DatasetId, user_id: &'a UserId) -> ApiFuture<'a, KeybindingSet> {
+    fn get_keybindings<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        user_id: &'a UserId,
+    ) -> ApiFuture<'a, KeybindingSet> {
         self.state.borrow_mut().counts.get_keybindings += 1;
         ready(Ok(KeybindingSet::defaults_for(user_id.clone())))
     }
 
-    fn save_keybindings<'a>(&'a self, _dataset_id: &'a DatasetId, keybindings: KeybindingSet) -> ApiFuture<'a, KeybindingSet> {
+    fn save_keybindings<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        keybindings: KeybindingSet,
+    ) -> ApiFuture<'a, KeybindingSet> {
         ready(Ok(keybindings))
     }
 }
 
 impl PrelabelApi for SpyApi {
-    fn list_prelabel_configs<'a>(&'a self, _dataset_id: &'a DatasetId) -> ApiFuture<'a, Vec<PrelabelConfig>> {
+    fn list_prelabel_configs<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, Vec<PrelabelConfig>> {
         ready(Ok(self.state.borrow().metadata.prelabel_configs.clone()))
     }
 
-    fn add_prelabel_config<'a>(&'a self, _dataset_id: &'a DatasetId, config: PrelabelConfig) -> ApiFuture<'a, PrelabelConfig> {
+    fn add_prelabel_config<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        config: PrelabelConfig,
+    ) -> ApiFuture<'a, PrelabelConfig> {
         ready(Ok(config))
     }
 
