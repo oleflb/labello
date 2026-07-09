@@ -6,7 +6,9 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
-use labello_client::{CreateDatasetRequest, DatasetSummary, UpdateDatasetConfigRequest};
+use labello_client::{
+    CreateDatasetRequest, DatasetSummary, IngestJob, IngestJobStatus, UpdateDatasetConfigRequest,
+};
 use labello_domain::{
     Actor, AnnotationSource, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment,
     EventPayload, ImageId, PrelabelConfig, TaskDefinition,
@@ -25,6 +27,8 @@ use crate::{
 mod oauth_routes;
 mod workflow;
 
+const MAX_INGEST_REPORT_DETAILS: usize = 100;
+
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -37,6 +41,11 @@ pub fn router(state: ApiState) -> Router {
             get(get_admin_dataset).put(update_dataset_config),
         )
         .route("/datasets/{dataset_id}/ingest", post(ingest_dataset))
+        .route("/datasets/{dataset_id}/ingest-jobs", post(start_ingest_job))
+        .route(
+            "/datasets/{dataset_id}/ingest-jobs/{job_id}",
+            get(get_ingest_job),
+        )
         .route("/datasets/{dataset_id}/uploads", post(upload_images))
         .route(
             "/datasets/{dataset_id}/tasks",
@@ -262,6 +271,62 @@ async fn ingest_dataset(
     Ok(Json(storage_ingest_to_client(repo.ingest_images().await?)))
 }
 
+async fn start_ingest_job(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+) -> ApiResult<Json<IngestJob>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id);
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let job = IngestJob {
+        job_id: uuid::Uuid::new_v4().to_string(),
+        dataset_id: dataset_id.clone(),
+        status: IngestJobStatus::Running,
+        report: None,
+        error: None,
+    };
+    state.put_ingest_job(job.clone()).await;
+
+    let state_for_job = state.clone();
+    let job_for_task = job.clone();
+    tokio::spawn(async move {
+        let repo = state_for_job.repo(&dataset_id);
+        let mut finished = job_for_task;
+        match repo.ingest_images().await {
+            Ok(report) => {
+                finished.status = IngestJobStatus::Completed;
+                finished.report = Some(storage_ingest_to_client(report));
+            }
+            Err(error) => {
+                finished.status = IngestJobStatus::Failed;
+                finished.error = Some(error.to_string());
+            }
+        }
+        state_for_job.put_ingest_job(finished).await;
+    });
+
+    Ok(Json(job))
+}
+
+async fn get_ingest_job(
+    State(state): State<ApiState>,
+    Path((dataset_id, job_id)): Path<(DatasetId, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<IngestJob>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id);
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let job = state
+        .get_ingest_job(&job_id)
+        .await
+        .filter(|job| job.dataset_id == dataset_id)
+        .ok_or_else(|| ApiError::NotFound(format!("ingest job {job_id}")))?;
+    Ok(Json(job))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UploadQuery {
@@ -346,6 +411,7 @@ fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_cl
         duplicate_files: report
             .duplicate_files
             .into_iter()
+            .take(MAX_INGEST_REPORT_DETAILS)
             .map(|duplicate| labello_client::DuplicateImage {
                 image_id: duplicate.image_id,
                 canonical_path: duplicate.canonical_path,
@@ -356,13 +422,18 @@ fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_cl
         changed_paths: report
             .changed_paths
             .into_iter()
+            .take(MAX_INGEST_REPORT_DETAILS)
             .map(|changed| labello_client::ChangedPath {
                 relative_path: changed.relative_path,
                 previous_blake3: changed.previous_blake3,
                 current_blake3: changed.current_blake3,
             })
             .collect(),
-        unreadable_files: report.unreadable_files,
+        unreadable_files: report
+            .unreadable_files
+            .into_iter()
+            .take(MAX_INGEST_REPORT_DETAILS)
+            .collect(),
     }
 }
 
@@ -654,4 +725,38 @@ fn normalize_roots(roots: Vec<String>) -> Vec<String> {
         normalized.push("images".to_string());
     }
     normalized
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn caps_ingest_report_details() {
+        let report = labello_storage::IngestReport {
+            duplicate_files: (0..150)
+                .map(|index| labello_storage::DuplicateImage {
+                    image_id: ImageId::from(format!("img_{index}")),
+                    canonical_path: format!("images/{index}.png"),
+                    duplicate_path: format!("dupes/{index}.png"),
+                    blake3: format!("hash_{index}"),
+                })
+                .collect(),
+            changed_paths: (0..150)
+                .map(|index| labello_storage::ChangedPath {
+                    relative_path: format!("images/{index}.png"),
+                    previous_blake3: format!("old_{index}"),
+                    current_blake3: format!("new_{index}"),
+                })
+                .collect(),
+            unreadable_files: (0..150).map(|index| format!("bad/{index}.png")).collect(),
+            ..Default::default()
+        };
+
+        let report = storage_ingest_to_client(report);
+
+        assert_eq!(report.duplicate_files.len(), MAX_INGEST_REPORT_DETAILS);
+        assert_eq!(report.changed_paths.len(), MAX_INGEST_REPORT_DETAILS);
+        assert_eq!(report.unreadable_files.len(), MAX_INGEST_REPORT_DETAILS);
+    }
 }

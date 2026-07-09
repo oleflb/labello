@@ -21,6 +21,8 @@ use crate::{
     theme,
 };
 
+pub const IMAGE_QUEUE_SIZE: usize = 8;
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub api_base_url: String,
@@ -39,7 +41,7 @@ impl Default for AppConfig {
             user_id: UserId::from("demo_user"),
             role: DatasetRole::DataAdmin,
             dataset_id: DatasetId::from("demo"),
-            queue_size: 4,
+            queue_size: IMAGE_QUEUE_SIZE,
         }
     }
 }
@@ -191,6 +193,7 @@ pub(crate) struct RuntimeState {
     pub rx: mpsc::Receiver<UiMessage>,
     pub commands: VecDeque<UiCommand>,
     pub error: Option<String>,
+    pub notice: Option<String>,
 }
 
 impl RuntimeState {
@@ -202,6 +205,7 @@ impl RuntimeState {
             rx,
             commands: VecDeque::new(),
             error: None,
+            notice: None,
         }
     }
 }
@@ -321,8 +325,8 @@ impl LabelloApp {
             prelabel_config_ids: vec![],
             enabled: true,
         }];
-        let mut queue = ImageQueue::new(config.queue_size);
-        for index in 1..=config.queue_size {
+        let mut queue = ImageQueue::new(IMAGE_QUEUE_SIZE);
+        for index in 1..=IMAGE_QUEUE_SIZE {
             queue.push_if_room(demo_image(index));
         }
         let current = queue.pop_next();

@@ -1,7 +1,7 @@
 use std::{future::Future, rc::Rc, time::Duration};
 
 use eframe::egui;
-use labello_client::{AuthHeaders, HttpLabelloApi, UpdateDatasetConfigRequest};
+use labello_client::{AuthHeaders, HttpLabelloApi, IngestJobStatus, UpdateDatasetConfigRequest};
 
 use crate::app::{
     AppView, LabelloApp, LoadedDataset, LoadedImage, SaveStatus, UiCommand, UiMessage,
@@ -84,8 +84,9 @@ impl LabelloApp {
                     Ok(metadata) => {
                         self.loading.admin = false;
                         self.datasets.admin_config = Some(metadata);
+                        self.runtime.notice = Some("Admin config saved".to_string());
                         self.runtime.error = None;
-                        self.request_load_dataset();
+                        self.request_dataset_list();
                     }
                     Err(error) => {
                         self.loading.admin = false;
@@ -141,13 +142,13 @@ impl LabelloApp {
                     self.loading.ingesting = false;
                     match result {
                         Ok(report) => {
-                            self.runtime.error = Some(format!(
+                            self.runtime.notice = Some(format!(
                                 "Ingested {} new images from {} discovered files",
                                 report.new_images, report.discovered_files
                             ));
+                            self.runtime.error = None;
                             self.request_admin_dataset();
-                            self.request_load_dataset();
-                            self.request_stats();
+                            self.request_dataset_list();
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
@@ -170,10 +171,10 @@ impl LabelloApp {
                     self.loading.upload_progress = None;
                     match result {
                         Ok(message) => {
-                            self.runtime.error = Some(message);
+                            self.runtime.notice = Some(message);
+                            self.runtime.error = None;
                             self.request_admin_dataset();
-                            self.request_load_dataset();
-                            self.request_stats();
+                            self.request_dataset_list();
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
@@ -244,11 +245,7 @@ impl LabelloApp {
                 });
             }
             UiCommand::Ingest { dataset_id } => self.spawn_message(async move {
-                UiMessage::IngestFinished(
-                    api.ingest_dataset(&dataset_id)
-                        .await
-                        .map_err(|error| error.to_string()),
-                )
+                UiMessage::IngestFinished(run_ingest_job(api, dataset_id).await)
             }),
             UiCommand::Stats { dataset_id } => self.spawn_message(async move {
                 UiMessage::StatsLoaded(
@@ -355,7 +352,11 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_stats(&mut self) {
-        if self.loading.stats || self.runtime.api.is_none() || self.loading.image {
+        if self.loading.stats
+            || self.runtime.api.is_none()
+            || self.loading.image
+            || !matches!(self.view, AppView::Stats)
+        {
             return;
         }
         self.loading.stats = true;
@@ -432,6 +433,55 @@ impl LabelloApp {
         }
     }
 }
+
+async fn run_ingest_job(
+    api: Rc<dyn labello_client::LabelloApi>,
+    dataset_id: labello_domain::DatasetId,
+) -> Result<labello_client::IngestReport, String> {
+    let mut job = api
+        .start_ingest_job(&dataset_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    loop {
+        match job.status {
+            IngestJobStatus::Completed => {
+                return Ok(job.report.unwrap_or_default());
+            }
+            IngestJobStatus::Failed => {
+                return Err(job.error.unwrap_or_else(|| "ingest failed".to_string()));
+            }
+            IngestJobStatus::Running => {
+                wait_for_ingest_poll().await;
+                job = api
+                    .get_ingest_job(&dataset_id, &job.job_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait_for_ingest_poll() {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let Some(window) = web_sys::window() else {
+            let _ = reject.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str("missing browser window"),
+            );
+            return;
+        };
+        if let Err(error) =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 500)
+        {
+            let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_ingest_poll() {}
 
 #[cfg(all(not(target_arch = "wasm32"), test))]
 fn poll_ready<F>(future: F) -> UiMessage

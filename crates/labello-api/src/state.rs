@@ -1,7 +1,13 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
+use labello_client::IngestJob;
 use labello_domain::UserId;
 use labello_storage::DatasetRepository;
+use tokio::sync::RwLock;
 
 use crate::GithubOAuthConfig;
 
@@ -10,6 +16,7 @@ pub struct ApiState {
     datasets_root: Arc<PathBuf>,
     bootstrap_admins: Arc<BTreeSet<UserId>>,
     dev_auth_token: Option<Arc<String>>,
+    ingest_jobs: Arc<RwLock<BTreeMap<String, IngestJob>>>,
     pub github_oauth: Option<GithubOAuthConfig>,
     pub http: reqwest::Client,
 }
@@ -20,6 +27,7 @@ impl ApiState {
             datasets_root: Arc::new(datasets_root.into()),
             bootstrap_admins: Arc::new(BTreeSet::from([UserId::from("admin")])),
             dev_auth_token: None,
+            ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
             github_oauth: None,
             http: reqwest::Client::new(),
         }
@@ -54,5 +62,16 @@ impl ApiState {
 
     pub fn repo(&self, dataset_id: &labello_domain::DatasetId) -> DatasetRepository {
         DatasetRepository::new(self.datasets_root.join(dataset_id.as_str()))
+    }
+
+    pub async fn put_ingest_job(&self, job: IngestJob) {
+        self.ingest_jobs
+            .write()
+            .await
+            .insert(job.job_id.clone(), job);
+    }
+
+    pub async fn get_ingest_job(&self, job_id: &str) -> Option<IngestJob> {
+        self.ingest_jobs.read().await.get(job_id).cloned()
     }
 }

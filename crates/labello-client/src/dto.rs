@@ -145,6 +145,24 @@ pub struct IngestReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestJobStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestJob {
+    pub job_id: String,
+    pub dataset_id: DatasetId,
+    pub status: IngestJobStatus,
+    pub report: Option<IngestReport>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateImage {
     pub image_id: ImageId,

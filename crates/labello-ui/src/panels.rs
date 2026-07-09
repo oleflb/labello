@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, RichText};
 use labello_domain::{AdjudicationDecision, AnnotationType, ReviewDecision};
 
 use crate::{
-    app::{AppView, LabelloApp, QueueMode, SaveStatus, Tool},
+    app::{AppView, IMAGE_QUEUE_SIZE, LabelloApp, QueueMode, SaveStatus, Tool},
     canvas::{CanvasAction, show_canvas},
     theme,
 };
@@ -39,19 +39,21 @@ impl LabelloApp {
                 {
                     self.next_image();
                 }
-                if ui
-                    .button("Save")
-                    .on_hover_text("Persist current annotation edits as event-log entries.")
-                    .clicked()
-                {
-                    self.autosave();
-                }
-                if ui
-                    .button("Submit")
-                    .on_hover_text("Save annotations and mark the active task as submitted.")
-                    .clicked()
-                {
-                    self.request_save(true);
+                if self.queue_mode == QueueMode::Annotate {
+                    if ui
+                        .button("Save")
+                        .on_hover_text("Persist current annotation edits as event-log entries.")
+                        .clicked()
+                    {
+                        self.autosave();
+                    }
+                    if ui
+                        .button("Submit")
+                        .on_hover_text("Save annotations and mark the active task as submitted.")
+                        .clicked()
+                    {
+                        self.request_save(true);
+                    }
                 }
                 ui.toggle_value(&mut self.show_tutorial, "Tutorial");
                 ui.toggle_value(&mut self.offline, "Offline");
@@ -59,6 +61,9 @@ impl LabelloApp {
         });
         if let Some(error) = &self.runtime.error {
             ui.colored_label(theme::AMBER, error);
+        }
+        if let Some(notice) = &self.runtime.notice {
+            ui.colored_label(theme::TEAL, notice);
         }
     }
 
@@ -91,33 +96,38 @@ impl LabelloApp {
         }
         ui.add_space(10.0);
         ui.label(RichText::new("Queue Mode").strong());
-        ui.selectable_value(&mut self.queue_mode, QueueMode::Annotate, "Annotate");
-        ui.selectable_value(&mut self.queue_mode, QueueMode::Review, "Review");
-        ui.selectable_value(&mut self.queue_mode, QueueMode::Adjudicate, "Adjudicate");
-        ui.separator();
-        ui.label(RichText::new("Tools").strong());
-        ui.selectable_value(&mut self.tool, Tool::BoundingBox, "Bounding box");
-        ui.selectable_value(&mut self.tool, Tool::Keypoints, "Keypoints");
-        ui.separator();
-        ui.label(RichText::new("Classes").strong());
-        for class in &self.classes {
-            badge(ui, &class.name, theme::TEAL);
-        }
-        ui.separator();
-        ui.label(RichText::new("Image Queue").strong());
-        let mut queue_size = self.queue.queue_size();
         if ui
-            .add(egui::Slider::new(&mut queue_size, 1..=12).text("preload"))
-            .on_hover_text("Number of queued images to keep ready.")
-            .changed()
+            .selectable_label(self.queue_mode == QueueMode::Annotate, "Annotate")
+            .clicked()
         {
-            self.queue.set_queue_size(queue_size);
-            if self.runtime.api.is_some() {
-                self.request_next_image();
-            } else {
-                self.replenish_demo_queue();
-            }
+            self.set_queue_mode(QueueMode::Annotate);
         }
+        if ui
+            .selectable_label(self.queue_mode == QueueMode::Review, "Review")
+            .clicked()
+        {
+            self.set_queue_mode(QueueMode::Review);
+        }
+        if ui
+            .selectable_label(self.queue_mode == QueueMode::Adjudicate, "Adjudicate")
+            .clicked()
+        {
+            self.set_queue_mode(QueueMode::Adjudicate);
+        }
+        ui.separator();
+        if self.queue_mode == QueueMode::Annotate {
+            ui.label(RichText::new("Tools").strong());
+            ui.selectable_value(&mut self.tool, Tool::BoundingBox, "Bounding box");
+            ui.selectable_value(&mut self.tool, Tool::Keypoints, "Keypoints");
+            ui.separator();
+            ui.label(RichText::new("Classes").strong());
+            for class in &self.classes {
+                badge(ui, &class.name, theme::TEAL);
+            }
+            ui.separator();
+        }
+        ui.label(RichText::new("Image Queue").strong());
+        ui.label(format!("Queue size: {IMAGE_QUEUE_SIZE}"));
         if self.queue.is_loading() || self.current.is_none() {
             ui.colored_label(theme::AMBER, "Loading next image...");
         } else {
@@ -136,83 +146,55 @@ impl LabelloApp {
             .filter(|annotation| !annotation.deleted)
             .count();
         metric(ui, "Active annotations", active_count.to_string());
-        metric(ui, "Review cursor", (self.review_index + 1).to_string());
-        ui.horizontal(|ui| {
-            if ui
-                .button("Approve y")
-                .on_hover_text("Approve the current review target.")
-                .clicked()
-            {
-                if self.runtime.api.is_some() {
-                    self.request_review(ReviewDecision::Approved);
-                } else {
-                    self.review_index = self.review_index.saturating_add(1);
-                }
-            }
-            if ui
-                .button("Reject n")
-                .on_hover_text("Reject the current review target and request correction.")
-                .clicked()
-            {
-                if self.runtime.api.is_some() {
-                    self.request_review(ReviewDecision::Rejected);
-                } else {
-                    self.save_status = SaveStatus::Dirty;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui
-                .button("Adjudicate accept")
-                .on_hover_text("Resolve adjudication by accepting annotations.")
-                .clicked()
-            {
-                self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
-            }
-            if ui
-                .button("Needs correction")
-                .on_hover_text("Resolve adjudication by sending the task back for correction.")
-                .clicked()
-            {
-                self.request_adjudication(AdjudicationDecision::NeedsCorrection);
-            }
-        });
-        ui.separator();
-        ui.heading("Prelabels");
-        let prelabels = self
-            .current
-            .as_ref()
-            .map(|image| image.prelabels.clone())
-            .unwrap_or_default();
-        if prelabels.is_empty() {
-            ui.label(RichText::new("No suggestions for this image.").color(theme::MUTED));
-        }
-        for suggestion in &prelabels {
-            theme::card_frame().show(ui, |ui| {
+        match self.queue_mode {
+            QueueMode::Annotate => self.prelabel_panel(ui),
+            QueueMode::Review => {
+                metric(ui, "Review cursor", (self.review_index + 1).to_string());
                 ui.horizontal(|ui| {
-                    ui.label(format!("{}", suggestion.class_id));
-                    badge(
-                        ui,
-                        &format!("{:.0}%", suggestion.confidence * 100.0),
-                        theme::TEAL,
-                    );
                     if ui
-                        .button("Accept")
-                        .on_hover_text("Convert this suggestion into an annotation.")
+                        .button("Approve y")
+                        .on_hover_text("Approve the current review target.")
                         .clicked()
                     {
-                        self.accept_prelabel(suggestion);
+                        if self.runtime.api.is_some() {
+                            self.request_review(ReviewDecision::Approved);
+                        } else {
+                            self.review_index = self.review_index.saturating_add(1);
+                        }
                     }
                     if ui
-                        .button("Discard")
-                        .on_hover_text("Hide this suggestion for the current image.")
+                        .button("Reject n")
+                        .on_hover_text("Reject the current review target and request correction.")
                         .clicked()
                     {
-                        self.accepted_prelabels
-                            .push(suggestion.suggestion_id.clone());
+                        if self.runtime.api.is_some() {
+                            self.request_review(ReviewDecision::Rejected);
+                        } else {
+                            self.save_status = SaveStatus::Dirty;
+                        }
                     }
                 });
-            });
+            }
+            QueueMode::Adjudicate => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Adjudicate accept")
+                        .on_hover_text("Resolve adjudication by accepting annotations.")
+                        .clicked()
+                    {
+                        self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
+                    }
+                    if ui
+                        .button("Needs correction")
+                        .on_hover_text(
+                            "Resolve adjudication by sending the task back for correction.",
+                        )
+                        .clicked()
+                    {
+                        self.request_adjudication(AdjudicationDecision::NeedsCorrection);
+                    }
+                });
+            }
         }
         ui.separator();
         ui.heading("Keybindings");
@@ -287,8 +269,64 @@ impl LabelloApp {
             }
         } else {
             ui.vertical_centered(|ui| {
-                ui.spinner();
-                ui.label("Waiting for the image queue...");
+                if self.loading.image || self.queue.is_loading() {
+                    ui.spinner();
+                    ui.label("Loading next image...");
+                } else if let Some(error) = self.runtime.error.clone() {
+                    ui.colored_label(theme::AMBER, error);
+                    if ui.button("Retry image load").clicked() {
+                        self.request_next_image();
+                    }
+                } else {
+                    ui.label(match self.queue_mode {
+                        QueueMode::Annotate => "No annotation images available.",
+                        QueueMode::Review => "No review images available.",
+                        QueueMode::Adjudicate => "No adjudication images available.",
+                    });
+                    if ui.button("Retry image load").clicked() {
+                        self.request_next_image();
+                    }
+                }
+            });
+        }
+    }
+
+    fn prelabel_panel(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Prelabels");
+        let prelabels = self
+            .current
+            .as_ref()
+            .map(|image| image.prelabels.clone())
+            .unwrap_or_default();
+        if prelabels.is_empty() {
+            ui.label(RichText::new("No suggestions for this image.").color(theme::MUTED));
+        }
+        for suggestion in &prelabels {
+            theme::card_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}", suggestion.class_id));
+                    badge(
+                        ui,
+                        &format!("{:.0}%", suggestion.confidence * 100.0),
+                        theme::TEAL,
+                    );
+                    if ui
+                        .button("Accept")
+                        .on_hover_text("Convert this suggestion into an annotation.")
+                        .clicked()
+                    {
+                        self.accept_prelabel(suggestion);
+                    }
+                    if ui
+                        .button("Discard")
+                        .on_hover_text("Hide this suggestion for the current image.")
+                        .clicked()
+                    {
+                        self.accepted_prelabels
+                            .push(suggestion.suggestion_id.clone());
+                    }
+                });
             });
         }
     }

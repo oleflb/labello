@@ -9,9 +9,9 @@ use egui_kittest::{Harness, kittest::Queryable};
 use labello_client::{
     AdjudicationApi, AnnotationApi, ApiFuture, AppendEventRequest, AssignNextRequest, AuthApi,
     ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary,
-    ImageApi, ImageFile, ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest,
-    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    ImageApi, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
+    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
@@ -24,7 +24,8 @@ use labello_domain::{
 };
 
 use crate::app::{
-    AppConfig, AppView, FolderUploadProgress, LabelloApp, QueueMode, SaveStatus, UiMessage,
+    AppConfig, AppView, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, QueueMode, SaveStatus,
+    UiMessage,
 };
 
 #[test]
@@ -97,19 +98,32 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
 
     click(&mut harness, "Admin");
     step_until(&mut harness, 8, |app| app.view == AppView::Admin);
-    click_scrolling(&mut harness, "Run Ingest");
-    step_until(&mut harness, 8, |_| api.counts().ingest_dataset == 1);
-    assert_eq!(api.counts().ingest_dataset, 1);
+    let before_ingest = api.counts();
+    harness.state_mut().request_ingest();
     harness.step();
+    step_until(&mut harness, 16, |_| api.counts().ingest_dataset >= 1);
+    assert_eq!(
+        api.counts().ingest_dataset,
+        before_ingest.ingest_dataset + 1
+    );
+    for _ in 0..8 {
+        harness.step();
+    }
+    assert_eq!(api.counts().get_dataset, before_ingest.get_dataset);
+    assert_eq!(api.counts().dataset_stats, before_ingest.dataset_stats);
     assert!(
         harness
             .state()
             .runtime
-            .error
+            .notice
             .as_deref()
             .unwrap_or_default()
             .contains("Ingested")
     );
+
+    click(&mut harness, "Work");
+    step_until(&mut harness, 12, |app| app.current.is_some());
+    assert_eq!(harness.state().view, AppView::Annotate);
 }
 
 #[test]
@@ -117,6 +131,11 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     assert!(harness.state().current.is_some());
+    assert_eq!(harness.state().queue.queue_size(), IMAGE_QUEUE_SIZE);
+    assert!(harness.query_by_label("Queue size: 8").is_some());
+    assert!(harness.query_by_label("Approve y").is_none());
+    assert!(harness.query_by_label("Reject n").is_none());
+    assert!(harness.query_by_label("Adjudicate accept").is_none());
 
     click(&mut harness, "Tutorial");
     harness.step();
@@ -169,8 +188,12 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert!(api.counts().assign_next_image >= 2);
 
     click(&mut harness, "Review");
-    harness.step();
-    assert_eq!(harness.state().queue_mode, QueueMode::Review);
+    step_until(&mut harness, 10, |app| {
+        app.queue_mode == QueueMode::Review && !app.loading.image
+    });
+    assert!(harness.query_by_label("Approve y").is_some());
+    assert!(harness.query_by_label("Reject n").is_some());
+    assert!(harness.query_by_label("Accept").is_none());
     click(&mut harness, "Approve y");
     step_until(&mut harness, 10, |app| !app.loading.saving);
     assert_eq!(api.counts().record_review, 1);
@@ -180,8 +203,12 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert_eq!(api.counts().record_review, 2);
 
     click(&mut harness, "Adjudicate");
-    harness.step();
-    assert_eq!(harness.state().queue_mode, QueueMode::Adjudicate);
+    step_until(&mut harness, 10, |app| {
+        app.queue_mode == QueueMode::Adjudicate && !app.loading.image
+    });
+    assert!(harness.query_by_label("Adjudicate accept").is_some());
+    assert!(harness.query_by_label("Needs correction").is_some());
+    assert!(harness.query_by_label("Approve y").is_none());
     click(&mut harness, "Adjudicate accept");
     step_until(&mut harness, 10, |app| !app.loading.saving);
     click(&mut harness, "Needs correction");
@@ -226,6 +253,7 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
     let api = Rc::new(SpyApi::new());
     let mut app = base_live_app(api);
     app.setup.started = true;
+    app.view = AppView::Stats;
     for _ in 0..80 {
         app.request_stats();
         app.loading.stats = false;
@@ -300,7 +328,7 @@ fn base_live_app(api: Rc<SpyApi>) -> LabelloApp {
         user_id: UserId::from("admin"),
         role: DatasetRole::DataAdmin,
         dataset_id: DatasetId::from("demo"),
-        queue_size: 2,
+        queue_size: IMAGE_QUEUE_SIZE,
     });
     app.runtime.api = Some(api);
     app.runtime.error = None;
@@ -320,33 +348,6 @@ fn click_accesskit_button(harness: &mut Harness<'static, LabelloApp>, label: &st
         .unwrap()
         .click_accesskit();
     harness.step();
-}
-
-fn click_scrolling(harness: &mut Harness<'static, LabelloApp>, label: &str) {
-    for _ in 0..16 {
-        let clicked = click_visible(harness, label);
-        if clicked {
-            harness.step();
-            return;
-        }
-        {
-            for anchor in [
-                "Dataset",
-                "Image Roots",
-                "Labels",
-                "Tasks",
-                "Prelabels",
-                "Roles",
-            ] {
-                if let Some(node) = harness.query_all_by_label(anchor).next() {
-                    node.scroll_down();
-                    break;
-                }
-            }
-        }
-        harness.step();
-    }
-    panic!("button {label:?} did not become visible after scrolling");
 }
 
 fn click_visible(harness: &Harness<'static, LabelloApp>, label: &str) -> bool {
@@ -572,6 +573,39 @@ impl DatasetApi for SpyApi {
             discovered_files: 2,
             new_images: 1,
             ..Default::default()
+        }))
+    }
+
+    fn start_ingest_job<'a>(&'a self, dataset_id: &'a DatasetId) -> ApiFuture<'a, IngestJob> {
+        self.state.borrow_mut().counts.ingest_dataset += 1;
+        ready(Ok(IngestJob {
+            job_id: "test-ingest".to_string(),
+            dataset_id: dataset_id.clone(),
+            status: IngestJobStatus::Completed,
+            report: Some(IngestReport {
+                discovered_files: 2,
+                new_images: 1,
+                ..Default::default()
+            }),
+            error: None,
+        }))
+    }
+
+    fn get_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        job_id: &'a str,
+    ) -> ApiFuture<'a, IngestJob> {
+        ready(Ok(IngestJob {
+            job_id: job_id.to_string(),
+            dataset_id: dataset_id.clone(),
+            status: IngestJobStatus::Completed,
+            report: Some(IngestReport {
+                discovered_files: 2,
+                new_images: 1,
+                ..Default::default()
+            }),
+            error: None,
         }))
     }
 }

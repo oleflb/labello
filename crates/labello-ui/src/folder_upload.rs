@@ -179,7 +179,7 @@ async fn upload_files(
         "Running ingest".to_string(),
     );
     yield_to_browser().await?;
-    run_ingest(&config).await?;
+    run_ingest_job(&config, &tx, total_files, uploaded_files, current_batch).await?;
 
     Ok(format!(
         "Uploaded {total_files} files into {} and completed ingest",
@@ -232,14 +232,74 @@ async fn upload_batch(config: &UploadConfig, form: &web_sys::FormData) -> Result
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run_ingest(config: &UploadConfig) -> Result<(), String> {
+async fn start_ingest_job(config: &UploadConfig) -> Result<String, String> {
     let url = format!(
-        "{}/datasets/{}/ingest",
+        "{}/datasets/{}/ingest-jobs",
         config.api_base_url.trim_end_matches('/'),
         encode_component(&config.dataset_id),
     );
     let init = request_init("POST");
-    fetch(config, &url, &init).await.map(|_| ())
+    let response = fetch(config, &url, &init).await?;
+    let value = wasm_bindgen_futures::JsFuture::from(response.json().map_err(js_error)?)
+        .await
+        .map_err(js_error)?;
+    js_string_property(&value, "jobId")
+        .ok_or_else(|| "ingest job response missing jobId".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_ingest_job(
+    config: &UploadConfig,
+    tx: &std::sync::mpsc::Sender<UiMessage>,
+    total_files: u32,
+    uploaded_files: u32,
+    current_batch: u32,
+) -> Result<(), String> {
+    let job_id = start_ingest_job(config).await?;
+    loop {
+        browser_sleep(500).await?;
+        send_progress(
+            tx,
+            total_files,
+            uploaded_files,
+            current_batch,
+            "Running ingest".to_string(),
+        );
+        match poll_ingest_job(config, &job_id).await? {
+            IngestPoll::Running => {}
+            IngestPoll::Completed => return Ok(()),
+            IngestPoll::Failed(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+enum IngestPoll {
+    Running,
+    Completed,
+    Failed(String),
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn poll_ingest_job(config: &UploadConfig, job_id: &str) -> Result<IngestPoll, String> {
+    let url = format!(
+        "{}/datasets/{}/ingest-jobs/{}",
+        config.api_base_url.trim_end_matches('/'),
+        encode_component(&config.dataset_id),
+        encode_component(job_id),
+    );
+    let init = request_init("GET");
+    let response = fetch(config, &url, &init).await?;
+    let value = wasm_bindgen_futures::JsFuture::from(response.json().map_err(js_error)?)
+        .await
+        .map_err(js_error)?;
+    match js_string_property(&value, "status").as_deref() {
+        Some("completed") => Ok(IngestPoll::Completed),
+        Some("failed") => Ok(IngestPoll::Failed(
+            js_string_property(&value, "error").unwrap_or_else(|| "ingest failed".to_string()),
+        )),
+        _ => Ok(IngestPoll::Running),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -308,6 +368,11 @@ fn send_progress(
 
 #[cfg(target_arch = "wasm32")]
 async fn yield_to_browser() -> Result<(), String> {
+    browser_animation_frame().await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn browser_animation_frame() -> Result<(), String> {
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let Some(window) = web_sys::window() else {
             let _ = reject.call1(
@@ -324,6 +389,35 @@ async fn yield_to_browser() -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(js_error)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn browser_sleep(milliseconds: i32) -> Result<(), String> {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let Some(window) = web_sys::window() else {
+            let _ = reject.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str("missing browser window"),
+            );
+            return;
+        };
+        if let Err(error) =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, milliseconds)
+        {
+            let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
+        }
+    });
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(js_error)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_string_property(value: &wasm_bindgen::JsValue, name: &str) -> Option<String> {
+    js_sys::Reflect::get(value, &wasm_bindgen::JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.as_string())
 }
 
 #[cfg(target_arch = "wasm32")]

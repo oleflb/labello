@@ -9,8 +9,8 @@ use labello_domain::{
 
 use crate::{
     AppendEventRequest, AssignNextRequest, ClientResult, CorrectionRequest, CreateDatasetRequest,
-    DatasetSummary, ImageFile, ImagePreview, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineBundleRequest, PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
+    DatasetSummary, ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineBundleRequest, PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -30,6 +30,12 @@ pub trait DatasetApi {
         request: UpdateDatasetConfigRequest,
     ) -> ApiFuture<'a, DatasetMetadata>;
     fn ingest_dataset<'a>(&'a self, dataset_id: &'a DatasetId) -> ApiFuture<'a, IngestReport>;
+    fn start_ingest_job<'a>(&'a self, dataset_id: &'a DatasetId) -> ApiFuture<'a, IngestJob>;
+    fn get_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        job_id: &'a str,
+    ) -> ApiFuture<'a, IngestJob>;
 }
 
 pub trait TaskApi {

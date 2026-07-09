@@ -26,6 +26,29 @@ impl QueueMode {
 }
 
 impl LabelloApp {
+    pub(crate) fn set_queue_mode(&mut self, mode: QueueMode) {
+        if self.queue_mode == mode {
+            return;
+        }
+        if self.queue_mode == QueueMode::Annotate {
+            self.autosave();
+        }
+        self.queue_mode = mode;
+        self.clear_current_image();
+        self.request_next_image();
+    }
+
+    pub(crate) fn clear_current_image(&mut self) {
+        self.current = None;
+        self.current_state = None;
+        self.current_texture = None;
+        self.annotations.clear();
+        self.persisted_annotations.clear();
+        self.accepted_prelabels.clear();
+        self.selected_annotation = None;
+        self.save_status = SaveStatus::Idle;
+    }
+
     pub(crate) fn start_workflow_command(&self, api: Rc<dyn LabelloApi>, command: UiCommand) {
         match command {
             UiCommand::NextImage {

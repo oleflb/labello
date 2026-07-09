@@ -10,9 +10,9 @@ use labello_domain::{
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
     CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi, ImageFile,
-    ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
-    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
-    UpdateDatasetConfigRequest,
+    ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
+    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Default)]
@@ -127,6 +127,37 @@ impl DatasetApi for DemoLabelloApi {
         _dataset_id: &'a DatasetId,
     ) -> crate::ApiFuture<'a, IngestReport> {
         Box::pin(async move { Ok(IngestReport::default()) })
+    }
+
+    fn start_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, IngestJob> {
+        Box::pin(async move {
+            Ok(IngestJob {
+                job_id: "demo-ingest".to_string(),
+                dataset_id: dataset_id.clone(),
+                status: IngestJobStatus::Completed,
+                report: Some(IngestReport::default()),
+                error: None,
+            })
+        })
+    }
+
+    fn get_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        job_id: &'a str,
+    ) -> crate::ApiFuture<'a, IngestJob> {
+        Box::pin(async move {
+            Ok(IngestJob {
+                job_id: job_id.to_string(),
+                dataset_id: dataset_id.clone(),
+                status: IngestJobStatus::Completed,
+                report: Some(IngestReport::default()),
+                error: None,
+            })
+        })
     }
 }
 

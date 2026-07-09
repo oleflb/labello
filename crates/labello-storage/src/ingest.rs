@@ -136,11 +136,6 @@ impl DatasetRepository {
         metadata.updated_at = labello_domain::now();
         self.save_images_index(&index).await?;
         self.save_dataset(&metadata).await?;
-        for image_id in metadata.images.keys() {
-            tokio::fs::create_dir_all(self.annotations_dir(image_id))
-                .await
-                .with_path(self.annotations_dir(image_id))?;
-        }
         path_to_hash.clear();
         Ok(report)
     }
@@ -197,17 +192,31 @@ async fn read_image_record(
     path: &Path,
     relative_path: &str,
 ) -> StorageResult<(String, ImageRecord)> {
-    let bytes = tokio::fs::read(path).await.with_path(path)?;
+    let path = path.to_path_buf();
+    let relative_path = relative_path.to_string();
+    tokio::task::spawn_blocking(move || read_image_record_blocking(path, relative_path))
+        .await
+        .map_err(|error| StorageError::Io {
+            path: PathBuf::from("ingest-image-worker"),
+            source: std::io::Error::other(error.to_string()),
+        })?
+}
+
+fn read_image_record_blocking(
+    path: PathBuf,
+    relative_path: String,
+) -> StorageResult<(String, ImageRecord)> {
+    let bytes = std::fs::read(&path).with_path(&path)?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
-    let metadata = tokio::fs::metadata(path).await.with_path(path)?;
-    let (width, height) = image::image_dimensions(path).map_err(|source| StorageError::Image {
-        path: path.to_path_buf(),
+    let metadata = std::fs::metadata(&path).with_path(&path)?;
+    let (width, height) = image::image_dimensions(&path).map_err(|source| StorageError::Image {
+        path: path.clone(),
         source,
     })?;
     let media_type = infer::get(&bytes)
         .map(|kind| kind.mime_type().to_string())
         .unwrap_or_else(|| {
-            mime_guess::from_path(path)
+            mime_guess::from_path(&path)
                 .first_or_octet_stream()
                 .essence_str()
                 .to_string()
@@ -216,13 +225,13 @@ async fn read_image_record(
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or(relative_path)
+        .unwrap_or(&relative_path)
         .to_string();
     let record = ImageRecord {
         image_id,
         blake3: hash.clone(),
-        canonical_path: relative_path.to_string(),
-        known_paths: vec![relative_path.to_string()],
+        canonical_path: relative_path.clone(),
+        known_paths: vec![relative_path],
         duplicate_paths: Vec::new(),
         file_name,
         byte_size: metadata.len(),

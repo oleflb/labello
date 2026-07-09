@@ -11,9 +11,9 @@ use url::Url;
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
     ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi,
-    ImageFile, ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi,
-    TaskApi, UpdateDatasetConfigRequest,
+    ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
+    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -150,6 +150,38 @@ impl DatasetApi for HttpLabelloApi {
                 self.request(Method::POST, &format!("/datasets/{dataset_id}/ingest"))?
                     .send()
                     .await?,
+            )
+            .await
+        })
+    }
+
+    fn start_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, IngestJob> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::POST, &format!("/datasets/{dataset_id}/ingest-jobs"))?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
+    fn get_ingest_job<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        job_id: &'a str,
+    ) -> crate::ApiFuture<'a, IngestJob> {
+        Box::pin(async move {
+            Self::json(
+                self.request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/ingest-jobs/{job_id}"),
+                )?
+                .send()
+                .await?,
             )
             .await
         })

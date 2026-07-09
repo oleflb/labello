@@ -37,7 +37,7 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
         user_id: labello_domain::UserId::from(param(&params, "user", "admin")),
         role: parse_role(&param(&params, "role", "data_admin")),
         dataset_id: labello_domain::DatasetId::from(param(&params, "dataset", "demo")),
-        queue_size: param(&params, "queue", "4").parse().unwrap_or(4),
+        queue_size: labello_ui::IMAGE_QUEUE_SIZE,
     })
 }
 

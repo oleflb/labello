@@ -12,5 +12,5 @@ pub mod theme;
 #[cfg(test)]
 mod ui_tests;
 
-pub use app::{AppConfig, LabelloApp};
+pub use app::{AppConfig, IMAGE_QUEUE_SIZE, LabelloApp};
 pub use queue::{ImageQueue, QueuedImage};

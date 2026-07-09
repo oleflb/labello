@@ -141,7 +141,12 @@ impl LabelloApp {
 
     pub(crate) fn mode_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.selectable_value(&mut self.view, AppView::Setup, "Setup");
-        ui.selectable_value(&mut self.view, AppView::Annotate, "Work");
+        if ui
+            .selectable_label(self.view == AppView::Annotate, "Work")
+            .clicked()
+        {
+            self.open_work_view();
+        }
         ui.selectable_value(&mut self.view, AppView::Stats, "Stats");
         if self.can_admin()
             && ui
@@ -150,6 +155,15 @@ impl LabelloApp {
                 .clicked()
         {
             self.request_admin_dataset();
+        }
+    }
+
+    pub(crate) fn open_work_view(&mut self) {
+        self.view = AppView::Annotate;
+        if self.datasets.metadata.is_none() {
+            self.request_load_dataset();
+        } else if self.current.is_none() && !self.tasks.is_empty() {
+            self.request_next_image();
         }
     }
 

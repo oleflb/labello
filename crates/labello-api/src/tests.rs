@@ -261,6 +261,56 @@ async fn config_endpoints_do_not_parse_image_index() {
 }
 
 #[tokio::test]
+async fn starts_and_polls_ingest_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+
+    let started = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/datasets/ds/ingest-jobs")
+                .header("x-user-id", "admin")
+                .header("x-user-role", "data_admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let body = to_bytes(started.into_body(), usize::MAX).await.unwrap();
+    let job: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let job_id = job["jobId"].as_str().unwrap();
+    assert_eq!(job["status"], "running");
+
+    let mut status = serde_json::Value::Null;
+    for _ in 0..16 {
+        let polled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/datasets/ds/ingest-jobs/{job_id}"))
+                    .header("x-user-id", "admin")
+                    .header("x-user-role", "data_admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(polled.status(), StatusCode::OK);
+        let body = to_bytes(polled.into_body(), usize::MAX).await.unwrap();
+        status = serde_json::from_slice(&body).unwrap();
+        if status["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(status["status"], "completed");
+}
+
+#[tokio::test]
 async fn uploads_images_and_serves_record_and_preview() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));
