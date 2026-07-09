@@ -38,6 +38,11 @@ impl DatasetRepository {
 
         for image_id in metadata.images.keys() {
             let state = self.load_image_state(image_id).await?;
+            if let Some(assignment) =
+                active_assignment_for_user(&state.assignments, task_id, user_id, &kind)
+            {
+                return Ok(Some(assignment.clone()));
+            }
             if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind) {
                 continue;
             }
@@ -125,6 +130,20 @@ impl DatasetRepository {
     }
 }
 
+fn active_assignment_for_user<'a>(
+    assignments: &'a [Assignment],
+    task_id: &TaskId,
+    user_id: &UserId,
+    kind: &AssignmentKind,
+) -> Option<&'a Assignment> {
+    assignments.iter().find(|assignment| {
+        &assignment.task_id == task_id
+            && &assignment.kind == kind
+            && assignment.status == AssignmentStatus::Active
+            && &assignment.assigned_to == user_id
+    })
+}
+
 fn status_matches_kind(status: &TaskStatus, kind: &AssignmentKind) -> bool {
     match kind {
         AssignmentKind::Annotation => {
@@ -151,3 +170,88 @@ fn has_conflicting_assignment(
 
 #[allow(dead_code)]
 fn _image_id_type_is_used(_: &ImageId) {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use labello_domain::{
+        AnnotationType, ClassId, DatasetId, DatasetMetadata, DatasetRoleAssignment, ImageRecord,
+        ImagesIndex, LabelClass, ReviewConfig, SCHEMA_VERSION, TaskDefinition, TutorialContent,
+        now,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_return_same_users_active_assignment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        let user_id = UserId::from("annotator");
+        let task_id = TaskId::from("bounding_box:person");
+        let class_id = ClassId::from("person");
+        let mut metadata = DatasetMetadata::new(DatasetId::from("ds"), "Dataset", now());
+        metadata.label_classes.push(LabelClass {
+            class_id: class_id.clone(),
+            name: "Person".to_string(),
+            color: "#5eead4".to_string(),
+            description: None,
+        });
+        metadata.tasks.push(TaskDefinition {
+            task_id: task_id.clone(),
+            name: "Person boxes".to_string(),
+            annotation_type: AnnotationType::BoundingBox,
+            class_ids: vec![class_id],
+            instructions: TutorialContent {
+                title: "Instructions".to_string(),
+                example_text: "Draw boxes.".to_string(),
+                example_images: Vec::new(),
+            },
+            skeleton: None,
+            review: ReviewConfig::default(),
+            prelabel_config_ids: Vec::new(),
+            enabled: true,
+        });
+        metadata.role_assignments.push(DatasetRoleAssignment {
+            dataset_id: metadata.dataset_id.clone(),
+            user_id: user_id.clone(),
+            roles: BTreeSet::from([DatasetRole::Annotator]),
+            assigned_at: now(),
+            assigned_by: None,
+        });
+        repo.initialize(metadata).await.unwrap();
+        let image = ImageRecord {
+            image_id: ImageId::from("img_1"),
+            blake3: "hash".to_string(),
+            canonical_path: "images/one.png".to_string(),
+            known_paths: vec!["images/one.png".to_string()],
+            duplicate_paths: Vec::new(),
+            file_name: "one.png".to_string(),
+            byte_size: 4,
+            width: 2,
+            height: 2,
+            media_type: "image/png".to_string(),
+        };
+        repo.save_images_index(&ImagesIndex {
+            schema_version: SCHEMA_VERSION,
+            image_count: 1,
+            images_by_hash: BTreeMap::from([("hash".to_string(), image)]),
+        })
+        .await
+        .unwrap();
+
+        let first = repo
+            .assign_next_image(&user_id, &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        let retry = repo
+            .assign_next_image(&user_id, &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(retry.assignment_id, first.assignment_id);
+        assert_eq!(retry.image_id, first.image_id);
+    }
+}

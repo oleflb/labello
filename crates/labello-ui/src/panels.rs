@@ -9,6 +9,7 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.set_max_height(32.0);
         ui.horizontal_centered(|ui| {
             ui.label(
                 RichText::new("Labello")
@@ -29,6 +30,11 @@ impl LabelloApp {
             );
             if self.offline {
                 badge(ui, "Offline bundle", theme::AMBER);
+            }
+            if let Some(error) = &self.runtime.error {
+                ui.colored_label(theme::AMBER, bounded_message(error));
+            } else if let Some(notice) = &self.runtime.notice {
+                ui.colored_label(theme::TEAL, bounded_message(notice));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.mode_toolbar(ui);
@@ -59,12 +65,6 @@ impl LabelloApp {
                 ui.toggle_value(&mut self.offline, "Offline");
             });
         });
-        if let Some(error) = &self.runtime.error {
-            ui.colored_label(theme::AMBER, error);
-        }
-        if let Some(notice) = &self.runtime.notice {
-            ui.colored_label(theme::TEAL, notice);
-        }
     }
 
     pub(crate) fn task_panel(&mut self, ui: &mut egui::Ui) {
@@ -79,6 +79,9 @@ impl LabelloApp {
         ui.add_space(8.0);
         let tasks = self.tasks.clone();
         for (index, task) in tasks.iter().enumerate() {
+            if !task.enabled || task.class_ids.is_empty() {
+                continue;
+            }
             let selected = self.selected_task == index;
             theme::card_frame().show(ui, |ui| {
                 if ui
@@ -90,6 +93,8 @@ impl LabelloApp {
                         AnnotationType::BoundingBox => Tool::BoundingBox,
                         AnnotationType::Skeleton => Tool::Keypoints,
                     };
+                    self.clear_current_image();
+                    self.request_next_image();
                 }
                 ui.small(format!("{} classes", task.class_ids.len()));
             });
@@ -333,6 +338,7 @@ impl LabelloApp {
 }
 
 fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+    ui.set_max_height(26.0);
     egui::Frame::new()
         .fill(Color32::from_rgba_unmultiplied(
             color.r(),
@@ -344,8 +350,18 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .corner_radius(egui::CornerRadius::same(18))
         .inner_margin(egui::Margin::symmetric(9, 4))
         .show(ui, |ui| {
+            ui.set_max_height(24.0);
             ui.label(RichText::new(text).color(color).strong());
         });
+}
+
+fn bounded_message(message: &str) -> String {
+    const MAX_CHARS: usize = 90;
+    if message.chars().count() <= MAX_CHARS {
+        message.to_string()
+    } else {
+        format!("{}...", message.chars().take(MAX_CHARS).collect::<String>())
+    }
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {

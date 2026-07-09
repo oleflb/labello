@@ -7,7 +7,7 @@ use std::{
 };
 
 use eframe::egui::{self, TextureHandle};
-use labello_client::{DatasetSummary, IngestReport, LabelloApi};
+use labello_client::{DatasetSummary, IngestJob, LabelloApi};
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
     AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata, DatasetRole, DatasetStats,
@@ -86,7 +86,7 @@ pub(crate) enum UiMessage {
     SaveFinished(Result<ImageState, String>),
     ReviewFinished(Result<(), String>),
     AdjudicationFinished(Result<(), String>),
-    IngestFinished(Result<IngestReport, String>),
+    IngestJobLoaded(Result<IngestJob, String>),
     StatsLoaded(Result<DatasetStats, String>),
     #[allow(dead_code)]
     FolderUploadProgress(FolderUploadProgress),
@@ -113,6 +113,10 @@ pub(crate) enum UiCommand {
     },
     Ingest {
         dataset_id: DatasetId,
+    },
+    PollIngest {
+        dataset_id: DatasetId,
+        job_id: String,
     },
     Stats {
         dataset_id: DatasetId,
@@ -218,6 +222,9 @@ pub(crate) struct LoadingState {
     pub image: bool,
     pub saving: bool,
     pub ingesting: bool,
+    pub ingest_polling: bool,
+    pub ingest_job_id: Option<String>,
+    pub last_ingest_poll: Option<Instant>,
     pub uploading: bool,
     pub upload_progress: Option<FolderUploadProgress>,
     pub stats: bool,
@@ -379,7 +386,28 @@ impl LabelloApp {
     }
 
     pub(crate) fn selected_task(&self) -> Option<&TaskDefinition> {
-        self.tasks.get(self.selected_task)
+        self.tasks
+            .get(self.selected_task)
+            .filter(|task| task.enabled && !task.class_ids.is_empty())
+    }
+
+    pub(crate) fn ensure_valid_task_selection(&mut self) -> bool {
+        if self.selected_task().is_some() {
+            return true;
+        }
+        let Some(index) = self
+            .tasks
+            .iter()
+            .position(|task| task.enabled && !task.class_ids.is_empty())
+        else {
+            return false;
+        };
+        self.selected_task = index;
+        self.tool = match self.tasks[index].annotation_type {
+            AnnotationType::BoundingBox => Tool::BoundingBox,
+            AnnotationType::Skeleton => Tool::Keypoints,
+        };
+        true
     }
 
     pub(crate) fn next_image(&mut self) {
@@ -525,8 +553,10 @@ impl eframe::App for LabelloApp {
         self.process_messages(ui.ctx());
         self.start_setup_load();
         self.refresh_stats_if_due();
+        self.refresh_ingest_if_due();
         self.handle_shortcuts(ui.ctx());
         egui::Panel::top("top_bar")
+            .exact_size(56.0)
             .frame(theme::top_bar_frame())
             .show(ui, |ui| self.top_bar(ui));
         if self.view == AppView::Annotate {

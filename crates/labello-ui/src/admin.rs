@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use eframe::egui::{self, RichText};
 use labello_domain::{
-    AnnotationType, BrowserAcceleration, ClassId, DatasetRole, DatasetRoleAssignment, LabelClass,
-    ModelSpec, OutputProcessing, PrelabelConfig, PrelabelConfigId, PrelabelExecution, ReviewConfig,
-    TaskDefinition, TaskId, TutorialContent, UserId,
+    AnnotationType, BrowserAcceleration, ClassId, DatasetMetadata, DatasetRole,
+    DatasetRoleAssignment, LabelClass, ModelSpec, OutputProcessing, PrelabelConfig,
+    PrelabelConfigId, PrelabelExecution, ReviewConfig, TaskDefinition, TaskId, TutorialContent,
+    UserId,
 };
 
 use crate::{app::LabelloApp, theme};
@@ -70,6 +71,7 @@ impl LabelloApp {
                 ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
             });
 
+            edit_single_class_workflow(ui, config);
             edit_labels(ui, &mut config.label_classes);
             edit_tasks(ui, &mut config.tasks, &config.label_classes);
             edit_prelabels(ui, &mut config.prelabel_configs);
@@ -85,7 +87,7 @@ impl LabelloApp {
                     save = true;
                 }
                 if ui
-                    .button("Run Ingest")
+                    .add_enabled(!ingesting_now, egui::Button::new("Run Ingest"))
                     .on_hover_text("Scan configured image roots and update the dataset image index.")
                     .clicked()
                 {
@@ -93,6 +95,7 @@ impl LabelloApp {
                 }
                 if ingesting_now {
                     ui.spinner();
+                    ui.small("Ingest running...");
                 }
             });
         });
@@ -164,6 +167,67 @@ impl LabelloApp {
             }
         });
     }
+}
+
+fn edit_single_class_workflow(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
+    theme::card_frame().show(ui, |ui| {
+        ui.heading("Single-Class Workflow");
+        ui.label(
+            RichText::new("Use this for the common case: one class and one annotation type.")
+                .color(theme::MUTED),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Use bounding box workflow").clicked() {
+                apply_single_class_workflow(config, AnnotationType::BoundingBox);
+            }
+            if ui.button("Use skeleton workflow").clicked() {
+                apply_single_class_workflow(config, AnnotationType::Skeleton);
+            }
+        });
+        if let Some(task) = config.tasks.first() {
+            ui.small(format!(
+                "Current: {} using {} with {} class(es)",
+                task.name,
+                task.annotation_type,
+                task.class_ids.len()
+            ));
+        }
+    });
+}
+
+fn apply_single_class_workflow(config: &mut DatasetMetadata, annotation_type: AnnotationType) {
+    if config.label_classes.is_empty() {
+        config.label_classes.push(LabelClass {
+            class_id: ClassId::from("object"),
+            name: "Object".to_string(),
+            color: "#5eead4".to_string(),
+            description: None,
+        });
+    }
+    let class = config.label_classes[0].clone();
+    let task_id = match annotation_type {
+        AnnotationType::BoundingBox => format!("bounding_box:{}", class.class_id),
+        AnnotationType::Skeleton => format!("skeleton:{}", class.class_id),
+    };
+    let name = match annotation_type {
+        AnnotationType::BoundingBox => format!("{} bounding boxes", class.name),
+        AnnotationType::Skeleton => format!("{} skeletons", class.name),
+    };
+    config.tasks = vec![TaskDefinition {
+        task_id: TaskId::from(task_id),
+        name,
+        annotation_type,
+        class_ids: vec![class.class_id],
+        instructions: TutorialContent {
+            title: "Label every visible object".to_string(),
+            example_text: "Annotate every visible instance of the configured class.".to_string(),
+            example_images: Vec::new(),
+        },
+        skeleton: None,
+        review: ReviewConfig::default(),
+        prelabel_config_ids: Vec::new(),
+        enabled: true,
+    }];
 }
 
 fn edit_string_list(ui: &mut egui::Ui, values: &mut Vec<String>, button: &str, default: &str) {

@@ -113,6 +113,15 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_next_image(&mut self) {
+        if !self.ensure_valid_task_selection() {
+            self.queue.set_loading(false);
+            self.loading.image = false;
+            self.runtime.error = Some(
+                "No enabled workflow is configured. Open Admin and create a single-class workflow."
+                    .to_string(),
+            );
+            return;
+        }
         let Some(task) = self.selected_task().cloned() else {
             return;
         };

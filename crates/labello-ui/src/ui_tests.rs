@@ -83,13 +83,17 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     harness.step();
     click_accesskit_button(&mut harness, "Add role assignment");
     harness.step();
+    click_accesskit_button(&mut harness, "Use bounding box workflow");
+    harness.step();
 
     let config = harness.state().datasets.admin_config.as_ref().unwrap();
     assert_eq!(config.image_roots.len(), 2);
     assert_eq!(config.label_classes.len(), 3);
-    assert_eq!(config.tasks.len(), 3);
     assert_eq!(config.prelabel_configs.len(), 2);
     assert_eq!(config.role_assignments.len(), 2);
+    assert_eq!(config.tasks.len(), 1);
+    assert_eq!(config.tasks[0].annotation_type, AnnotationType::BoundingBox);
+    assert_eq!(config.tasks[0].class_ids.len(), 1);
 
     click_accesskit_button(&mut harness, "Save Admin Config");
     step_until(&mut harness, 8, |_| api.counts().update_dataset_config == 1);
@@ -101,6 +105,8 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     let before_ingest = api.counts();
     harness.state_mut().request_ingest();
     harness.step();
+    let badge = harness.get_by_label("Dataset demo");
+    assert!(badge.rect().height() < 80.0);
     step_until(&mut harness, 16, |_| api.counts().ingest_dataset >= 1);
     assert_eq!(
         api.counts().ingest_dataset,
@@ -124,6 +130,55 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     click(&mut harness, "Work");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
+}
+
+#[test]
+fn image_load_failure_shows_retry_and_loads_image() {
+    let api = Rc::new(SpyApi::new());
+    api.fail_next_preview();
+    let mut harness = live_harness(api.clone());
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+    click(&mut harness, "Open");
+    step_until(&mut harness, 20, |app| {
+        !app.loading.image
+            && app
+                .runtime
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("preview failed"))
+    });
+    harness.step();
+
+    assert!(harness.state().current.is_none());
+    assert!(harness.query_by_label("Retry image load").is_some());
+    click(&mut harness, "Retry image load");
+    step_until(&mut harness, 12, |app| app.current.is_some());
+    assert!(api.counts().get_image_preview >= 2);
+}
+
+#[test]
+fn missing_workflow_is_actionable() {
+    let api = Rc::new(SpyApi::new());
+    api.clear_workflows();
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+    click(&mut harness, "Open");
+    step_until(&mut harness, 20, |app| {
+        app.runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("No enabled workflow"))
+    });
+
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No enabled workflow")
+    );
 }
 
 #[test]
@@ -402,6 +457,14 @@ impl SpyApi {
     fn events(&self) -> Vec<EventPayload> {
         self.state.borrow().events.clone()
     }
+
+    fn fail_next_preview(&self) {
+        self.state.borrow_mut().fail_next_preview = true;
+    }
+
+    fn clear_workflows(&self) {
+        self.state.borrow_mut().metadata.tasks.clear();
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -431,6 +494,7 @@ struct SpyState {
     counts: CallCounts,
     next_image: usize,
     events: Vec<EventPayload>,
+    fail_next_preview: bool,
 }
 
 impl SpyState {
@@ -488,6 +552,7 @@ impl SpyState {
             counts: CallCounts::default(),
             next_image: 0,
             events: Vec::new(),
+            fail_next_preview: false,
         }
     }
 
@@ -694,7 +759,12 @@ impl ImageApi for SpyApi {
         image_id: &'a ImageId,
         _max_dimension: u32,
     ) -> ApiFuture<'a, ImagePreview> {
-        self.state.borrow_mut().counts.get_image_preview += 1;
+        let mut state = self.state.borrow_mut();
+        state.counts.get_image_preview += 1;
+        if state.fail_next_preview {
+            state.fail_next_preview = false;
+            return ready(Err(ClientError::Demo("preview failed".to_string())));
+        }
         ready(Ok(ImagePreview {
             image_id: image_id.clone(),
             width: 4,
