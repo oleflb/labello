@@ -1,0 +1,16 @@
+[package]
+name = "labello-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+eframe.workspace = true
+labello-ui = { path = "../../crates/labello-ui" }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["Document", "Element", "HtmlCanvasElement", "Window"] }

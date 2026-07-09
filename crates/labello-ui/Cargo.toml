@@ -1,0 +1,12 @@
+[package]
+name = "labello-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+labello-domain = { path = "../labello-domain" }
+serde.workspace = true

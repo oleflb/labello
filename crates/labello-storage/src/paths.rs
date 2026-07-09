@@ -1,0 +1,9 @@
+pub const DATASET_FILE: &str = "labello.dataset.json";
+pub const SCHEMA_FILE: &str = "labello.schema.json";
+pub const IMAGES_INDEX_FILE: &str = "images-index.json";
+pub const IMAGES_DIR: &str = "images";
+pub const ANNOTATIONS_DIR: &str = "annotations";
+pub const STATE_FILE: &str = "state.json";
+pub const EVENTS_FILE: &str = "events.jsonl";
+pub const USERS_DIR: &str = "users";
+pub const KEYBINDINGS_FILE: &str = "keybindings.json";
