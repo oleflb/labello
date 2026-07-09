@@ -157,6 +157,43 @@ fn image_load_failure_shows_retry_and_loads_image() {
 }
 
 #[test]
+fn workers_select_class_specific_workflows() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+
+    assert!(harness.query_by_label("Person bounding box").is_some());
+    assert!(harness.query_by_label("Vehicle bounding box").is_some());
+    click(&mut harness, "Vehicle bounding box");
+    step_until(&mut harness, 12, |app| {
+        app.selected_class_id() == Some(&ClassId::from("vehicle")) && app.current.is_some()
+    });
+
+    assert_eq!(
+        harness
+            .state()
+            .selected_task()
+            .map(|task| task.task_id.clone()),
+        Some(TaskId::from("bounding_box:vehicle"))
+    );
+    assert!(harness.query_by_label("Accept").is_none());
+
+    let canvas = harness.get_by_label("Annotation canvas");
+    let rect = canvas.rect();
+    let start = rect.left_top() + rect.size() * 0.25;
+    let end = rect.left_top() + rect.size() * 0.45;
+    harness.drag_at(start);
+    harness.step();
+    harness.hover_at(end);
+    harness.step();
+    harness.drop_at(end);
+    harness.step();
+
+    let annotation = harness.state().annotations.last().unwrap();
+    assert_eq!(annotation.task_id, TaskId::from("bounding_box:vehicle"));
+    assert_eq!(annotation.class_id, ClassId::from("vehicle"));
+}
+
+#[test]
 fn missing_workflow_is_actionable() {
     let api = Rc::new(SpyApi::new());
     api.clear_workflows();
@@ -1020,11 +1057,12 @@ fn image_record(image_id: &str, file_name: &str, width: u32, height: u32) -> Ima
 }
 
 fn task(id: &str, name: &str, prelabel_configs: Vec<&str>) -> TaskDefinition {
+    let class_id = id.split(':').nth(1).unwrap_or("person");
     TaskDefinition {
         task_id: TaskId::from(id),
         name: name.to_string(),
         annotation_type: AnnotationType::BoundingBox,
-        class_ids: vec![ClassId::from("person")],
+        class_ids: vec![ClassId::from(class_id)],
         instructions: TutorialContent {
             title: "Label every visible person".to_string(),
             example_text: "Draw tight boxes around every person.".to_string(),

@@ -261,6 +261,7 @@ pub struct WorkState {
     pub(crate) classes: Vec<LabelClass>,
     pub(crate) tasks: Vec<TaskDefinition>,
     pub(crate) selected_task: usize,
+    pub(crate) selected_class_id: Option<ClassId>,
     pub(crate) tool: Tool,
     pub(crate) current: Option<QueuedImage>,
     pub(crate) current_state: Option<ImageState>,
@@ -276,6 +277,25 @@ pub struct WorkState {
     pub(crate) offline: bool,
     pub(crate) review_index: usize,
     pub(crate) show_tutorial: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkflowChoice {
+    pub task_index: usize,
+    pub task_name: String,
+    pub class_id: ClassId,
+    pub class_name: String,
+    pub annotation_type: AnnotationType,
+}
+
+impl WorkflowChoice {
+    pub(crate) fn label(&self) -> String {
+        format!(
+            "{} {}",
+            self.class_name,
+            annotation_type_label(&self.annotation_type)
+        )
+    }
 }
 
 pub struct LabelloApp {
@@ -347,6 +367,7 @@ impl LabelloApp {
             classes,
             tasks,
             selected_task: 0,
+            selected_class_id: Some(ClassId::from("person")),
             tool: Tool::BoundingBox,
             current,
             current_state: None,
@@ -391,23 +412,112 @@ impl LabelloApp {
             .filter(|task| task.enabled && !task.class_ids.is_empty())
     }
 
+    pub(crate) fn selected_class_id(&self) -> Option<&ClassId> {
+        let task = self.selected_task()?;
+        self.selected_class_id
+            .as_ref()
+            .filter(|class_id| task.class_ids.contains(class_id))
+    }
+
+    pub(crate) fn workflow_choices(&self) -> Vec<WorkflowChoice> {
+        let mut choices = Vec::new();
+        for (task_index, task) in self.tasks.iter().enumerate() {
+            if !task.enabled {
+                continue;
+            }
+            for class_id in &task.class_ids {
+                choices.push(WorkflowChoice {
+                    task_index,
+                    task_name: task.name.clone(),
+                    class_id: class_id.clone(),
+                    class_name: self.class_name(class_id),
+                    annotation_type: task.annotation_type.clone(),
+                });
+            }
+        }
+        choices
+    }
+
+    pub(crate) fn selected_workflow(&self) -> Option<WorkflowChoice> {
+        let task = self.selected_task()?;
+        let class_id = self.selected_class_id()?;
+        Some(WorkflowChoice {
+            task_index: self.selected_task,
+            task_name: task.name.clone(),
+            class_id: class_id.clone(),
+            class_name: self.class_name(class_id),
+            annotation_type: task.annotation_type.clone(),
+        })
+    }
+
+    pub(crate) fn select_workflow(&mut self, task_index: usize, class_id: ClassId) -> bool {
+        let Some(task) = self.tasks.get(task_index) else {
+            return false;
+        };
+        if !task.enabled || !task.class_ids.contains(&class_id) {
+            return false;
+        }
+        if self.selected_task == task_index && self.selected_class_id.as_ref() == Some(&class_id) {
+            return false;
+        }
+        let annotation_type = task.annotation_type.clone();
+        self.selected_task = task_index;
+        self.selected_class_id = Some(class_id);
+        self.tool = tool_for_annotation_type(&annotation_type);
+        true
+    }
+
     pub(crate) fn ensure_valid_task_selection(&mut self) -> bool {
-        if self.selected_task().is_some() {
+        if self.selected_class_id().is_some() {
             return true;
         }
-        let Some(index) = self
+        let Some((index, class_id, annotation_type)) = self
             .tasks
             .iter()
-            .position(|task| task.enabled && !task.class_ids.is_empty())
+            .enumerate()
+            .find(|(_, task)| task.enabled && !task.class_ids.is_empty())
+            .map(|(index, task)| {
+                (
+                    index,
+                    task.class_ids[0].clone(),
+                    task.annotation_type.clone(),
+                )
+            })
         else {
             return false;
         };
         self.selected_task = index;
-        self.tool = match self.tasks[index].annotation_type {
-            AnnotationType::BoundingBox => Tool::BoundingBox,
-            AnnotationType::Skeleton => Tool::Keypoints,
-        };
+        self.selected_class_id = Some(class_id);
+        self.tool = tool_for_annotation_type(&annotation_type);
         true
+    }
+
+    pub(crate) fn sync_work_config(&mut self, metadata: DatasetMetadata) {
+        self.classes = metadata.label_classes.clone();
+        self.tasks = metadata.tasks.clone();
+        self.datasets.metadata = Some(metadata);
+        self.ensure_valid_task_selection();
+    }
+
+    pub(crate) fn annotation_matches_selected_workflow(
+        &self,
+        annotation: &labello_domain::AnnotationVersion,
+    ) -> bool {
+        let Some(task) = self.selected_task() else {
+            return false;
+        };
+        let Some(class_id) = self.selected_class_id() else {
+            return false;
+        };
+        annotation.task_id == task.task_id && &annotation.class_id == class_id
+    }
+
+    fn class_name(&self, class_id: &ClassId) -> String {
+        self.classes
+            .iter()
+            .find(|class| &class.class_id == class_id)
+            .map(|class| class.name.clone())
+            .unwrap_or_else(|| class_id.to_string())
     }
 
     pub(crate) fn next_image(&mut self) {
@@ -453,7 +563,7 @@ impl LabelloApp {
         let Some(task) = self.selected_task() else {
             return;
         };
-        let Some(class_id) = task.class_ids.first() else {
+        let Some(class_id) = self.selected_class_id() else {
             return;
         };
         let task_id = task.task_id.clone();
@@ -477,6 +587,15 @@ impl LabelloApp {
     }
 
     pub(crate) fn accept_prelabel(&mut self, suggestion: &PrelabelSuggestion) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        let Some(class_id) = self.selected_class_id() else {
+            return;
+        };
+        if suggestion.task_id != task.task_id || &suggestion.class_id != class_id {
+            return;
+        }
         if self
             .accepted_prelabels
             .iter()
@@ -541,6 +660,20 @@ impl LabelloApp {
             self.save_status = SaveStatus::Dirty;
             self.review_index = self.review_index.saturating_add(1);
         }
+    }
+}
+
+pub(crate) fn tool_for_annotation_type(annotation_type: &AnnotationType) -> Tool {
+    match annotation_type {
+        AnnotationType::BoundingBox => Tool::BoundingBox,
+        AnnotationType::Skeleton => Tool::Keypoints,
+    }
+}
+
+pub(crate) fn annotation_type_label(annotation_type: &AnnotationType) -> &'static str {
+    match annotation_type {
+        AnnotationType::BoundingBox => "bounding box",
+        AnnotationType::Skeleton => "skeleton",
     }
 }
 

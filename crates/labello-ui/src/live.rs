@@ -79,6 +79,7 @@ impl LabelloApp {
                     self.loading.admin = false;
                     match result {
                         Ok(metadata) => {
+                            self.sync_work_config(metadata.clone());
                             self.datasets.admin_config = Some(metadata);
                             self.view = AppView::Admin;
                             self.runtime.error = None;
@@ -89,6 +90,7 @@ impl LabelloApp {
                 UiMessage::AdminSaved(result) => match result {
                     Ok(metadata) => {
                         self.loading.admin = false;
+                        self.sync_work_config(metadata.clone());
                         self.datasets.admin_config = Some(metadata);
                         self.runtime.notice = Some("Admin config saved".to_string());
                         self.runtime.error = None;
@@ -397,20 +399,18 @@ impl LabelloApp {
     }
 
     fn apply_loaded_dataset(&mut self, loaded: LoadedDataset) {
-        self.classes = loaded.metadata.label_classes.clone();
-        self.tasks = loaded.metadata.tasks.clone();
-        self.datasets.metadata = Some(loaded.metadata);
+        self.sync_work_config(loaded.metadata);
         self.keybindings = loaded.keybindings;
         self.view = AppView::Annotate;
         if self.ensure_valid_task_selection() {
             self.runtime.error = None;
         } else {
             self.runtime.error = Some(
-                "No enabled workflow is configured. Open Admin and create a single-class workflow."
+                "No enabled workflow is configured. Ask a data admin to enable at least one class workflow."
                     .to_string(),
             );
         }
-        if self.current.is_none() && self.selected_task().is_some() {
+        if self.current.is_none() && self.selected_class_id().is_some() {
             self.request_next_image();
         }
     }
@@ -438,6 +438,9 @@ impl LabelloApp {
                     self.runtime.error = None;
                     self.request_admin_dataset();
                     self.request_dataset_list();
+                    if self.view == AppView::Annotate && self.current.is_none() {
+                        self.request_next_image();
+                    }
                 }
                 IngestJobStatus::Failed => {
                     self.loading.ingesting = false;

@@ -117,7 +117,7 @@ impl LabelloApp {
             self.queue.set_loading(false);
             self.loading.image = false;
             self.runtime.error = Some(
-                "No enabled workflow is configured. Open Admin and create a single-class workflow."
+                "No enabled workflow is configured. Ask a data admin to enable at least one class workflow."
                     .to_string(),
             );
             return;

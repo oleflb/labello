@@ -1,8 +1,10 @@
 use eframe::egui::{self, Color32, RichText};
-use labello_domain::{AdjudicationDecision, AnnotationType, ReviewDecision};
+use labello_domain::{AdjudicationDecision, ReviewDecision};
 
 use crate::{
-    app::{AppView, IMAGE_QUEUE_SIZE, LabelloApp, QueueMode, SaveStatus, Tool},
+    app::{
+        AppView, IMAGE_QUEUE_SIZE, LabelloApp, QueueMode, SaveStatus, Tool, annotation_type_label,
+    },
     canvas::{CanvasAction, show_canvas},
     theme,
 };
@@ -71,32 +73,30 @@ impl LabelloApp {
         if matches!(self.view, AppView::Setup | AppView::Admin | AppView::Stats) {
             return;
         }
-        ui.heading(RichText::new("Task Focus").color(theme::TEXT));
+        ui.heading(RichText::new("Workflow Focus").color(theme::TEXT));
         ui.label(
-            RichText::new("Only the active task's classes and tools are shown.")
+            RichText::new("Pick one class and annotation type for this work session.")
                 .color(theme::MUTED),
         );
         ui.add_space(8.0);
-        let tasks = self.tasks.clone();
-        for (index, task) in tasks.iter().enumerate() {
-            if !task.enabled || task.class_ids.is_empty() {
-                continue;
-            }
-            let selected = self.selected_task == index;
+        let selected_class_id = self.selected_class_id().cloned();
+        let workflows = self.workflow_choices();
+        if workflows.is_empty() {
+            ui.colored_label(theme::AMBER, "No enabled workflows configured.");
+        }
+        for workflow in workflows {
+            let selected = self.selected_task == workflow.task_index
+                && selected_class_id.as_ref() == Some(&workflow.class_id);
             theme::card_frame().show(ui, |ui| {
                 if ui
-                    .selectable_label(selected, RichText::new(&task.name).strong())
+                    .selectable_label(selected, RichText::new(workflow.label()).strong())
                     .clicked()
+                    && self.select_workflow(workflow.task_index, workflow.class_id.clone())
                 {
-                    self.selected_task = index;
-                    self.tool = match task.annotation_type {
-                        AnnotationType::BoundingBox => Tool::BoundingBox,
-                        AnnotationType::Skeleton => Tool::Keypoints,
-                    };
                     self.clear_current_image();
                     self.request_next_image();
                 }
-                ui.small(format!("{} classes", task.class_ids.len()));
+                ui.small(format!("Task: {}", workflow.task_name));
             });
         }
         ui.add_space(10.0);
@@ -122,18 +122,23 @@ impl LabelloApp {
         ui.separator();
         if self.queue_mode == QueueMode::Annotate {
             ui.label(RichText::new("Tools").strong());
-            ui.selectable_value(&mut self.tool, Tool::BoundingBox, "Bounding box");
-            ui.selectable_value(&mut self.tool, Tool::Keypoints, "Keypoints");
+            if let Some(workflow) = self.selected_workflow() {
+                badge(
+                    ui,
+                    annotation_type_label(&workflow.annotation_type),
+                    theme::BLUE,
+                );
+            }
             ui.separator();
             ui.label(RichText::new("Classes").strong());
-            for class in &self.classes {
-                badge(ui, &class.name, theme::TEAL);
+            if let Some(workflow) = self.selected_workflow() {
+                badge(ui, &workflow.class_name, theme::TEAL);
             }
             ui.separator();
         }
         ui.label(RichText::new("Image Queue").strong());
         ui.label(format!("Queue size: {IMAGE_QUEUE_SIZE}"));
-        if self.queue.is_loading() || self.current.is_none() {
+        if self.loading.dataset || self.queue.is_loading() || self.current.is_none() {
             ui.colored_label(theme::AMBER, "Loading next image...");
         } else {
             ui.colored_label(theme::MUTED, format!("{} images ready", self.queue.len()));
@@ -148,7 +153,9 @@ impl LabelloApp {
         let active_count = self
             .annotations
             .iter()
-            .filter(|annotation| !annotation.deleted)
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
             .count();
         metric(ui, "Active annotations", active_count.to_string());
         match self.queue_mode {
@@ -257,7 +264,12 @@ impl LabelloApp {
             });
             ui.add_space(8.0);
             let texture = self.current_texture.clone();
-            let annotations = self.annotations.clone();
+            let annotations = self
+                .annotations
+                .iter()
+                .filter(|annotation| self.annotation_matches_selected_workflow(annotation))
+                .cloned()
+                .collect::<Vec<_>>();
             let bounding_box_tool = self.tool == Tool::BoundingBox;
             let action = show_canvas(
                 ui,
@@ -274,7 +286,10 @@ impl LabelloApp {
             }
         } else {
             ui.vertical_centered(|ui| {
-                if self.loading.image || self.queue.is_loading() {
+                if self.loading.dataset {
+                    ui.spinner();
+                    ui.label("Opening dataset...");
+                } else if self.loading.image || self.queue.is_loading() {
                     ui.spinner();
                     ui.label("Loading next image...");
                 } else if let Some(error) = self.runtime.error.clone() {
@@ -299,10 +314,23 @@ impl LabelloApp {
     fn prelabel_panel(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("Prelabels");
+        let task_id = self.selected_task().map(|task| task.task_id.clone());
+        let class_id = self.selected_class_id().cloned();
         let prelabels = self
             .current
             .as_ref()
-            .map(|image| image.prelabels.clone())
+            .map(|image| {
+                image
+                    .prelabels
+                    .iter()
+                    .filter(|suggestion| {
+                        task_id.as_ref() == Some(&suggestion.task_id)
+                            && class_id.as_ref() == Some(&suggestion.class_id)
+                            && !self.accepted_prelabels.contains(&suggestion.suggestion_id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if prelabels.is_empty() {
             ui.label(RichText::new("No suggestions for this image.").color(theme::MUTED));

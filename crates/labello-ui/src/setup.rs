@@ -162,7 +162,16 @@ impl LabelloApp {
         self.view = AppView::Annotate;
         if self.datasets.metadata.is_none() {
             self.request_load_dataset();
-        } else if self.current.is_none() && !self.tasks.is_empty() {
+            return;
+        }
+        if !self.ensure_valid_task_selection() {
+            self.runtime.error = Some(
+                "No enabled workflow is configured. Ask a data admin to enable at least one class workflow."
+                    .to_string(),
+            );
+            return;
+        }
+        if self.current.is_none() {
             self.request_next_image();
         }
     }
