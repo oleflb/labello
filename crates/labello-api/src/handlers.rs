@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Multipart, Path, Query, State},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -37,6 +37,7 @@ pub fn router(state: ApiState) -> Router {
             get(get_admin_dataset).put(update_dataset_config),
         )
         .route("/datasets/{dataset_id}/ingest", post(ingest_dataset))
+        .route("/datasets/{dataset_id}/uploads", post(upload_images))
         .route(
             "/datasets/{dataset_id}/tasks",
             get(list_tasks).post(add_task),
@@ -54,8 +55,16 @@ pub fn router(state: ApiState) -> Router {
             get(workflow::get_image_state),
         )
         .route(
+            "/datasets/{dataset_id}/images/{image_id}/record",
+            get(workflow::get_image_record),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}/file",
             get(workflow::get_image_file),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/preview",
+            get(workflow::get_image_preview),
         )
         .route(
             "/datasets/{dataset_id}/images/{image_id}/events",
@@ -211,7 +220,7 @@ async fn get_admin_dataset(
     let repo = state.repo(&dataset_id);
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    Ok(Json(metadata))
+    Ok(Json(config_response(metadata)))
 }
 
 async fn update_dataset_config(
@@ -237,7 +246,7 @@ async fn update_dataset_config(
     metadata.prelabel_configs = request.prelabel_configs;
     metadata.updated_at = labello_domain::now();
     repo.save_dataset(&metadata).await?;
-    Ok(Json(metadata))
+    Ok(Json(config_response(metadata)))
 }
 
 async fn ingest_dataset(
@@ -250,6 +259,83 @@ async fn ingest_dataset(
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     Ok(Json(storage_ingest_to_client(repo.ingest_images().await?)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadQuery {
+    root: String,
+    #[serde(default = "default_upload_ingest")]
+    ingest: bool,
+}
+
+fn default_upload_ingest() -> bool {
+    true
+}
+
+async fn upload_images(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<Json<labello_client::IngestReport>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id);
+    let mut metadata = repo.load_dataset().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let root = normalize_upload_root(&query.root)?;
+    repo.safe_relative_root(&root)?;
+    let mut written_files = 0usize;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+    {
+        if field.name() != Some("files") {
+            continue;
+        }
+        let Some(file_name) = field.file_name().map(str::to_string) else {
+            continue;
+        };
+        let relative_path = upload_relative_path(&root, &file_name)?;
+        let path = repo.image_path(&relative_path)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                labello_storage::StorageError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        tokio::fs::write(&path, bytes).await.map_err(|source| {
+            labello_storage::StorageError::Io {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        written_files += 1;
+    }
+    if written_files == 0 {
+        return Err(ApiError::BadRequest(
+            "upload contained no files".to_string(),
+        ));
+    }
+    if !metadata.image_roots.contains(&root) {
+        metadata.image_roots.push(root);
+        metadata.updated_at = labello_domain::now();
+        repo.save_dataset(&metadata).await?;
+    }
+    let report = if query.ingest {
+        repo.ingest_images().await?
+    } else {
+        labello_storage::IngestReport::default()
+    };
+    Ok(Json(storage_ingest_to_client(report)))
 }
 
 fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_client::IngestReport {
@@ -277,6 +363,27 @@ fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_cl
             .collect(),
         unreadable_files: report.unreadable_files,
     }
+}
+
+fn normalize_upload_root(root: &str) -> ApiResult<String> {
+    let root = root.trim().trim_matches('/').to_string();
+    if root.is_empty() {
+        Err(ApiError::BadRequest(
+            "upload root cannot be empty".to_string(),
+        ))
+    } else {
+        Ok(root)
+    }
+}
+
+fn upload_relative_path(root: &str, file_name: &str) -> ApiResult<String> {
+    let file_name = file_name.trim().trim_matches('/').replace('\\', "/");
+    if file_name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "upload file name is empty".to_string(),
+        ));
+    }
+    Ok(format!("{root}/{file_name}"))
 }
 
 async fn list_tasks(
@@ -440,6 +547,7 @@ pub(crate) fn required_role_for_payload(
 }
 
 fn sanitize_dataset(mut metadata: DatasetMetadata, actor: &Actor) -> DatasetMetadata {
+    metadata.images.clear();
     if !has_dataset_role(&metadata, &actor.user_id, &DatasetRole::DataAdmin) {
         metadata.role_assignments.clear();
         metadata.image_roots.clear();
@@ -447,6 +555,11 @@ fn sanitize_dataset(mut metadata: DatasetMetadata, actor: &Actor) -> DatasetMeta
             .prelabel_configs
             .retain(|config| config.available_to_annotators);
     }
+    metadata
+}
+
+fn config_response(mut metadata: DatasetMetadata) -> DatasetMetadata {
+    metadata.images.clear();
     metadata
 }
 

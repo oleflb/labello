@@ -23,6 +23,16 @@ use crate::{
 
 use super::{required_role_for_payload, validate_payload};
 
+#[derive(serde::Deserialize)]
+pub(crate) struct PreviewQuery {
+    #[serde(default = "default_preview_max")]
+    max: u32,
+}
+
+fn default_preview_max() -> u32 {
+    1600
+}
+
 pub(crate) async fn assign_next(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
@@ -55,6 +65,23 @@ pub(crate) async fn get_image_state(
     Ok(Json(repo.load_image_state(&image_id).await?))
 }
 
+pub(crate) async fn get_image_record(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<labello_domain::ImageRecord>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id);
+    let metadata = repo.load_dataset().await?;
+    ensure_any_dataset_role(&metadata, &actor)?;
+    let record = metadata
+        .images
+        .get(&image_id)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
+    Ok(Json(record))
+}
+
 pub(crate) async fn get_image_file(
     State(state): State<ApiState>,
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
@@ -81,6 +108,56 @@ pub(crate) async fn get_image_file(
         [(header::CONTENT_TYPE, record.media_type.clone())],
         Bytes::from(bytes),
     ))
+}
+
+pub(crate) async fn get_image_preview(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    Query(query): Query<PreviewQuery>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id);
+    let metadata = repo.load_dataset().await?;
+    ensure_any_dataset_role(&metadata, &actor)?;
+    let record = metadata
+        .images
+        .get(&image_id)
+        .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
+    let path = repo.image_path(&record.canonical_path)?;
+    let max = query.max.clamp(256, 4096);
+    let (width, height, rgba) = tokio::task::spawn_blocking(move || preview_rgba(path, max))
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))??;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::HeaderName::from_static("x-image-width"),
+                width.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-image-height"),
+                height.to_string(),
+            ),
+        ],
+        Bytes::from(rgba),
+    ))
+}
+
+fn preview_rgba(path: std::path::PathBuf, max: u32) -> Result<(u32, u32, Vec<u8>), ApiError> {
+    let image = image::open(&path).map_err(|source| labello_storage::StorageError::Image {
+        path: path.clone(),
+        source,
+    })?;
+    let image = if image.width().max(image.height()) > max {
+        image.resize(max, max, image::imageops::FilterType::Triangle)
+    } else {
+        image
+    };
+    let rgba = image.to_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
 pub(crate) async fn append_event(
@@ -333,6 +410,11 @@ pub(crate) async fn prelabel_suggestions(
         .iter()
         .find(|config| config.config_id == request.config_id)
         .ok_or_else(|| ApiError::NotFound("prelabel config".to_string()))?;
+    if !config.available_to_annotators {
+        return Err(ApiError::Unauthorized(
+            "prelabel config is not available to annotators".to_string(),
+        ));
+    }
     let task = metadata
         .task(&request.task_id)
         .ok_or_else(|| ApiError::NotFound("task".to_string()))?;

@@ -22,6 +22,7 @@ impl LabelloApp {
         });
         let current_user = self.config.user_id.clone();
         let ingesting_now = self.loading.ingesting;
+        let uploading_now = self.loading.uploading;
         let Some(config) = self.datasets.admin_config.as_mut() else {
             ui.label(RichText::new("Admin config is not loaded.").color(theme::MUTED));
             if ui.button("Load admin config").clicked() {
@@ -32,15 +33,29 @@ impl LabelloApp {
 
         let mut save = false;
         let mut ingest = false;
+        let mut upload_folder = false;
         egui::ScrollArea::vertical().show(ui, |ui| {
             theme::card_frame().show(ui, |ui| {
                 ui.heading("Dataset");
-                ui.text_edit_singleline(&mut config.name);
+                ui.text_edit_singleline(&mut config.name)
+                    .on_hover_text("Human-readable dataset name stored in labello.dataset.toml.");
             });
 
             theme::card_frame().show(ui, |ui| {
                 ui.heading("Image Roots");
                 edit_string_list(ui, &mut config.image_roots, "Add image root", "images");
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Pick folder and upload")
+                        .on_hover_text("Open a browser folder picker, upload files to a new dataset-relative root, then ingest them.")
+                        .clicked()
+                    {
+                        upload_folder = true;
+                    }
+                    if uploading_now {
+                        ui.spinner();
+                    }
+                });
                 ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
             });
 
@@ -51,10 +66,18 @@ impl LabelloApp {
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("Save Admin Config").clicked() {
+                if ui
+                    .button("Save Admin Config")
+                    .on_hover_text("Persist admin settings to labello.dataset.toml.")
+                    .clicked()
+                {
                     save = true;
                 }
-                if ui.button("Run Ingest").clicked() {
+                if ui
+                    .button("Run Ingest")
+                    .on_hover_text("Scan configured image roots and update the dataset image index.")
+                    .clicked()
+                {
                     ingest = true;
                 }
                 if ingesting_now {
@@ -68,6 +91,9 @@ impl LabelloApp {
         if ingest {
             self.request_ingest();
         }
+        if upload_folder {
+            self.request_folder_upload();
+        }
     }
 
     pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
@@ -76,7 +102,11 @@ impl LabelloApp {
             if self.loading.stats {
                 ui.spinner();
             }
-            if ui.button("Refresh now").clicked() {
+            if ui
+                .button("Refresh now")
+                .on_hover_text("Refresh statistics immediately. They also refresh automatically.")
+                .clicked()
+            {
                 self.request_stats();
             }
         });
@@ -129,7 +159,8 @@ fn edit_string_list(ui: &mut egui::Ui, values: &mut Vec<String>, button: &str, d
     let mut remove = None;
     for (index, value) in values.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(value);
+            ui.text_edit_singleline(value)
+                .on_hover_text("Dataset-relative folder under the dataset root.");
             if ui.small_button("Remove").clicked() {
                 remove = Some(index);
             }
@@ -138,7 +169,11 @@ fn edit_string_list(ui: &mut egui::Ui, values: &mut Vec<String>, button: &str, d
     if let Some(index) = remove {
         values.remove(index);
     }
-    if ui.button(button).clicked() {
+    if ui
+        .button(button)
+        .on_hover_text("Add another entry.")
+        .clicked()
+    {
         values.push(default.to_string());
     }
 }
@@ -150,13 +185,20 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>) {
         for (index, label) in labels.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut class_id = label.class_id.to_string();
-                if ui.text_edit_singleline(&mut class_id).changed() {
+                if ui
+                    .text_edit_singleline(&mut class_id)
+                    .on_hover_text("Stable class id used by annotations and tasks.")
+                    .changed()
+                {
                     label.class_id = ClassId::from(class_id);
                 }
-                ui.text_edit_singleline(&mut label.name);
-                ui.text_edit_singleline(&mut label.color);
+                ui.text_edit_singleline(&mut label.name)
+                    .on_hover_text("Display name shown to annotators.");
+                ui.text_edit_singleline(&mut label.color)
+                    .on_hover_text("Class color as a hex value, for example #5eead4.");
                 let description = label.description.get_or_insert_with(String::new);
-                ui.text_edit_singleline(description);
+                ui.text_edit_singleline(description)
+                    .on_hover_text("Optional label description.");
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
                 }
@@ -184,10 +226,15 @@ fn edit_tasks(ui: &mut egui::Ui, tasks: &mut Vec<TaskDefinition>, labels: &[Labe
             ui.separator();
             ui.horizontal(|ui| {
                 let mut task_id = task.task_id.to_string();
-                if ui.text_edit_singleline(&mut task_id).changed() {
+                if ui
+                    .text_edit_singleline(&mut task_id)
+                    .on_hover_text("Stable task id used by assignments and event logs.")
+                    .changed()
+                {
                     task.task_id = TaskId::from(task_id);
                 }
-                ui.text_edit_singleline(&mut task.name);
+                ui.text_edit_singleline(&mut task.name)
+                    .on_hover_text("Task name shown in the work panel.");
                 ui.checkbox(&mut task.enabled, "enabled");
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
@@ -209,9 +256,11 @@ fn edit_tasks(ui: &mut egui::Ui, tasks: &mut Vec<TaskDefinition>, labels: &[Labe
                 });
             ui.horizontal(|ui| {
                 ui.label("Instruction title");
-                ui.text_edit_singleline(&mut task.instructions.title);
+                ui.text_edit_singleline(&mut task.instructions.title)
+                    .on_hover_text("Tutorial/instruction title.");
             });
-            ui.text_edit_multiline(&mut task.instructions.example_text);
+            ui.text_edit_multiline(&mut task.instructions.example_text)
+                .on_hover_text("Instructions annotators see in the tutorial panel.");
             ui.label("Allowed classes");
             for label in labels {
                 let mut enabled = task.class_ids.contains(&label.class_id);
@@ -260,10 +309,15 @@ fn edit_prelabels(ui: &mut egui::Ui, configs: &mut Vec<PrelabelConfig>) {
             ui.separator();
             ui.horizontal(|ui| {
                 let mut config_id = config.config_id.to_string();
-                if ui.text_edit_singleline(&mut config_id).changed() {
+                if ui
+                    .text_edit_singleline(&mut config_id)
+                    .on_hover_text("Stable prelabel config id referenced by tasks.")
+                    .changed()
+                {
                     config.config_id = PrelabelConfigId::from(config_id);
                 }
-                ui.text_edit_singleline(&mut config.name);
+                ui.text_edit_singleline(&mut config.name)
+                    .on_hover_text("Display name for this prelabel source.");
                 ui.checkbox(&mut config.available_to_annotators, "available");
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
@@ -271,12 +325,15 @@ fn edit_prelabels(ui: &mut egui::Ui, configs: &mut Vec<PrelabelConfig>) {
             });
             ui.horizontal(|ui| {
                 ui.label("Model");
-                ui.text_edit_singleline(&mut config.model.model_id);
-                ui.text_edit_singleline(&mut config.model.display_name);
+                ui.text_edit_singleline(&mut config.model.model_id)
+                    .on_hover_text("Stable model id.");
+                ui.text_edit_singleline(&mut config.model.display_name)
+                    .on_hover_text("Model display name.");
             });
             ui.horizontal(|ui| {
                 ui.label("Location");
-                ui.text_edit_singleline(&mut config.model.location);
+                ui.text_edit_singleline(&mut config.model.location)
+                    .on_hover_text("Server/browser model location, depending on execution mode.");
             });
             ui.add(
                 egui::Slider::new(
@@ -324,7 +381,11 @@ fn edit_roles(
         for (index, assignment) in assignments.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut user_id = assignment.user_id.to_string();
-                if ui.text_edit_singleline(&mut user_id).changed() {
+                if ui
+                    .text_edit_singleline(&mut user_id)
+                    .on_hover_text("User id receiving these dataset roles.")
+                    .changed()
+                {
                     assignment.user_id = UserId::from(user_id);
                 }
                 role_checkbox(

@@ -37,6 +37,9 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Storage(labello_storage::StorageError::NotFound(_)) => StatusCode::NOT_FOUND,
+            ApiError::Storage(labello_storage::StorageError::OutsideDatasetRoot(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             ApiError::Storage(labello_storage::StorageError::Unauthorized(_)) => {
                 StatusCode::UNAUTHORIZED
             }

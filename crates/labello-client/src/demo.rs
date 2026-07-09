@@ -2,15 +2,15 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use labello_domain::{
     AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    EventPayload, ImageId, ImageState, KeybindingSet, OfflineBundle, OfflineSyncRequest,
-    OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord, TaskDefinition,
-    UserAccount, UserId,
+    EventPayload, ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle,
+    OfflineSyncRequest, OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord,
+    TaskDefinition, UserAccount, UserId,
 };
 
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
     CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi, ImageFile,
-    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
+    ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
     OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
     UpdateDatasetConfigRequest,
 };
@@ -175,6 +175,27 @@ impl ImageApi for DemoLabelloApi {
         Box::pin(async move { Ok(ImageState::new(image_id.clone())) })
     }
 
+    fn get_image_record<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> crate::ApiFuture<'a, ImageRecord> {
+        Box::pin(async move {
+            Ok(ImageRecord {
+                image_id: image_id.clone(),
+                blake3: image_id.to_string(),
+                canonical_path: format!("images/{image_id}.png"),
+                known_paths: vec![],
+                duplicate_paths: vec![],
+                file_name: format!("{image_id}.png"),
+                byte_size: 4,
+                width: 1,
+                height: 1,
+                media_type: "image/png".to_string(),
+            })
+        })
+    }
+
     fn get_image_file<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,
@@ -185,6 +206,22 @@ impl ImageApi for DemoLabelloApi {
                 image_id: image_id.clone(),
                 media_type: "application/octet-stream".to_string(),
                 bytes: Vec::new(),
+            })
+        })
+    }
+
+    fn get_image_preview<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _max_dimension: u32,
+    ) -> crate::ApiFuture<'a, ImagePreview> {
+        Box::pin(async move {
+            Ok(ImagePreview {
+                image_id: image_id.clone(),
+                width: 1,
+                height: 1,
+                rgba: vec![18, 23, 34, 255],
             })
         })
     }

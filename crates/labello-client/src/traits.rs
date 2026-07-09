@@ -2,14 +2,14 @@ use std::{future::Future, pin::Pin};
 
 use labello_domain::{
     AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    EventPayload, ImageId, ImageState, KeybindingSet, OfflineBundle, OfflineSyncRequest,
-    OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord, TaskDefinition,
-    UserAccount, UserId,
+    EventPayload, ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle,
+    OfflineSyncRequest, OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord,
+    TaskDefinition, UserAccount, UserId,
 };
 
 use crate::{
     AppendEventRequest, AssignNextRequest, ClientResult, CorrectionRequest, CreateDatasetRequest,
-    DatasetSummary, ImageFile, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
+    DatasetSummary, ImageFile, ImagePreview, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
     OfflineBundleRequest, PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
 };
 
@@ -52,11 +52,22 @@ pub trait ImageApi {
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
     ) -> ApiFuture<'a, ImageState>;
+    fn get_image_record<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, ImageRecord>;
     fn get_image_file<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
     ) -> ApiFuture<'a, ImageFile>;
+    fn get_image_preview<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        max_dimension: u32,
+    ) -> ApiFuture<'a, ImagePreview>;
     fn rebuild_image<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

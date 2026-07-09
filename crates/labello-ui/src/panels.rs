@@ -32,13 +32,25 @@ impl LabelloApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.mode_toolbar(ui);
-                if ui.button("Next image").clicked() {
+                if ui
+                    .button("Next image")
+                    .on_hover_text("Save pending edits if needed and load the next assigned image.")
+                    .clicked()
+                {
                     self.next_image();
                 }
-                if ui.button("Save").clicked() {
+                if ui
+                    .button("Save")
+                    .on_hover_text("Persist current annotation edits as event-log entries.")
+                    .clicked()
+                {
                     self.autosave();
                 }
-                if ui.button("Submit").clicked() {
+                if ui
+                    .button("Submit")
+                    .on_hover_text("Save annotations and mark the active task as submitted.")
+                    .clicked()
+                {
                     self.request_save(true);
                 }
                 ui.toggle_value(&mut self.show_tutorial, "Tutorial");
@@ -96,6 +108,7 @@ impl LabelloApp {
         let mut queue_size = self.queue.queue_size();
         if ui
             .add(egui::Slider::new(&mut queue_size, 1..=12).text("preload"))
+            .on_hover_text("Number of queued images to keep ready.")
             .changed()
         {
             self.queue.set_queue_size(queue_size);
@@ -125,14 +138,22 @@ impl LabelloApp {
         metric(ui, "Active annotations", active_count.to_string());
         metric(ui, "Review cursor", (self.review_index + 1).to_string());
         ui.horizontal(|ui| {
-            if ui.button("Approve y").clicked() {
+            if ui
+                .button("Approve y")
+                .on_hover_text("Approve the current review target.")
+                .clicked()
+            {
                 if self.runtime.api.is_some() {
                     self.request_review(ReviewDecision::Approved);
                 } else {
                     self.review_index = self.review_index.saturating_add(1);
                 }
             }
-            if ui.button("Reject n").clicked() {
+            if ui
+                .button("Reject n")
+                .on_hover_text("Reject the current review target and request correction.")
+                .clicked()
+            {
                 if self.runtime.api.is_some() {
                     self.request_review(ReviewDecision::Rejected);
                 } else {
@@ -141,10 +162,18 @@ impl LabelloApp {
             }
         });
         ui.horizontal(|ui| {
-            if ui.button("Adjudicate accept").clicked() {
+            if ui
+                .button("Adjudicate accept")
+                .on_hover_text("Resolve adjudication by accepting annotations.")
+                .clicked()
+            {
                 self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
             }
-            if ui.button("Needs correction").clicked() {
+            if ui
+                .button("Needs correction")
+                .on_hover_text("Resolve adjudication by sending the task back for correction.")
+                .clicked()
+            {
                 self.request_adjudication(AdjudicationDecision::NeedsCorrection);
             }
         });
@@ -167,10 +196,18 @@ impl LabelloApp {
                         &format!("{:.0}%", suggestion.confidence * 100.0),
                         theme::TEAL,
                     );
-                    if ui.button("Accept").clicked() {
+                    if ui
+                        .button("Accept")
+                        .on_hover_text("Convert this suggestion into an annotation.")
+                        .clicked()
+                    {
                         self.accept_prelabel(suggestion);
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui
+                        .button("Discard")
+                        .on_hover_text("Hide this suggestion for the current image.")
+                        .clicked()
+                    {
                         self.accepted_prelabels
                             .push(suggestion.suggestion_id.clone());
                     }

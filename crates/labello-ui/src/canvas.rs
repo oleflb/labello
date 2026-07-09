@@ -1,5 +1,6 @@
 use egui::{
-    Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+    Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
+    WidgetType, pos2, vec2,
 };
 use labello_domain::{AnnotationGeometry, AnnotationId, AnnotationVersion, BoundingBox};
 
@@ -32,6 +33,7 @@ pub fn show_canvas(
         canvas_size.y = canvas_size.x / image_ratio;
     }
     let (rect, response) = ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Annotation canvas"));
     paint_canvas(ui, rect, texture, annotations, state.draft_box);
     handle_pointer(response, rect, state, annotations, bounding_box_tool)
 }

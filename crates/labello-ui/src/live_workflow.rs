@@ -1,16 +1,17 @@
-use std::rc::Rc;
+use std::{collections::BTreeSet, rc::Rc};
 
 use eframe::egui;
 use labello_client::{
     AppendEventRequest, AssignNextRequest, LabelloApi, PrelabelSuggestionRequest,
 };
 use labello_domain::{
-    AdjudicationDecision, AdjudicationId, AdjudicationRecord, AssignmentKind, EventPayload,
-    ImageId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, TaskState, TaskStatus,
+    AdjudicationDecision, AdjudicationId, AdjudicationRecord, AnnotationId, AssignmentKind,
+    EventPayload, ImageId, PrelabelConfigId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget,
+    TaskState, TaskStatus,
 };
 
 use crate::{
-    app::{LabelloApp, LoadedImage, QueueMode, SaveStatus, UiMessage},
+    app::{LabelloApp, LoadedImage, QueueMode, SaveStatus, UiCommand, UiMessage},
     queue::QueuedImage,
 };
 
@@ -25,166 +26,237 @@ impl QueueMode {
 }
 
 impl LabelloApp {
+    pub(crate) fn start_workflow_command(&self, api: Rc<dyn LabelloApi>, command: UiCommand) {
+        match command {
+            UiCommand::NextImage {
+                dataset_id,
+                task_id,
+                prelabel_config_ids,
+                kind,
+            } => self.spawn_message(async move {
+                let result =
+                    load_next_image(api, dataset_id, task_id, prelabel_config_ids, kind).await;
+                UiMessage::ImageLoaded(result.map_err(|error| error.to_string()))
+            }),
+            UiCommand::SaveAnnotations {
+                dataset_id,
+                image_id,
+                user_id,
+                task_id,
+                annotations,
+                persisted,
+                submit,
+            } => self.spawn_message(async move {
+                let result = save_annotations(SaveAnnotationsJob {
+                    api,
+                    dataset_id,
+                    image_id,
+                    user_id,
+                    task_id,
+                    annotations,
+                    persisted,
+                    submit,
+                })
+                .await
+                .map_err(|error| error.to_string());
+                UiMessage::SaveFinished(result)
+            }),
+            UiCommand::Review {
+                dataset_id,
+                image_id,
+                review,
+            } => self.spawn_message(async move {
+                UiMessage::ReviewFinished(
+                    api.record_review(&dataset_id, &image_id, review)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::Adjudication {
+                dataset_id,
+                image_id,
+                adjudication,
+            } => self.spawn_message(async move {
+                UiMessage::AdjudicationFinished(
+                    api.record_adjudication(&dataset_id, &image_id, adjudication)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            _ => {}
+        }
+    }
+
     pub(crate) fn request_next_image(&mut self) {
-        let (Some(api), Some(task)) = (self.runtime.api.clone(), self.selected_task().cloned())
-        else {
+        let Some(task) = self.selected_task().cloned() else {
             return;
         };
-        let dataset_id = self.config.dataset_id.clone();
-        let kind = self.queue_mode.assignment_kind();
+        if self.loading.image || self.runtime.api.is_none() {
+            return;
+        }
         self.loading.image = true;
         self.queue.set_loading(true);
-        self.spawn_message(async move {
-            let result = load_next_image(api, dataset_id, task.task_id, kind).await;
-            UiMessage::ImageLoaded(result.map_err(|error| error.to_string()))
+        self.queue_command(UiCommand::NextImage {
+            dataset_id: self.config.dataset_id.clone(),
+            task_id: task.task_id,
+            prelabel_config_ids: task.prelabel_config_ids,
+            kind: self.queue_mode.assignment_kind(),
         });
     }
 
     pub(crate) fn request_save(&mut self, submit: bool) {
-        let (Some(api), Some(current)) = (self.runtime.api.clone(), self.current.clone()) else {
+        let Some(current) = self.current.clone() else {
             return;
         };
-        if self.loading.saving {
+        if self.loading.saving || self.runtime.api.is_none() {
             return;
         }
-        let dataset_id = self.config.dataset_id.clone();
-        let user_id = self.config.user_id.clone();
-        let task_id = self.selected_task().map(|task| task.task_id.clone());
-        let annotations = self.annotations.clone();
-        let persisted = self.persisted_annotations.clone();
         self.loading.saving = true;
         self.save_status = SaveStatus::Syncing;
-        self.spawn_message(async move {
-            let result = async {
-                for annotation in annotations {
-                    if persisted.contains(&annotation.annotation_id) && annotation.deleted {
-                        api.append_event(
-                            &dataset_id,
-                            &current.image.image_id,
-                            AppendEventRequest {
-                                payload: EventPayload::AnnotationDeleted {
-                                    annotation_id: annotation.annotation_id,
-                                    version: annotation.version,
-                                    reason: None,
-                                },
-                            },
-                        )
-                        .await?;
-                    } else if !persisted.contains(&annotation.annotation_id) && !annotation.deleted
-                    {
-                        api.append_event(
-                            &dataset_id,
-                            &current.image.image_id,
-                            AppendEventRequest {
-                                payload: EventPayload::AnnotationVersionCreated {
-                                    annotation,
-                                    previous_version: None,
-                                    reason: None,
-                                },
-                            },
-                        )
-                        .await?;
-                    }
-                }
-                if submit && let Some(task_id) = task_id {
-                    let timestamp = labello_domain::now();
-                    api.append_event(
-                        &dataset_id,
-                        &current.image.image_id,
-                        AppendEventRequest {
-                            payload: EventPayload::TaskStateChanged {
-                                task_state: TaskState {
-                                    task_id,
-                                    status: TaskStatus::Submitted,
-                                    assigned_to: Some(user_id.clone()),
-                                    completed_by: Some(user_id),
-                                    completed_at: Some(timestamp),
-                                    updated_at: timestamp,
-                                },
-                            },
-                        },
-                    )
-                    .await?;
-                }
-                api.rebuild_image(&dataset_id, &current.image.image_id)
-                    .await
-            }
-            .await
-            .map_err(|error| error.to_string());
-            UiMessage::SaveFinished(result)
+        self.queue_command(UiCommand::SaveAnnotations {
+            dataset_id: self.config.dataset_id.clone(),
+            image_id: current.image.image_id,
+            user_id: self.config.user_id.clone(),
+            task_id: self.selected_task().map(|task| task.task_id.clone()),
+            annotations: self.annotations.clone(),
+            persisted: self.persisted_annotations.clone(),
+            submit,
         });
     }
 
     pub(crate) fn request_review(&mut self, decision: ReviewDecision) {
-        let (Some(api), Some(current), Some(task)) = (
-            self.runtime.api.clone(),
-            self.current.clone(),
-            self.selected_task().cloned(),
-        ) else {
+        let (Some(current), Some(task)) = (self.current.clone(), self.selected_task().cloned())
+        else {
             return;
         };
-        let dataset_id = self.config.dataset_id.clone();
-        let review = ReviewRecord {
-            review_id: ReviewId::generate(),
-            target: ReviewTarget::Task {
-                task_id: task.task_id,
-            },
-            reviewer_user_id: self.config.user_id.clone(),
-            decision,
-            timestamp: labello_domain::now(),
-            comment: None,
-        };
+        if self.loading.saving || self.runtime.api.is_none() {
+            return;
+        }
         self.loading.saving = true;
-        self.spawn_message(async move {
-            UiMessage::ReviewFinished(
-                api.record_review(&dataset_id, &current.image.image_id, review)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-            )
+        self.queue_command(UiCommand::Review {
+            dataset_id: self.config.dataset_id.clone(),
+            image_id: current.image.image_id,
+            review: ReviewRecord {
+                review_id: ReviewId::generate(),
+                target: ReviewTarget::Task {
+                    task_id: task.task_id,
+                },
+                reviewer_user_id: self.config.user_id.clone(),
+                decision,
+                timestamp: labello_domain::now(),
+                comment: None,
+            },
         });
     }
 
     pub(crate) fn request_adjudication(&mut self, decision: AdjudicationDecision) {
-        let (Some(api), Some(current), Some(task)) = (
-            self.runtime.api.clone(),
-            self.current.clone(),
-            self.selected_task().cloned(),
-        ) else {
+        let (Some(current), Some(task)) = (self.current.clone(), self.selected_task().cloned())
+        else {
             return;
         };
-        let dataset_id = self.config.dataset_id.clone();
-        let annotation_ids = self
-            .annotations
-            .iter()
-            .filter(|annotation| !annotation.deleted)
-            .map(|annotation| annotation.annotation_id.clone())
-            .collect();
-        let adjudication = AdjudicationRecord {
-            adjudication_id: AdjudicationId::generate(),
-            task_id: task.task_id,
-            annotation_ids,
-            adjudicator_user_id: self.config.user_id.clone(),
-            decision,
-            resolution: "Resolved in Labello UI".to_string(),
-            timestamp: labello_domain::now(),
-        };
+        if self.loading.saving || self.runtime.api.is_none() {
+            return;
+        }
         self.loading.saving = true;
-        self.spawn_message(async move {
-            UiMessage::AdjudicationFinished(
-                api.record_adjudication(&dataset_id, &current.image.image_id, adjudication)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-            )
+        self.queue_command(UiCommand::Adjudication {
+            dataset_id: self.config.dataset_id.clone(),
+            image_id: current.image.image_id,
+            adjudication: AdjudicationRecord {
+                adjudication_id: AdjudicationId::generate(),
+                task_id: task.task_id,
+                annotation_ids: self
+                    .annotations
+                    .iter()
+                    .filter(|annotation| !annotation.deleted)
+                    .map(|annotation| annotation.annotation_id.clone())
+                    .collect(),
+                adjudicator_user_id: self.config.user_id.clone(),
+                decision,
+                resolution: "Resolved in Labello UI".to_string(),
+                timestamp: labello_domain::now(),
+            },
         });
     }
+}
+
+struct SaveAnnotationsJob {
+    api: Rc<dyn LabelloApi>,
+    dataset_id: labello_domain::DatasetId,
+    image_id: ImageId,
+    user_id: labello_domain::UserId,
+    task_id: Option<labello_domain::TaskId>,
+    annotations: Vec<labello_domain::AnnotationVersion>,
+    persisted: BTreeSet<AnnotationId>,
+    submit: bool,
+}
+
+async fn save_annotations(
+    job: SaveAnnotationsJob,
+) -> labello_client::ClientResult<labello_domain::ImageState> {
+    for annotation in job.annotations {
+        if job.persisted.contains(&annotation.annotation_id) && annotation.deleted {
+            job.api
+                .append_event(
+                    &job.dataset_id,
+                    &job.image_id,
+                    AppendEventRequest {
+                        payload: EventPayload::AnnotationDeleted {
+                            annotation_id: annotation.annotation_id,
+                            version: annotation.version,
+                            reason: None,
+                        },
+                    },
+                )
+                .await?;
+        } else if !job.persisted.contains(&annotation.annotation_id) && !annotation.deleted {
+            job.api
+                .append_event(
+                    &job.dataset_id,
+                    &job.image_id,
+                    AppendEventRequest {
+                        payload: EventPayload::AnnotationVersionCreated {
+                            annotation,
+                            previous_version: None,
+                            reason: None,
+                        },
+                    },
+                )
+                .await?;
+        }
+    }
+    if job.submit
+        && let Some(task_id) = job.task_id
+    {
+        let timestamp = labello_domain::now();
+        job.api
+            .append_event(
+                &job.dataset_id,
+                &job.image_id,
+                AppendEventRequest {
+                    payload: EventPayload::TaskStateChanged {
+                        task_state: TaskState {
+                            task_id,
+                            status: TaskStatus::Submitted,
+                            assigned_to: Some(job.user_id.clone()),
+                            completed_by: Some(job.user_id),
+                            completed_at: Some(timestamp),
+                            updated_at: timestamp,
+                        },
+                    },
+                },
+            )
+            .await?;
+    }
+    job.api.rebuild_image(&job.dataset_id, &job.image_id).await
 }
 
 async fn load_next_image(
     api: Rc<dyn LabelloApi>,
     dataset_id: labello_domain::DatasetId,
     task_id: labello_domain::TaskId,
+    prelabel_config_ids: Vec<PrelabelConfigId>,
     kind: AssignmentKind,
 ) -> labello_client::ClientResult<LoadedImage> {
     let assignment = api
@@ -197,7 +269,14 @@ async fn load_next_image(
         )
         .await?
         .ok_or_else(|| labello_client::ClientError::Demo("no images available".to_string()))?;
-    load_image(api, dataset_id, assignment.image_id, task_id).await
+    load_image(
+        api,
+        dataset_id,
+        assignment.image_id,
+        task_id,
+        prelabel_config_ids,
+    )
+    .await
 }
 
 async fn load_image(
@@ -205,34 +284,27 @@ async fn load_image(
     dataset_id: labello_domain::DatasetId,
     image_id: ImageId,
     task_id: labello_domain::TaskId,
+    prelabel_config_ids: Vec<PrelabelConfigId>,
 ) -> labello_client::ClientResult<LoadedImage> {
-    let metadata = api.get_dataset(&dataset_id).await?;
-    let image =
-        metadata.images.get(&image_id).cloned().ok_or_else(|| {
-            labello_client::ClientError::Demo(format!("image {image_id} not found"))
-        })?;
+    let image = api.get_image_record(&dataset_id, &image_id).await?;
     let state = api.get_image_state(&dataset_id, &image_id).await?;
-    let file = api.get_image_file(&dataset_id, &image_id).await?;
-    let color_image = decode_image(&file.bytes).ok();
+    let preview = api.get_image_preview(&dataset_id, &image_id, 1600).await?;
+    let color_image = Some(egui::ColorImage::from_rgba_unmultiplied(
+        [preview.width as usize, preview.height as usize],
+        &preview.rgba,
+    ));
     let mut prelabels = Vec::new();
-    if let Some(task) = metadata.task(&task_id) {
-        for config in metadata
-            .prelabel_configs
-            .iter()
-            .filter(|config| config.available_to_annotators)
-            .filter(|config| task.prelabel_config_ids.contains(&config.config_id))
-        {
-            let mut suggestions = api
-                .prelabel_suggestions(
-                    &dataset_id,
-                    PrelabelSuggestionRequest {
-                        config_id: config.config_id.clone(),
-                        task_id: task_id.clone(),
-                    },
-                )
-                .await?;
-            prelabels.append(&mut suggestions);
-        }
+    for config_id in prelabel_config_ids {
+        let mut suggestions = api
+            .prelabel_suggestions(
+                &dataset_id,
+                PrelabelSuggestionRequest {
+                    config_id,
+                    task_id: task_id.clone(),
+                },
+            )
+            .await?;
+        prelabels.append(&mut suggestions);
     }
     let annotations = state.active_annotations().cloned().collect();
     Ok(LoadedImage {
@@ -241,13 +313,4 @@ async fn load_image(
         state,
         color_image,
     })
-}
-
-fn decode_image(bytes: &[u8]) -> Result<egui::ColorImage, image::ImageError> {
-    let rgba = image::load_from_memory(bytes)?.to_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok(egui::ColorImage::from_rgba_unmultiplied(
-        size,
-        rgba.as_raw(),
-    ))
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::mpsc,
@@ -9,9 +9,10 @@ use std::{
 use eframe::egui::{self, TextureHandle};
 use labello_client::{DatasetSummary, IngestReport, LabelloApi};
 use labello_domain::{
-    AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, BoundingBox, ClassId,
-    DatasetId, DatasetMetadata, DatasetRole, DatasetStats, ImageId, ImageRecord, ImageState,
-    KeybindingSet, LabelClass, PrelabelSuggestion, TaskDefinition, TaskId, TutorialContent, UserId,
+    AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
+    AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata, DatasetRole, DatasetStats,
+    ImageId, ImageRecord, ImageState, KeybindingSet, LabelClass, PrelabelConfigId,
+    PrelabelSuggestion, ReviewRecord, TaskDefinition, TaskId, TutorialContent, UserId,
 };
 
 use crate::{
@@ -85,6 +86,58 @@ pub(crate) enum UiMessage {
     AdjudicationFinished(Result<(), String>),
     IngestFinished(Result<IngestReport, String>),
     StatsLoaded(Result<DatasetStats, String>),
+    #[allow(dead_code)]
+    FolderUploadFinished(Result<String, String>),
+}
+
+pub(crate) enum UiCommand {
+    DatasetList,
+    CreateDataset {
+        dataset_id: DatasetId,
+        name: String,
+        admin_user_id: UserId,
+    },
+    LoadDataset {
+        dataset_id: DatasetId,
+        user_id: UserId,
+    },
+    LoadAdmin {
+        dataset_id: DatasetId,
+    },
+    SaveAdmin {
+        metadata: DatasetMetadata,
+    },
+    Ingest {
+        dataset_id: DatasetId,
+    },
+    Stats {
+        dataset_id: DatasetId,
+    },
+    NextImage {
+        dataset_id: DatasetId,
+        task_id: TaskId,
+        prelabel_config_ids: Vec<PrelabelConfigId>,
+        kind: AssignmentKind,
+    },
+    SaveAnnotations {
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        user_id: UserId,
+        task_id: Option<TaskId>,
+        annotations: Vec<labello_domain::AnnotationVersion>,
+        persisted: BTreeSet<AnnotationId>,
+        submit: bool,
+    },
+    Review {
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        review: ReviewRecord,
+    },
+    Adjudication {
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        adjudication: AdjudicationRecord,
+    },
 }
 
 #[derive(Debug)]
@@ -106,6 +159,7 @@ pub(crate) struct RuntimeState {
     pub api: Option<Rc<dyn LabelloApi>>,
     pub tx: mpsc::Sender<UiMessage>,
     pub rx: mpsc::Receiver<UiMessage>,
+    pub commands: VecDeque<UiCommand>,
     pub error: Option<String>,
 }
 
@@ -116,6 +170,7 @@ impl RuntimeState {
             api: None,
             tx,
             rx,
+            commands: VecDeque::new(),
             error: None,
         }
     }
@@ -129,6 +184,7 @@ pub(crate) struct LoadingState {
     pub image: bool,
     pub saving: bool,
     pub ingesting: bool,
+    pub uploading: bool,
     pub stats: bool,
 }
 
@@ -453,6 +509,7 @@ impl eframe::App for LabelloApp {
         egui::CentralPanel::default()
             .frame(theme::central_frame())
             .show(ui, |ui| self.central(ui));
+        self.start_next_command();
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(150));
     }

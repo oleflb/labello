@@ -1,7 +1,8 @@
 use labello_domain::{
     AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    ImageId, ImageState, KeybindingSet, OfflineBundle, OfflineSyncRequest, OfflineSyncResult,
-    PrelabelConfig, PrelabelSuggestion, ReviewRecord, TaskDefinition, UserAccount, UserId,
+    ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle, OfflineSyncRequest,
+    OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord, TaskDefinition,
+    UserAccount, UserId,
 };
 use reqwest::{Method, RequestBuilder, Response, header::CONTENT_TYPE};
 use serde::{Serialize, de::DeserializeOwned};
@@ -10,9 +11,9 @@ use url::Url;
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
     ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi,
-    ImageFile, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
-    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi,
-    UpdateDatasetConfigRequest,
+    ImageFile, ImagePreview, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest,
+    OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi,
+    TaskApi, UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -227,6 +228,24 @@ impl ImageApi for HttpLabelloApi {
         })
     }
 
+    fn get_image_record<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> crate::ApiFuture<'a, ImageRecord> {
+        Box::pin(async move {
+            Self::json(
+                self.request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/images/{image_id}/record"),
+                )?
+                .send()
+                .await?,
+            )
+            .await
+        })
+    }
+
     fn get_image_file<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -262,6 +281,41 @@ impl ImageApi for HttpLabelloApi {
         })
     }
 
+    fn get_image_preview<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        max_dimension: u32,
+    ) -> crate::ApiFuture<'a, ImagePreview> {
+        Box::pin(async move {
+            let response = self
+                .request(
+                    Method::GET,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{image_id}/preview?max={max_dimension}"
+                    ),
+                )?
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = response.text().await.unwrap_or_else(|_| status.to_string());
+                return Err(ClientError::Api {
+                    status: status.as_u16(),
+                    message,
+                });
+            }
+            let width = preview_dimension(response.headers(), "x-image-width")?;
+            let height = preview_dimension(response.headers(), "x-image-height")?;
+            Ok(ImagePreview {
+                image_id: image_id.clone(),
+                width,
+                height,
+                rgba: response.bytes().await?.to_vec(),
+            })
+        })
+    }
+
     fn rebuild_image<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -279,6 +333,14 @@ impl ImageApi for HttpLabelloApi {
             .await
         })
     }
+}
+
+fn preview_dimension(headers: &reqwest::header::HeaderMap, name: &str) -> ClientResult<u32> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| ClientError::Demo(format!("missing preview header {name}")))
 }
 
 impl AnnotationApi for HttpLabelloApi {

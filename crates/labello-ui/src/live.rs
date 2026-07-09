@@ -3,7 +3,9 @@ use std::{future::Future, rc::Rc, time::Duration};
 use eframe::egui;
 use labello_client::{AuthHeaders, HttpLabelloApi, UpdateDatasetConfigRequest};
 
-use crate::app::{AppView, LabelloApp, LoadedDataset, LoadedImage, SaveStatus, UiMessage};
+use crate::app::{
+    AppView, LabelloApp, LoadedDataset, LoadedImage, SaveStatus, UiCommand, UiMessage,
+};
 
 impl LabelloApp {
     pub(crate) fn rebuild_http_api(&mut self) {
@@ -30,7 +32,10 @@ impl LabelloApp {
     }
 
     pub(crate) fn process_messages(&mut self, ctx: &egui::Context) {
-        while let Ok(message) = self.runtime.rx.try_recv() {
+        for _ in 0..8 {
+            let Ok(message) = self.runtime.rx.try_recv() else {
+                break;
+            };
             match message {
                 UiMessage::DatasetList(result) => {
                     self.loading.datasets = false;
@@ -44,6 +49,7 @@ impl LabelloApp {
                 }
                 UiMessage::DatasetCreated(result) => match result {
                     Ok(metadata) => {
+                        self.loading.dataset = false;
                         self.config.dataset_id = metadata.dataset_id.clone();
                         self.setup.create_dataset_id = metadata.dataset_id.to_string();
                         self.setup.create_dataset_name = metadata.name.clone();
@@ -51,7 +57,10 @@ impl LabelloApp {
                         self.request_dataset_list();
                         self.request_load_dataset();
                     }
-                    Err(error) => self.runtime.error = Some(error),
+                    Err(error) => {
+                        self.loading.dataset = false;
+                        self.runtime.error = Some(error);
+                    }
                 },
                 UiMessage::DatasetLoaded(result) => {
                     self.loading.dataset = false;
@@ -73,11 +82,15 @@ impl LabelloApp {
                 }
                 UiMessage::AdminSaved(result) => match result {
                     Ok(metadata) => {
+                        self.loading.admin = false;
                         self.datasets.admin_config = Some(metadata);
                         self.runtime.error = None;
                         self.request_load_dataset();
                     }
-                    Err(error) => self.runtime.error = Some(error),
+                    Err(error) => {
+                        self.loading.admin = false;
+                        self.runtime.error = Some(error);
+                    }
                 },
                 UiMessage::ImageLoaded(result) => {
                     self.loading.image = false;
@@ -146,7 +159,100 @@ impl LabelloApp {
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
+                UiMessage::FolderUploadFinished(result) => {
+                    self.loading.uploading = false;
+                    match result {
+                        Ok(message) => {
+                            self.runtime.error = Some(message);
+                            self.request_admin_dataset();
+                            self.request_load_dataset();
+                            self.request_stats();
+                        }
+                        Err(error) => self.runtime.error = Some(error),
+                    }
+                }
             }
+        }
+    }
+
+    pub(crate) fn start_next_command(&mut self) {
+        let Some(command) = self.runtime.commands.pop_front() else {
+            return;
+        };
+        let Some(api) = self.runtime.api.clone() else {
+            self.runtime.error = Some("API is not configured".to_string());
+            return;
+        };
+        match command {
+            UiCommand::DatasetList => self.spawn_message(async move {
+                UiMessage::DatasetList(api.list_datasets().await.map_err(|error| error.to_string()))
+            }),
+            UiCommand::CreateDataset {
+                dataset_id,
+                name,
+                admin_user_id,
+            } => self.spawn_message(async move {
+                UiMessage::DatasetCreated(
+                    api.create_dataset(labello_client::CreateDatasetRequest {
+                        dataset_id,
+                        name,
+                        admin_user_id,
+                    })
+                    .await
+                    .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::LoadDataset {
+                dataset_id,
+                user_id,
+            } => self.spawn_message(async move {
+                let result = async {
+                    let metadata = api.get_dataset(&dataset_id).await?;
+                    let keybindings = api.get_keybindings(&dataset_id, &user_id).await?;
+                    let stats = api.dataset_stats(&dataset_id).await?;
+                    Ok::<_, labello_client::ClientError>(LoadedDataset {
+                        metadata,
+                        keybindings,
+                        stats,
+                    })
+                }
+                .await
+                .map_err(|error| error.to_string());
+                UiMessage::DatasetLoaded(result)
+            }),
+            UiCommand::LoadAdmin { dataset_id } => self.spawn_message(async move {
+                UiMessage::AdminLoaded(
+                    api.get_admin_dataset(&dataset_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::SaveAdmin { metadata } => {
+                let dataset_id = metadata.dataset_id.clone();
+                let request = UpdateDatasetConfigRequest::from_metadata(&metadata);
+                self.spawn_message(async move {
+                    UiMessage::AdminSaved(
+                        api.update_dataset_config(&dataset_id, request)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    )
+                });
+            }
+            UiCommand::Ingest { dataset_id } => self.spawn_message(async move {
+                UiMessage::IngestFinished(
+                    api.ingest_dataset(&dataset_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::Stats { dataset_id } => self.spawn_message(async move {
+                UiMessage::StatsLoaded(
+                    api.dataset_stats(&dataset_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            command => self.start_workflow_command(api, command),
         }
     }
 
@@ -174,118 +280,82 @@ impl LabelloApp {
         }
     }
 
+    pub(crate) fn queue_command(&mut self, command: UiCommand) {
+        if self.runtime.commands.len() < 64 {
+            self.runtime.commands.push_back(command);
+        }
+    }
+
     pub(crate) fn request_dataset_list(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.datasets || self.runtime.api.is_none() {
             return;
-        };
+        }
         self.loading.datasets = true;
-        self.spawn_message(async move {
-            UiMessage::DatasetList(api.list_datasets().await.map_err(|error| error.to_string()))
-        });
+        self.queue_command(UiCommand::DatasetList);
     }
 
     pub(crate) fn request_create_dataset(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.dataset || self.runtime.api.is_none() {
             return;
-        };
-        let request = labello_client::CreateDatasetRequest {
+        }
+        self.loading.dataset = true;
+        self.queue_command(UiCommand::CreateDataset {
             dataset_id: self.setup.create_dataset_id.trim().to_string().into(),
             name: self.setup.create_dataset_name.trim().to_string(),
             admin_user_id: self.config.user_id.clone(),
-        };
-        self.spawn_message(async move {
-            UiMessage::DatasetCreated(
-                api.create_dataset(request)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
         });
     }
 
     pub(crate) fn request_load_dataset(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.dataset || self.runtime.api.is_none() {
             return;
-        };
-        let dataset_id = self.config.dataset_id.clone();
-        let user_id = self.config.user_id.clone();
+        }
         self.loading.dataset = true;
-        self.spawn_message(async move {
-            let result = async {
-                let metadata = api.get_dataset(&dataset_id).await?;
-                let keybindings = api.get_keybindings(&dataset_id, &user_id).await?;
-                let stats = api.dataset_stats(&dataset_id).await?;
-                Ok::<_, labello_client::ClientError>(LoadedDataset {
-                    metadata,
-                    keybindings,
-                    stats,
-                })
-            }
-            .await
-            .map_err(|error| error.to_string());
-            UiMessage::DatasetLoaded(result)
+        self.queue_command(UiCommand::LoadDataset {
+            dataset_id: self.config.dataset_id.clone(),
+            user_id: self.config.user_id.clone(),
         });
     }
 
     pub(crate) fn request_admin_dataset(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.admin || self.runtime.api.is_none() {
             return;
-        };
-        let dataset_id = self.config.dataset_id.clone();
+        }
         self.loading.admin = true;
-        self.spawn_message(async move {
-            UiMessage::AdminLoaded(
-                api.get_admin_dataset(&dataset_id)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
+        self.queue_command(UiCommand::LoadAdmin {
+            dataset_id: self.config.dataset_id.clone(),
         });
     }
 
     pub(crate) fn request_admin_save(&mut self) {
-        let (Some(api), Some(metadata)) =
-            (self.runtime.api.clone(), self.datasets.admin_config.clone())
-        else {
+        let Some(metadata) = self.datasets.admin_config.clone() else {
             return;
         };
-        let dataset_id = metadata.dataset_id.clone();
-        let request = UpdateDatasetConfigRequest::from_metadata(&metadata);
-        self.spawn_message(async move {
-            UiMessage::AdminSaved(
-                api.update_dataset_config(&dataset_id, request)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
-        });
+        if self.loading.admin {
+            return;
+        }
+        self.loading.admin = true;
+        self.queue_command(UiCommand::SaveAdmin { metadata });
     }
 
     pub(crate) fn request_ingest(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.ingesting || self.runtime.api.is_none() {
             return;
-        };
-        let dataset_id = self.config.dataset_id.clone();
+        }
         self.loading.ingesting = true;
-        self.spawn_message(async move {
-            UiMessage::IngestFinished(
-                api.ingest_dataset(&dataset_id)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
+        self.queue_command(UiCommand::Ingest {
+            dataset_id: self.config.dataset_id.clone(),
         });
     }
 
     pub(crate) fn request_stats(&mut self) {
-        let Some(api) = self.runtime.api.clone() else {
+        if self.loading.stats || self.runtime.api.is_none() || self.loading.image {
             return;
-        };
-        let dataset_id = self.config.dataset_id.clone();
+        }
         self.loading.stats = true;
         self.datasets.last_stats_request = Some(std::time::Instant::now());
-        self.spawn_message(async move {
-            UiMessage::StatsLoaded(
-                api.dataset_stats(&dataset_id)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
+        self.queue_command(UiCommand::Stats {
+            dataset_id: self.config.dataset_id.clone(),
         });
     }
 
@@ -344,12 +414,37 @@ impl LabelloApp {
         wasm_bindgen_futures::spawn_local(async move {
             let _ = tx.send(future.await);
         });
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), test))]
+        {
+            let _ = tx.send(poll_ready(future));
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(test)))]
         {
             drop(future);
             let _ = tx.send(UiMessage::DatasetList(Err(
                 "live HTTP UI is available in the WASM build".to_string(),
             )));
         }
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+fn poll_ready<F>(future: F) -> UiMessage
+where
+    F: Future<Output = UiMessage> + 'static,
+{
+    use std::{
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+
+    let mut future = Pin::from(Box::new(future));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(message) => message,
+        Poll::Pending => UiMessage::DatasetList(Err(
+            "test fake API future did not complete immediately".to_string(),
+        )),
     }
 }

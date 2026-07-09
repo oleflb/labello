@@ -18,14 +18,16 @@ repository = "https://example.invalid/labello"
 
 [workspace.dependencies]
 anyhow = "1"
-axum = { version = "0.8", features = ["json", "macros"] }
+axum = { version = "0.8", features = ["json", "macros", "multipart"] }
 base64 = "0.22"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde", "clock", "wasmbind"] }
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.35"
+egui_kittest = "0.35"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 infer = "0.16"
+js-sys = "0.3"
 jsonschema = "0.30"
 mime_guess = "2"
 parking_lot = "0.12"
