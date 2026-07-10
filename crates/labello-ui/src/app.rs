@@ -11,8 +11,9 @@ use labello_client::{DatasetSummary, IngestJob, LabelloApi};
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
     AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata, DatasetRole, DatasetStats,
-    ImageId, ImageRecord, ImageState, KeybindingSet, LabelClass, PrelabelConfigId,
-    PrelabelSuggestion, ReviewRecord, TaskDefinition, TaskId, TutorialContent, UserId,
+    ImageId, ImageRecord, ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass,
+    NormalizedPoint, PrelabelConfigId, PrelabelSuggestion, ReviewRecord, SkeletonGeometry,
+    TaskDefinition, TaskId, TutorialContent, UserId,
 };
 
 use crate::{
@@ -75,6 +76,24 @@ pub(crate) enum QueueMode {
     Adjudicate,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingTransition {
+    NextImage,
+    Workflow {
+        task_index: usize,
+        class_id: ClassId,
+    },
+    QueueMode(QueueMode),
+    View(AppView),
+    Admin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewPhase {
+    Object,
+    FullImage,
+}
+
 #[derive(Debug)]
 pub(crate) enum UiMessage {
     DatasetList(Result<Vec<DatasetSummary>, String>),
@@ -82,12 +101,27 @@ pub(crate) enum UiMessage {
     DatasetLoaded(Result<LoadedDataset, String>),
     AdminLoaded(Result<DatasetMetadata, String>),
     AdminSaved(Result<DatasetMetadata, String>),
-    ImageLoaded(Result<LoadedImage, String>),
-    SaveFinished(Result<ImageState, String>),
-    ReviewFinished(Result<(), String>),
-    AdjudicationFinished(Result<(), String>),
+    ImageLoaded {
+        generation: u64,
+        result: Result<Option<LoadedImage>, String>,
+    },
+    SaveFinished {
+        image_id: ImageId,
+        result: Result<ImageState, String>,
+    },
+    ReviewFinished {
+        image_id: ImageId,
+        phase: ReviewPhase,
+        decision: labello_domain::ReviewDecision,
+        result: Result<(), String>,
+    },
+    AdjudicationFinished {
+        image_id: ImageId,
+        result: Result<(), String>,
+    },
     IngestJobLoaded(Result<IngestJob, String>),
     StatsLoaded(Result<DatasetStats, String>),
+    KeybindingsSaved(Result<KeybindingSet, String>),
     #[allow(dead_code)]
     FolderUploadProgress(FolderUploadProgress),
     #[allow(dead_code)]
@@ -121,7 +155,12 @@ pub(crate) enum UiCommand {
     Stats {
         dataset_id: DatasetId,
     },
+    SaveKeybindings {
+        dataset_id: DatasetId,
+        keybindings: KeybindingSet,
+    },
     NextImage {
+        generation: u64,
         dataset_id: DatasetId,
         task_id: TaskId,
         prelabel_config_ids: Vec<PrelabelConfigId>,
@@ -134,12 +173,14 @@ pub(crate) enum UiCommand {
         task_id: Option<TaskId>,
         annotations: Vec<labello_domain::AnnotationVersion>,
         persisted: BTreeSet<AnnotationId>,
+        modified: BTreeSet<AnnotationId>,
         submit: bool,
     },
     Review {
         dataset_id: DatasetId,
         image_id: ImageId,
         review: ReviewRecord,
+        phase: ReviewPhase,
     },
     Adjudication {
         dataset_id: DatasetId,
@@ -228,6 +269,7 @@ pub(crate) struct LoadingState {
     pub uploading: bool,
     pub upload_progress: Option<FolderUploadProgress>,
     pub stats: bool,
+    pub keybindings: bool,
 }
 
 pub(crate) struct SetupState {
@@ -240,6 +282,7 @@ pub(crate) struct DatasetState {
     pub summaries: Vec<DatasetSummary>,
     pub metadata: Option<DatasetMetadata>,
     pub admin_config: Option<DatasetMetadata>,
+    pub admin_baseline: Option<DatasetMetadata>,
     pub stats: DatasetStats,
     pub last_stats_request: Option<Instant>,
 }
@@ -250,6 +293,7 @@ impl DatasetState {
             summaries: Vec::new(),
             metadata: None,
             admin_config: None,
+            admin_baseline: None,
             stats: DatasetStats::default(),
             last_stats_request: None,
         }
@@ -269,14 +313,21 @@ pub struct WorkState {
     pub(crate) queue: ImageQueue,
     pub(crate) annotations: Vec<labello_domain::AnnotationVersion>,
     pub(crate) persisted_annotations: BTreeSet<AnnotationId>,
+    pub(crate) modified_annotations: BTreeSet<AnnotationId>,
     pub(crate) accepted_prelabels: Vec<String>,
     pub(crate) selected_annotation: Option<AnnotationId>,
+    pub(crate) active_skeleton: Option<AnnotationId>,
+    pub(crate) skeleton_keypoint_index: usize,
+    pub(crate) next_keypoint_hidden: bool,
     pub(crate) keybindings: KeybindingSet,
     pub(crate) canvas: CanvasState,
     pub(crate) save_status: SaveStatus,
     pub(crate) offline: bool,
     pub(crate) review_index: usize,
+    pub(crate) review_rejected: bool,
     pub(crate) show_tutorial: bool,
+    pub(crate) pending_transition: Option<PendingTransition>,
+    pub(crate) load_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -375,14 +426,21 @@ impl LabelloApp {
             queue,
             annotations: Vec::new(),
             persisted_annotations: BTreeSet::new(),
+            modified_annotations: BTreeSet::new(),
             accepted_prelabels: Vec::new(),
             selected_annotation: None,
+            active_skeleton: None,
+            skeleton_keypoint_index: 0,
+            next_keypoint_hidden: false,
             keybindings: KeybindingSet::defaults_for(config.user_id.clone()),
             canvas: CanvasState::default(),
             save_status: SaveStatus::Idle,
             offline: false,
             review_index: 0,
+            review_rejected: false,
             show_tutorial: false,
+            pending_transition: None,
+            load_generation: 0,
         };
         Self {
             runtime: RuntimeState::new(),
@@ -496,7 +554,13 @@ impl LabelloApp {
         self.classes = metadata.label_classes.clone();
         self.tasks = metadata.tasks.clone();
         self.datasets.metadata = Some(metadata);
-        self.ensure_valid_task_selection();
+        if self.ensure_valid_task_selection()
+            && let Some(annotation_type) = self
+                .selected_task()
+                .map(|task| task.annotation_type.clone())
+        {
+            self.tool = tool_for_annotation_type(&annotation_type);
+        }
     }
 
     pub(crate) fn annotation_matches_selected_workflow(
@@ -512,6 +576,23 @@ impl LabelloApp {
         annotation.task_id == task.task_id && &annotation.class_id == class_id
     }
 
+    pub(crate) fn has_dataset_role(&self, role: DatasetRole) -> bool {
+        self.datasets.metadata.as_ref().is_some_and(|metadata| {
+            metadata.role_assignments.iter().any(|assignment| {
+                assignment.user_id == self.config.user_id && assignment.roles.contains(&role)
+            })
+        })
+    }
+
+    pub(crate) fn can_use_queue_mode(&self, mode: QueueMode) -> bool {
+        let role = match mode {
+            QueueMode::Annotate => DatasetRole::Annotator,
+            QueueMode::Review => DatasetRole::Reviewer,
+            QueueMode::Adjudicate => DatasetRole::Adjudicator,
+        };
+        self.has_dataset_role(role)
+    }
+
     fn class_name(&self, class_id: &ClassId) -> String {
         self.classes
             .iter()
@@ -521,12 +602,108 @@ impl LabelloApp {
     }
 
     pub(crate) fn next_image(&mut self) {
-        self.autosave();
+        self.request_transition(PendingTransition::NextImage);
+    }
+
+    pub(crate) fn request_transition(&mut self, transition: PendingTransition) {
+        if self.loading.saving {
+            return;
+        }
+        if self.save_status == SaveStatus::Dirty && self.queue_mode == QueueMode::Annotate {
+            self.pending_transition = Some(transition);
+            self.request_save(false);
+            return;
+        }
+        self.execute_transition(transition);
+    }
+
+    pub(crate) fn execute_transition(&mut self, transition: PendingTransition) {
+        match transition {
+            PendingTransition::NextImage => {
+                if self.runtime.api.is_some() {
+                    self.clear_current_image();
+                    self.request_next_image();
+                } else {
+                    self.advance_current_image();
+                }
+            }
+            PendingTransition::Workflow {
+                task_index,
+                class_id,
+            } => {
+                if self.select_workflow(task_index, class_id) {
+                    self.clear_current_image();
+                    self.request_next_image();
+                }
+            }
+            PendingTransition::QueueMode(mode) => {
+                if self.queue_mode != mode {
+                    self.queue_mode = mode;
+                    self.clear_current_image();
+                    self.request_next_image();
+                }
+            }
+            PendingTransition::View(view) => {
+                self.view = view;
+                if view == AppView::Annotate && self.current.is_none() {
+                    self.request_next_image();
+                } else if view == AppView::Stats {
+                    self.request_stats();
+                }
+            }
+            PendingTransition::Admin => self.request_admin_dataset(),
+        }
+    }
+
+    pub(crate) fn submit_and_advance(&mut self) {
+        if self.loading.saving || self.current.is_none() {
+            return;
+        }
+        if let Some(issue) = self.submission_issue() {
+            self.runtime.error = Some(issue);
+            return;
+        }
+        self.pending_transition = Some(PendingTransition::NextImage);
+        self.request_save(true);
+    }
+
+    fn submission_issue(&self) -> Option<String> {
+        let task = self.selected_task()?;
+        let spec = task.skeleton.as_ref()?;
+        if self.active_skeleton.is_some() {
+            return Some(
+                "Finish the active skeleton or mark its remaining optional keypoints absent before submitting."
+                    .to_string(),
+            );
+        }
+        for annotation in self.annotations.iter().filter(|annotation| {
+            !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+        }) {
+            let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
+                continue;
+            };
+            if let Some(required) = spec.keypoints.iter().find(|required| {
+                required.required
+                    && skeleton.keypoints.iter().any(|keypoint| {
+                        keypoint.name == required.name && keypoint.state == KeypointState::Absent
+                    })
+            }) {
+                return Some(format!(
+                    "Required keypoint '{}' is absent. Place it before submitting.",
+                    required.name
+                ));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn advance_current_image(&mut self) {
         self.current_texture = None;
         self.current_state = None;
         self.current = self.queue.pop_next();
         self.annotations.clear();
         self.persisted_annotations.clear();
+        self.modified_annotations.clear();
         self.accepted_prelabels.clear();
         self.selected_annotation = None;
         if self.runtime.api.is_some() {
@@ -586,6 +763,165 @@ impl LabelloApp {
         self.save_status = SaveStatus::Dirty;
     }
 
+    pub(crate) fn edit_bbox(&mut self, edit: crate::canvas::BoundingBoxEdit) {
+        let annotation_id = edit.annotation_id;
+        let persisted = self.persisted_annotations.contains(&annotation_id);
+        let persisted_version = self
+            .current_state
+            .as_ref()
+            .and_then(|state| state.current_annotation(&annotation_id))
+            .map(|annotation| annotation.version);
+        let Some(annotation) = self
+            .annotations
+            .iter_mut()
+            .find(|annotation| annotation.annotation_id == annotation_id && !annotation.deleted)
+        else {
+            return;
+        };
+        let AnnotationGeometry::BoundingBox(current) = &mut annotation.geometry else {
+            return;
+        };
+        if *current == edit.bounding_box {
+            return;
+        }
+        *current = edit.bounding_box;
+        annotation.updated_at = labello_domain::now();
+        if persisted {
+            annotation.version = persisted_version.unwrap_or(annotation.version) + 1;
+            self.modified_annotations.insert(annotation_id);
+        }
+        self.save_status = SaveStatus::Dirty;
+    }
+
+    pub(crate) fn place_keypoint(&mut self, point: NormalizedPoint) {
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let Some(spec) = task.skeleton.clone() else {
+            self.runtime.error = Some(
+                "This skeleton workflow has no keypoint specification. Ask a data admin to configure it."
+                    .to_string(),
+            );
+            return;
+        };
+        if let Some(active_id) = self.work.active_skeleton.clone() {
+            let keypoint_index = self.work.skeleton_keypoint_index;
+            let hidden = self.work.next_keypoint_hidden;
+            let Some(annotation) =
+                self.work.annotations.iter_mut().find(|annotation| {
+                    annotation.annotation_id == active_id && !annotation.deleted
+                })
+            else {
+                self.work.active_skeleton = None;
+                return;
+            };
+            let AnnotationGeometry::Skeleton(skeleton) = &mut annotation.geometry else {
+                return;
+            };
+            if let Some(keypoint) = skeleton.keypoints.get_mut(keypoint_index) {
+                keypoint.state = if hidden {
+                    KeypointState::Hidden
+                } else {
+                    KeypointState::Visible
+                };
+                keypoint.point = Some(point);
+                annotation.updated_at = labello_domain::now();
+                let completed = keypoint_index + 1 >= skeleton.keypoints.len();
+                self.work.skeleton_keypoint_index = keypoint_index + 1;
+                self.work.next_keypoint_hidden = false;
+                if completed {
+                    self.work.active_skeleton = None;
+                    self.work.skeleton_keypoint_index = 0;
+                }
+                self.work.save_status = SaveStatus::Dirty;
+            }
+            return;
+        }
+
+        let Some(class_id) = self.selected_class_id().cloned() else {
+            return;
+        };
+        let timestamp = labello_domain::now();
+        let author_user_id = self.config.user_id.clone();
+        let keypoint_count = spec.keypoints.len();
+        let mut keypoints = spec
+            .keypoints
+            .into_iter()
+            .map(|keypoint| KeypointAnnotation {
+                name: keypoint.name,
+                state: KeypointState::Absent,
+                point: None,
+            })
+            .collect::<Vec<_>>();
+        let Some(first) = keypoints.first_mut() else {
+            self.runtime.error =
+                Some("Skeleton workflows require at least one keypoint".to_string());
+            return;
+        };
+        first.state = if self.next_keypoint_hidden {
+            KeypointState::Hidden
+        } else {
+            KeypointState::Visible
+        };
+        first.point = Some(point);
+        let annotation_id = AnnotationId::generate();
+        self.work
+            .annotations
+            .push(labello_domain::AnnotationVersion {
+                annotation_id: annotation_id.clone(),
+                version: 1,
+                task_id: task.task_id,
+                class_id,
+                annotation_type: AnnotationType::Skeleton,
+                source: AnnotationSource::Human,
+                geometry: AnnotationGeometry::Skeleton(SkeletonGeometry { keypoints }),
+                author_user_id,
+                created_at: timestamp,
+                updated_at: timestamp,
+                deleted: false,
+            });
+        self.selected_annotation = Some(annotation_id.clone());
+        if keypoint_count > 1 {
+            self.active_skeleton = Some(annotation_id);
+            self.skeleton_keypoint_index = 1;
+        }
+        self.next_keypoint_hidden = false;
+        self.save_status = SaveStatus::Dirty;
+    }
+
+    pub(crate) fn skip_keypoint(&mut self) {
+        let Some((allow_absent, keypoint_count, required)) = self
+            .selected_task()
+            .and_then(|task| task.skeleton.as_ref())
+            .map(|spec| {
+                (
+                    spec.allow_absent,
+                    spec.keypoints.len(),
+                    spec.keypoints
+                        .get(self.skeleton_keypoint_index)
+                        .is_some_and(|keypoint| keypoint.required),
+                )
+            })
+        else {
+            return;
+        };
+        if !allow_absent || self.active_skeleton.is_none() {
+            return;
+        }
+        if required {
+            self.runtime.error =
+                Some("This keypoint is required and cannot be marked absent.".to_string());
+            return;
+        }
+        self.skeleton_keypoint_index += 1;
+        self.next_keypoint_hidden = false;
+        if self.skeleton_keypoint_index >= keypoint_count {
+            self.active_skeleton = None;
+            self.skeleton_keypoint_index = 0;
+        }
+        self.save_status = SaveStatus::Dirty;
+    }
+
     pub(crate) fn accept_prelabel(&mut self, suggestion: &PrelabelSuggestion) {
         let Some(task) = self.selected_task() else {
             return;
@@ -631,36 +967,108 @@ impl LabelloApp {
     }
 
     fn delete_selected(&mut self) {
-        if let Some(selected) = self.selected_annotation.clone()
-            && let Some(annotation) = self
+        if let Some(selected) = self.selected_annotation.clone() {
+            let persisted = self.persisted_annotations.contains(&selected);
+            let persisted_version = self
+                .current_state
+                .as_ref()
+                .and_then(|state| state.current_annotation(&selected))
+                .map(|annotation| annotation.version);
+            if let Some(annotation) = self
                 .annotations
                 .iter_mut()
                 .find(|annotation| annotation.annotation_id == selected)
-        {
-            annotation.deleted = true;
-            annotation.updated_at = labello_domain::now();
-            self.save_status = SaveStatus::Dirty;
+            {
+                annotation.deleted = true;
+                annotation.updated_at = labello_domain::now();
+                if persisted {
+                    if let Some(version) = persisted_version {
+                        annotation.version = version;
+                    }
+                    self.modified_annotations.remove(&selected);
+                }
+                self.save_status = SaveStatus::Dirty;
+            }
         }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.key_pressed(egui::Key::ArrowRight)) {
-            self.next_image();
+        if self.view != AppView::Annotate || ctx.text_edit_focused() {
+            return;
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::S) && input.modifiers.ctrl) {
-            self.autosave();
-        }
-        if ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
-            self.delete_selected();
-        }
-        if ctx.input(|input| input.key_pressed(egui::Key::Y)) {
-            self.review_index = self.review_index.saturating_add(1);
-        }
-        if ctx.input(|input| input.key_pressed(egui::Key::N)) {
-            self.save_status = SaveStatus::Dirty;
-            self.review_index = self.review_index.saturating_add(1);
+        use labello_domain::UserAction;
+        let pressed = self
+            .keybindings
+            .bindings
+            .iter()
+            .filter_map(|(action, chord)| shortcut_pressed(ctx, chord).then_some(action.clone()))
+            .collect::<Vec<_>>();
+        for action in pressed {
+            match action {
+                UserAction::NextImage => self.next_image(),
+                UserAction::SaveAnnotations if self.queue_mode == QueueMode::Annotate => {
+                    self.autosave()
+                }
+                UserAction::DeleteAnnotation if self.queue_mode == QueueMode::Annotate => {
+                    self.delete_selected()
+                }
+                UserAction::AcceptReviewObject if self.queue_mode == QueueMode::Review => {
+                    self.request_review(labello_domain::ReviewDecision::Approved)
+                }
+                UserAction::RejectReviewObject if self.queue_mode == QueueMode::Review => {
+                    self.request_review(labello_domain::ReviewDecision::Rejected)
+                }
+                UserAction::OpenTutorial => self.show_tutorial = !self.show_tutorial,
+                UserAction::SelectBoundingBoxTool
+                    if self.selected_task().is_some_and(|task| {
+                        task.annotation_type == AnnotationType::BoundingBox
+                    }) =>
+                {
+                    self.tool = Tool::BoundingBox;
+                }
+                UserAction::SelectKeypointTool
+                    if self
+                        .selected_task()
+                        .is_some_and(|task| task.annotation_type == AnnotationType::Skeleton) =>
+                {
+                    self.tool = Tool::Keypoints;
+                }
+                UserAction::PreviousImage | UserAction::ToggleOfflineMode => {}
+                _ => {}
+            }
         }
     }
+}
+
+fn shortcut_pressed(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> bool {
+    let Some(key) = parse_key(&chord.key) else {
+        return false;
+    };
+    ctx.input(|input| {
+        input.key_pressed(key)
+            && input.modifiers.ctrl == chord.ctrl
+            && input.modifiers.shift == chord.shift
+            && input.modifiers.alt == chord.alt
+            && input.modifiers.command == chord.command
+    })
+}
+
+fn parse_key(key: &str) -> Option<egui::Key> {
+    use egui::Key;
+    Some(match key {
+        "ArrowRight" => Key::ArrowRight,
+        "ArrowLeft" => Key::ArrowLeft,
+        "Delete" => Key::Delete,
+        "?" => Key::Questionmark,
+        "A" => Key::A,
+        "B" => Key::B,
+        "K" => Key::K,
+        "N" => Key::N,
+        "O" => Key::O,
+        "S" => Key::S,
+        "Y" => Key::Y,
+        _ => return None,
+    })
 }
 
 pub(crate) fn tool_for_annotation_type(annotation_type: &AnnotationType) -> Tool {
@@ -688,18 +1096,19 @@ impl eframe::App for LabelloApp {
         self.refresh_stats_if_due();
         self.refresh_ingest_if_due();
         self.handle_shortcuts(ui.ctx());
+        let compact = ui.available_width() < 900.0;
         egui::Panel::top("top_bar")
-            .exact_size(56.0)
+            .exact_size(if compact { 92.0 } else { 56.0 })
             .frame(theme::top_bar_frame())
             .show(ui, |ui| self.top_bar(ui));
-        if self.view == AppView::Annotate {
+        if self.view == AppView::Annotate && !compact {
             egui::Panel::left("task_panel")
-                .resizable(false)
+                .resizable(true)
                 .default_size(280.0)
                 .frame(theme::side_frame())
                 .show(ui, |ui| self.task_panel(ui));
             egui::Panel::right("review_panel")
-                .resizable(false)
+                .resizable(true)
                 .default_size(320.0)
                 .frame(theme::side_frame())
                 .show(ui, |ui| self.right_panel(ui));

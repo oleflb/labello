@@ -17,16 +17,17 @@ use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
     AssignmentKind, AssignmentStatus, BoundingBox, BrowserAcceleration, ClassId, DatasetId,
     DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetStats, EventLogEntry, EventPayload,
-    ImageId, ImageRecord, ImageState, KeybindingSet, LabelClass, ModelSpec, OfflineBundle,
-    OfflineSyncRequest, OfflineSyncResult, OutputProcessing, PrelabelConfig, PrelabelConfigId,
-    PrelabelExecution, PrelabelSuggestion, ReviewConfig, ReviewRecord, SCHEMA_VERSION,
-    TaskDefinition, TaskId, TutorialContent, UserAccount, UserId,
+    ImageId, ImageRecord, ImageState, KeybindingSet, KeypointSpec, LabelClass, ModelSpec,
+    OfflineBundle, OfflineSyncRequest, OfflineSyncResult, OutputProcessing, PrelabelConfig,
+    PrelabelConfigId, PrelabelExecution, PrelabelSuggestion, ReviewConfig, ReviewRecord,
+    SCHEMA_VERSION, SkeletonSpec, TaskDefinition, TaskId, TutorialContent, UserAccount, UserId,
 };
 
 use crate::app::{
     AppConfig, AppView, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, QueueMode, SaveStatus,
     UiMessage,
 };
+use crate::canvas::BoundingBoxEdit;
 
 #[test]
 fn setup_create_open_and_admin_workflows_use_live_commands() {
@@ -75,15 +76,11 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
 
     click_accesskit_button(&mut harness, "Add image root");
     harness.step();
-    click_accesskit_button(&mut harness, "Add label");
-    harness.step();
-    click_accesskit_button(&mut harness, "Add task");
+    click_accesskit_button(&mut harness, "Add bounding box class workflow");
     harness.step();
     click_accesskit_button(&mut harness, "Add browser prelabel config");
     harness.step();
     click_accesskit_button(&mut harness, "Add role assignment");
-    harness.step();
-    click_accesskit_button(&mut harness, "Use bounding box workflow");
     harness.step();
 
     let config = harness.state().datasets.admin_config.as_ref().unwrap();
@@ -91,13 +88,17 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     assert_eq!(config.label_classes.len(), 3);
     assert_eq!(config.prelabel_configs.len(), 2);
     assert_eq!(config.role_assignments.len(), 2);
-    assert_eq!(config.tasks.len(), 1);
-    assert_eq!(config.tasks[0].annotation_type, AnnotationType::BoundingBox);
-    assert_eq!(config.tasks[0].class_ids.len(), 1);
+    assert_eq!(config.tasks.len(), 3);
+    assert!(config.tasks.iter().any(|task| {
+        task.annotation_type == AnnotationType::BoundingBox
+            && task.class_ids == vec![ClassId::from("object")]
+    }));
 
+    let before_save = api.counts();
     click_accesskit_button(&mut harness, "Save Admin Config");
     step_until(&mut harness, 8, |_| api.counts().update_dataset_config == 1);
     assert_eq!(api.counts().update_dataset_config, 1);
+    assert_eq!(api.counts().list_datasets, before_save.list_datasets);
     assert!(api.metadata().label_classes.len() >= 3);
 
     click(&mut harness, "Admin");
@@ -124,12 +125,41 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
             .notice
             .as_deref()
             .unwrap_or_default()
-            .contains("Ingested")
+            .contains("Ingest complete")
     );
 
     click(&mut harness, "Work");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
+}
+
+#[test]
+fn admin_staged_changes_can_be_discarded_without_a_server_reload() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    let original_name = harness
+        .state()
+        .datasets
+        .admin_config
+        .as_ref()
+        .unwrap()
+        .name
+        .clone();
+    harness
+        .state_mut()
+        .datasets
+        .admin_config
+        .as_mut()
+        .unwrap()
+        .name = "Unsaved rename".to_string();
+    harness.step();
+
+    click(&mut harness, "Discard staged changes");
+    assert_eq!(
+        harness.state().datasets.admin_config.as_ref().unwrap().name,
+        original_name
+    );
+    assert_eq!(api.counts().get_admin_dataset, 1);
 }
 
 #[test]
@@ -219,14 +249,102 @@ fn missing_workflow_is_actionable() {
 }
 
 #[test]
+fn no_available_assignment_is_a_normal_empty_state() {
+    let api = Rc::new(SpyApi::new());
+    api.set_no_assignment(true);
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+    click(&mut harness, "Open");
+    step_until(&mut harness, 12, |app| {
+        !app.loading.dataset && !app.loading.image
+    });
+
+    assert!(harness.state().current.is_none());
+    assert!(harness.state().runtime.error.is_none());
+    assert_eq!(
+        harness.state().runtime.notice.as_deref(),
+        Some("No annotation work is currently available.")
+    );
+}
+
+#[test]
+fn invalid_dataset_ids_are_rejected_before_an_api_request() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.setup.create_dataset_id = "../outside".to_string();
+    app.setup.create_dataset_name = "Unsafe".to_string();
+    app.request_create_dataset();
+
+    assert_eq!(api.counts().create_dataset, 0);
+    assert!(
+        app.runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Dataset ID"))
+    );
+}
+
+#[test]
+fn stale_save_responses_cannot_replace_the_current_image_state() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    let current_id = harness
+        .state()
+        .current
+        .as_ref()
+        .unwrap()
+        .image
+        .image_id
+        .clone();
+    harness
+        .state()
+        .runtime
+        .tx
+        .send(UiMessage::SaveFinished {
+            image_id: ImageId::from("img_stale"),
+            result: Ok(ImageState::new(ImageId::from("img_stale"))),
+        })
+        .unwrap();
+    harness.step();
+
+    assert_eq!(
+        harness.state().current.as_ref().unwrap().image.image_id,
+        current_id
+    );
+    assert_eq!(
+        harness.state().current_state.as_ref().unwrap().image_id,
+        current_id
+    );
+}
+
+#[test]
+fn keybindings_are_editable_and_persisted() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click(&mut harness, "Reset defaults");
+    click(&mut harness, "Save shortcuts");
+    step_until(&mut harness, 8, |app| !app.loading.keybindings);
+
+    assert_eq!(api.counts().save_keybindings, 1);
+    assert_eq!(
+        harness.state().runtime.notice.as_deref(),
+        Some("Keyboard shortcuts saved")
+    );
+}
+
+#[test]
 fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     assert!(harness.state().current.is_some());
     assert_eq!(harness.state().queue.queue_size(), IMAGE_QUEUE_SIZE);
-    assert!(harness.query_by_label("Queue size: 8").is_some());
-    assert!(harness.query_by_label("Approve y").is_none());
-    assert!(harness.query_by_label("Reject n").is_none());
+    assert!(
+        harness
+            .query_by_label("Assignments are reserved one at a time to avoid duplicate work.")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Approve  Y").is_none());
+    assert!(harness.query_by_label("Reject  N").is_none());
     assert!(harness.query_by_label("Adjudicate accept").is_none());
 
     click(&mut harness, "Tutorial");
@@ -261,9 +379,11 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert!(counts.append_event >= 2);
     assert_eq!(counts.rebuild_image, 1);
 
-    click(&mut harness, "Submit");
+    click(&mut harness, "Submit & next");
     step_until(&mut harness, 10, |app| {
-        app.save_status == SaveStatus::Saved && !app.loading.saving
+        app.current
+            .as_ref()
+            .is_some_and(|current| current.image.image_id == ImageId::from("img_2"))
     });
     assert!(api.events().iter().any(|payload| matches!(
         payload,
@@ -271,28 +391,25 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
             if task_state.status == labello_domain::TaskStatus::Submitted
     )));
 
-    click(&mut harness, "Next image");
-    step_until(&mut harness, 10, |app| {
-        app.current
-            .as_ref()
-            .is_some_and(|current| current.image.image_id == ImageId::from("img_2"))
-    });
     assert!(api.counts().assign_next_image >= 2);
 
     click(&mut harness, "Review");
     step_until(&mut harness, 10, |app| {
         app.queue_mode == QueueMode::Review && !app.loading.image
     });
-    assert!(harness.query_by_label("Approve y").is_some());
-    assert!(harness.query_by_label("Reject n").is_some());
+    assert!(harness.query_by_label("Approve  Y").is_some());
+    assert!(harness.query_by_label("Reject  N").is_some());
     assert!(harness.query_by_label("Accept").is_none());
-    click(&mut harness, "Approve y");
+    harness.key_press(egui::Key::Y);
+    harness.step();
     step_until(&mut harness, 10, |app| !app.loading.saving);
     assert_eq!(api.counts().record_review, 1);
 
-    click(&mut harness, "Reject n");
+    click(&mut harness, "Reject  N");
     step_until(&mut harness, 10, |app| !app.loading.saving);
-    assert_eq!(api.counts().record_review, 2);
+    // Rejecting an object records the object decision and the task-level
+    // correction outcome that closes the review assignment.
+    assert_eq!(api.counts().record_review, 3);
 
     click(&mut harness, "Adjudicate");
     step_until(&mut harness, 10, |app| {
@@ -300,7 +417,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     });
     assert!(harness.query_by_label("Adjudicate accept").is_some());
     assert!(harness.query_by_label("Needs correction").is_some());
-    assert!(harness.query_by_label("Approve y").is_none());
+    assert!(harness.query_by_label("Approve  Y").is_none());
     click(&mut harness, "Adjudicate accept");
     step_until(&mut harness, 10, |app| !app.loading.saving);
     click(&mut harness, "Needs correction");
@@ -310,6 +427,115 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     harness.key_press(egui::Key::ArrowRight);
     step_until(&mut harness, 10, |app| !app.loading.image);
     assert!(api.counts().assign_next_image >= 3);
+}
+
+#[test]
+fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    let original_image = harness
+        .state()
+        .current
+        .as_ref()
+        .unwrap()
+        .image
+        .image_id
+        .clone();
+
+    click(&mut harness, "Accept");
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    click(&mut harness, "Vehicle bounding box");
+    step_until(&mut harness, 12, |app| {
+        app.selected_class_id.as_ref() == Some(&ClassId::from("vehicle"))
+            && app.current.is_some()
+            && !app.loading.saving
+    });
+
+    assert!(api.counts().append_event >= 1);
+    assert!(api.counts().rebuild_image >= 1);
+    assert_ne!(
+        harness.state().current.as_ref().unwrap().image.image_id,
+        original_image
+    );
+}
+
+#[test]
+fn editing_a_persisted_box_saves_a_new_annotation_version() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click(&mut harness, "Accept");
+    click(&mut harness, "Save");
+    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+
+    let annotation_id = harness.state().annotations[0].annotation_id.clone();
+    harness.state_mut().edit_bbox(BoundingBoxEdit {
+        annotation_id: annotation_id.clone(),
+        bounding_box: BoundingBox {
+            x: 0.2,
+            y: 0.25,
+            width: 0.3,
+            height: 0.35,
+        },
+    });
+    assert_eq!(harness.state().annotations[0].version, 2);
+    harness.state_mut().autosave();
+    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+
+    assert!(api.events().iter().any(|payload| matches!(
+        payload,
+        EventPayload::AnnotationVersionCreated {
+            annotation,
+            previous_version: Some(1),
+            ..
+        } if annotation.annotation_id == annotation_id && annotation.version == 2
+    )));
+}
+
+#[test]
+fn skeleton_workflow_places_configured_keypoints_in_order() {
+    let api = Rc::new(SpyApi::new());
+    {
+        let mut state = api.state.borrow_mut();
+        let task = &mut state.metadata.tasks[0];
+        task.annotation_type = AnnotationType::Skeleton;
+        task.prelabel_config_ids.clear();
+        task.skeleton = Some(SkeletonSpec {
+            keypoints: vec![
+                KeypointSpec {
+                    name: "head".to_string(),
+                    required: true,
+                },
+                KeypointSpec {
+                    name: "tail".to_string(),
+                    required: true,
+                },
+            ],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: false,
+        });
+    }
+    let mut harness = loaded_work_harness(api);
+    let canvas = harness.get_by_label("Annotation canvas");
+    let rect = canvas.rect();
+    click_at(&mut harness, rect.center());
+    click_at(
+        &mut harness,
+        rect.center() + egui::vec2(rect.width() * 0.15, rect.height() * 0.1),
+    );
+
+    assert_eq!(harness.state().annotations.len(), 1);
+    let AnnotationGeometry::Skeleton(skeleton) = &harness.state().annotations[0].geometry else {
+        panic!("expected skeleton annotation");
+    };
+    assert_eq!(skeleton.keypoints.len(), 2);
+    assert!(
+        skeleton
+            .keypoints
+            .iter()
+            .all(|keypoint| keypoint.point.is_some())
+    );
+    assert!(harness.state().active_skeleton.is_none());
 }
 
 #[test]
@@ -337,7 +563,7 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     harness.step();
     assert!(harness.query_by_label("Next image").is_some());
     assert!(harness.query_by_label("Save").is_some());
-    assert!(harness.query_by_label("Submit").is_some());
+    assert!(harness.query_by_label("Submit & next").is_some());
 }
 
 #[test]
@@ -433,6 +659,23 @@ fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
     harness.step();
 }
 
+fn click_at(harness: &mut Harness<'static, LabelloApp>, pos: egui::Pos2) {
+    harness.event(egui::Event::PointerMoved(pos));
+    harness.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+}
+
 fn click_accesskit_button(harness: &mut Harness<'static, LabelloApp>, label: &str) {
     harness
         .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
@@ -502,6 +745,10 @@ impl SpyApi {
     fn clear_workflows(&self) {
         self.state.borrow_mut().metadata.tasks.clear();
     }
+
+    fn set_no_assignment(&self, value: bool) {
+        self.state.borrow_mut().no_assignment = value;
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -522,6 +769,7 @@ struct CallCounts {
     record_adjudication: usize,
     dataset_stats: usize,
     get_keybindings: usize,
+    save_keybindings: usize,
     prelabel_suggestions: usize,
 }
 
@@ -532,6 +780,7 @@ struct SpyState {
     next_image: usize,
     events: Vec<EventPayload>,
     fail_next_preview: bool,
+    no_assignment: bool,
 }
 
 impl SpyState {
@@ -590,6 +839,7 @@ impl SpyState {
             next_image: 0,
             events: Vec::new(),
             fail_next_preview: false,
+            no_assignment: false,
         }
     }
 
@@ -734,6 +984,9 @@ impl ImageApi for SpyApi {
     ) -> ApiFuture<'a, Option<Assignment>> {
         let mut state = self.state.borrow_mut();
         state.counts.assign_next_image += 1;
+        if state.no_assignment {
+            return ready(Ok(None));
+        }
         let image_id = state
             .metadata
             .images
@@ -978,6 +1231,7 @@ impl KeybindingApi for SpyApi {
         _dataset_id: &'a DatasetId,
         keybindings: KeybindingSet,
     ) -> ApiFuture<'a, KeybindingSet> {
+        self.state.borrow_mut().counts.save_keybindings += 1;
         ready(Ok(keybindings))
     }
 }

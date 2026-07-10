@@ -1,6 +1,35 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+const MAX_PATH_SEGMENT_ID_LENGTH: usize = 255;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum IdValidationError {
+    #[error("id cannot be empty")]
+    Empty,
+    #[error("id exceeds {MAX_PATH_SEGMENT_ID_LENGTH} bytes")]
+    TooLong,
+    #[error("id must be a single safe path segment")]
+    UnsafePathSegment,
+}
+
+fn validate_path_segment(value: &str) -> Result<(), IdValidationError> {
+    if value.is_empty() {
+        return Err(IdValidationError::Empty);
+    }
+    if value.len() > MAX_PATH_SEGMENT_ID_LENGTH {
+        return Err(IdValidationError::TooLong);
+    }
+    if matches!(value, "." | "..")
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+    {
+        return Err(IdValidationError::UnsafePathSegment);
+    }
+    Ok(())
+}
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(
@@ -30,6 +59,11 @@ macro_rules! id_type {
 
             pub fn into_inner(self) -> String {
                 self.0
+            }
+
+            /// Validates an externally supplied ID before using it as a filesystem segment.
+            pub fn validate_path_segment(&self) -> Result<(), IdValidationError> {
+                validate_path_segment(&self.0)
             }
         }
 
@@ -98,5 +132,47 @@ impl AdjudicationId {
 impl AssignmentId {
     pub fn generate() -> Self {
         Self::new(format!("asg_{}", uuid::Uuid::now_v7().simple()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_ids_for_filesystem_segments() {
+        for value in ["dataset-1", "img_123", "github:42", "name.with-dots"] {
+            assert!(DatasetId::from(value).validate_path_segment().is_ok());
+        }
+        for value in [
+            "",
+            ".",
+            "..",
+            "../secret",
+            "nested/id",
+            "nested\\id",
+            "bad\0id",
+        ] {
+            assert!(DatasetId::from(value).validate_path_segment().is_err());
+        }
+        assert!(
+            DatasetId::from("a".repeat(MAX_PATH_SEGMENT_ID_LENGTH + 1))
+                .validate_path_segment()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_ids_are_safe_path_segments() {
+        assert!(EventId::generate().validate_path_segment().is_ok());
+        assert!(AnnotationId::generate().validate_path_segment().is_ok());
+        assert!(ReviewId::generate().validate_path_segment().is_ok());
+        assert!(AdjudicationId::generate().validate_path_segment().is_ok());
+        assert!(AssignmentId::generate().validate_path_segment().is_ok());
+        assert!(
+            ImageId::from_blake3_hex(&"a".repeat(64))
+                .validate_path_segment()
+                .is_ok()
+        );
     }
 }

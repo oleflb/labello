@@ -40,6 +40,9 @@ pub enum StorageError {
     #[error("required file does not exist: {0:?}")]
     NotFound(PathBuf),
 
+    #[error("dataset is already initialized: {0:?}")]
+    AlreadyExists(PathBuf),
+
     #[error("path is outside dataset root: {0:?}")]
     OutsideDatasetRoot(PathBuf),
 

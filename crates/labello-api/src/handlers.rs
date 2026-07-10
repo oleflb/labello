@@ -135,7 +135,7 @@ async fn create_dataset(
                 .to_string(),
         ));
     }
-    let repo = state.repo(&request.dataset_id);
+    let repo = state.repo(&request.dataset_id)?;
     let mut metadata = DatasetMetadata::new(
         request.dataset_id.clone(),
         request.name,
@@ -191,7 +191,9 @@ async fn list_datasets(
             continue;
         }
         let dataset_id = DatasetId::from(entry.file_name().to_string_lossy().to_string());
-        let repo = state.repo(&dataset_id);
+        let Ok(repo) = state.repo(&dataset_id) else {
+            continue;
+        };
         let Ok(metadata) = repo.load_dataset_config().await else {
             continue;
         };
@@ -215,7 +217,7 @@ async fn get_dataset(
     headers: HeaderMap,
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(sanitize_dataset(metadata, &actor)))
@@ -227,7 +229,7 @@ async fn get_admin_dataset(
     headers: HeaderMap,
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     Ok(Json(config_response(metadata)))
@@ -240,7 +242,7 @@ async fn update_dataset_config(
     Json(request): Json<UpdateDatasetConfigRequest>,
 ) -> ApiResult<Json<DatasetMetadata>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     validate_config_update(&metadata, &request, &actor)?;
@@ -265,7 +267,7 @@ async fn ingest_dataset(
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_client::IngestReport>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     Ok(Json(storage_ingest_to_client(repo.ingest_images().await?)))
@@ -277,7 +279,7 @@ async fn start_ingest_job(
     headers: HeaderMap,
 ) -> ApiResult<Json<IngestJob>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     let job = IngestJob {
@@ -291,10 +293,10 @@ async fn start_ingest_job(
 
     let state_for_job = state.clone();
     let job_for_task = job.clone();
+    let repo_for_job = repo.clone();
     tokio::spawn(async move {
-        let repo = state_for_job.repo(&dataset_id);
         let mut finished = job_for_task;
-        match repo.ingest_images().await {
+        match repo_for_job.ingest_images().await {
             Ok(report) => {
                 finished.status = IngestJobStatus::Completed;
                 finished.report = Some(storage_ingest_to_client(report));
@@ -316,7 +318,7 @@ async fn get_ingest_job(
     headers: HeaderMap,
 ) -> ApiResult<Json<IngestJob>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     let job = state
@@ -347,7 +349,7 @@ async fn upload_images(
     mut multipart: Multipart,
 ) -> ApiResult<Json<labello_client::IngestReport>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     let root = normalize_upload_root(&query.root)?;
@@ -464,7 +466,7 @@ async fn list_tasks(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TaskDefinition>>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(metadata.tasks))
@@ -477,7 +479,7 @@ async fn add_task(
     Json(task): Json<TaskDefinition>,
 ) -> ApiResult<Json<TaskDefinition>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     metadata
@@ -495,7 +497,7 @@ async fn list_prelabel_configs(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<PrelabelConfig>>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(metadata.prelabel_configs))
@@ -508,7 +510,7 @@ async fn add_prelabel_config(
     Json(config): Json<PrelabelConfig>,
 ) -> ApiResult<Json<PrelabelConfig>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
     metadata

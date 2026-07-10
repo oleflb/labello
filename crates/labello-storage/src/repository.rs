@@ -5,8 +5,9 @@ use std::{
 };
 
 use labello_domain::{
-    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageRecord,
-    ImageState, ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
+    Actor, Assignment, AssignmentKind, AssignmentStatus, DatasetConfig, DatasetMetadata,
+    EventLogEntry, EventPayload, ImageId, ImageRecord, ImageState, ImagesIndex, ReviewTarget,
+    SCHEMA_VERSION, TaskStatus, labello_schema_bundle, now, rebuild_state,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -15,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    error::{PathIo, PathJson, StorageError, StorageResult},
+    error::{PathIo, PathJson, PathTomlEncode, StorageError, StorageResult},
     fsjson::{read_json, write_json_atomic},
     fstoml::{read_toml, write_toml_atomic},
     paths,
@@ -84,9 +85,34 @@ impl DatasetRepository {
         self.ensure_layout().await?;
         metadata.schema_version = SCHEMA_VERSION;
         metadata.updated_at = now();
-        self.save_dataset(&metadata).await?;
+        self.create_dataset(&metadata).await?;
         self.save_images_index(&ImagesIndex::default()).await?;
         write_json_atomic(&self.schema_path(), &labello_schema_bundle()).await?;
+        Ok(())
+    }
+
+    async fn create_dataset(&self, metadata: &DatasetMetadata) -> StorageResult<()> {
+        labello_domain::validate_schema_version(metadata.schema_version)?;
+        let path = self.dataset_path();
+        let text = toml::to_string_pretty(&DatasetConfig::from_metadata(metadata))
+            .with_toml_encode_path(&path)?;
+        let mut file = match tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => file,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StorageError::AlreadyExists(path));
+            }
+            Err(source) => return Err(StorageError::Io { path, source }),
+        };
+        file.write_all(text.as_bytes()).await.with_path(&path)?;
+        if !text.ends_with('\n') {
+            file.write_all(b"\n").await.with_path(&path)?;
+        }
+        file.sync_all().await.with_path(&path)?;
         Ok(())
     }
 
@@ -223,7 +249,7 @@ impl DatasetRepository {
     ) -> StorageResult<EventLogEntry> {
         let lock = self.image_lock(image_id);
         let _guard = lock.lock().await;
-        let mut state = self.load_image_state(image_id).await?;
+        let state = self.load_image_state(image_id).await?;
         let event = EventLogEntry::new(
             state.current_sequence + 1,
             image_id.clone(),
@@ -232,9 +258,26 @@ impl DatasetRepository {
             now(),
             payload,
         );
+        let mut next_state = state.clone();
+        next_state.apply_event(&event)?;
+        let completion = completed_assignment(&state, actor, &event.payload).map(|assignment| {
+            EventLogEntry::new(
+                event.event_sequence + 1,
+                image_id.clone(),
+                actor.user_id.clone(),
+                actor.role.clone(),
+                now(),
+                EventPayload::AssignmentUpdated { assignment },
+            )
+        });
+        if let Some(completion) = &completion {
+            next_state.apply_event(completion)?;
+        }
         self.append_event_line(&event).await?;
-        state.apply_event(&event)?;
-        write_json_atomic(&self.state_path(image_id), &state).await?;
+        if let Some(completion) = &completion {
+            self.append_event_line(completion).await?;
+        }
+        write_json_atomic(&self.state_path(image_id), &next_state).await?;
         Ok(event)
     }
 
@@ -244,17 +287,40 @@ impl DatasetRepository {
         state: &mut ImageState,
         events: &[EventLogEntry],
     ) -> StorageResult<usize> {
-        let mut merged = 0;
+        let mut next_state = state.clone();
+        let mut resequenced = Vec::with_capacity(events.len());
         for original in events {
             let mut event = original.clone();
-            event.event_sequence = state.current_sequence + 1;
+            event.event_sequence = next_state.current_sequence + 1;
             event.image_id = image_id.clone();
-            self.append_event_line(&event).await?;
-            state.apply_event(&event)?;
-            merged += 1;
+            next_state.apply_event(&event)?;
+            let actor = Actor {
+                user_id: event.actor_user_id.clone(),
+                role: event.actor_role.clone(),
+            };
+            let completion =
+                completed_assignment(&next_state, &actor, &event.payload).map(|assignment| {
+                    EventLogEntry::new(
+                        next_state.current_sequence + 1,
+                        image_id.clone(),
+                        actor.user_id,
+                        actor.role,
+                        now(),
+                        EventPayload::AssignmentUpdated { assignment },
+                    )
+                });
+            resequenced.push(event);
+            if let Some(completion) = completion {
+                next_state.apply_event(&completion)?;
+                resequenced.push(completion);
+            }
         }
+        for event in &resequenced {
+            self.append_event_line(event).await?;
+        }
+        *state = next_state;
         write_json_atomic(&self.state_path(image_id), state).await?;
-        Ok(merged)
+        Ok(events.len())
     }
 
     pub(crate) fn image_lock(&self, image_id: &ImageId) -> Arc<AsyncMutex<()>> {
@@ -282,6 +348,47 @@ impl DatasetRepository {
         file.flush().await.with_path(&path)?;
         Ok(())
     }
+}
+
+fn completed_assignment(
+    state: &ImageState,
+    actor: &Actor,
+    payload: &EventPayload,
+) -> Option<Assignment> {
+    let (kind, task_id) = match payload {
+        EventPayload::TaskStateChanged { task_state }
+            if task_state.status == TaskStatus::Submitted =>
+        {
+            (AssignmentKind::Annotation, Some(&task_state.task_id))
+        }
+        EventPayload::ReviewRecorded { review } => {
+            let task_id = match &review.target {
+                ReviewTarget::Task { task_id } => Some(task_id),
+                // Object decisions are followed by a full-image task decision. Keep the
+                // assignment active until that final completeness check is recorded.
+                ReviewTarget::AnnotationVersion { .. } => return None,
+                ReviewTarget::Image { .. } => None,
+            };
+            (AssignmentKind::Review, task_id)
+        }
+        EventPayload::AdjudicationRecorded { adjudication } => {
+            (AssignmentKind::Adjudication, Some(&adjudication.task_id))
+        }
+        _ => return None,
+    };
+    let mut assignment = state
+        .assignments
+        .iter()
+        .find(|assignment| {
+            assignment.kind == kind
+                && assignment.status == AssignmentStatus::Active
+                && assignment.assigned_to == actor.user_id
+                && task_id.is_none_or(|task_id| &assignment.task_id == task_id)
+        })?
+        .clone();
+    assignment.status = AssignmentStatus::Completed;
+    assignment.updated_at = now();
+    Some(assignment)
 }
 
 fn extract_image_count_hint(text: &str) -> Option<usize> {
@@ -363,6 +470,114 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_reinitializing_an_existing_dataset() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Original",
+            now(),
+        ))
+        .await
+        .unwrap();
+
+        let error = repo
+            .initialize(DatasetMetadata::new(
+                DatasetId::from("ds"),
+                "Replacement",
+                now(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::AlreadyExists(_)));
+        assert_eq!(repo.load_dataset_config().await.unwrap().name, "Original");
+    }
+
+    #[tokio::test]
+    async fn validates_event_against_cloned_state_before_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_test");
+        let actor = Actor {
+            user_id: UserId::from("user_1"),
+            role: DatasetRole::Annotator,
+        };
+
+        let error = repo
+            .append_payload(
+                &image_id,
+                &actor,
+                EventPayload::AnnotationDeleted {
+                    annotation_id: labello_domain::AnnotationId::from("ann_missing"),
+                    version: 1,
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Domain(_)));
+        assert!(repo.load_events(&image_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validates_entire_resequenced_batch_before_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_test");
+        let user_id = UserId::from("user_1");
+        let mut state = repo.load_image_state(&image_id).await.unwrap();
+        let events = vec![
+            EventLogEntry::new(
+                1,
+                image_id.clone(),
+                user_id.clone(),
+                DatasetRole::Annotator,
+                now(),
+                EventPayload::TaskStateChanged {
+                    task_state: TaskState::new(TaskId::from("task_1"), now()),
+                },
+            ),
+            EventLogEntry::new(
+                2,
+                image_id.clone(),
+                user_id,
+                DatasetRole::Annotator,
+                now(),
+                EventPayload::AnnotationDeleted {
+                    annotation_id: labello_domain::AnnotationId::from("ann_missing"),
+                    version: 1,
+                    reason: None,
+                },
+            ),
+        ];
+
+        let error = repo
+            .append_resequenced_events(&image_id, &mut state, &events)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Domain(_)));
+        assert!(repo.load_events(&image_id).await.unwrap().is_empty());
+        assert_eq!(state.current_sequence, 0);
     }
 
     #[test]

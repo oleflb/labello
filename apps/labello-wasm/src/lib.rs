@@ -33,7 +33,10 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
     let params = web_sys::UrlSearchParams::new_with_str(&search)?;
     Ok(labello_ui::AppConfig {
         api_base_url: param(&params, "api", "http://127.0.0.1:8080"),
-        dev_token: param(&params, "token", "dev-local-token"),
+        // Tokens must never be accepted through the URL, where browser history,
+        // referrers, and copied links can expose them. Development users enter
+        // the token in the masked connection field instead.
+        dev_token: String::new(),
         user_id: labello_domain::UserId::from(param(&params, "user", "admin")),
         role: parse_role(&param(&params, "role", "data_admin")),
         dataset_id: labello_domain::DatasetId::from(param(&params, "dataset", "demo")),

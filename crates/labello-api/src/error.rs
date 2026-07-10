@@ -17,6 +17,9 @@ pub enum ApiError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("invalid id: {0}")]
+    InvalidId(#[from] labello_domain::IdValidationError),
+
     #[error("storage error: {0}")]
     Storage(#[from] labello_storage::StorageError),
 
@@ -34,9 +37,13 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::InvalidId(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Storage(labello_storage::StorageError::NotFound(_)) => StatusCode::NOT_FOUND,
+            ApiError::Storage(labello_storage::StorageError::AlreadyExists(_)) => {
+                StatusCode::CONFLICT
+            }
             ApiError::Storage(labello_storage::StorageError::OutsideDatasetRoot(_)) => {
                 StatusCode::BAD_REQUEST
             }

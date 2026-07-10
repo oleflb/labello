@@ -225,19 +225,11 @@ impl ImageApi for HttpLabelloApi {
         request: AssignNextRequest,
     ) -> crate::ApiFuture<'a, Option<Assignment>> {
         Box::pin(async move {
-            let mut path = format!(
-                "/datasets/{dataset_id}/images/next?task_id={}",
-                urlencoding::encode(request.task_id.as_str())
-            );
-            if let Some(kind) = request.kind {
-                let kind = serde_json::to_value(kind)?
-                    .as_str()
-                    .unwrap_or("annotation")
-                    .to_string();
-                path.push_str("&kind=");
-                path.push_str(&urlencoding::encode(&kind));
-            }
-            let response = self.request(Method::POST, &path)?.send().await?;
+            let response = self
+                .request(Method::POST, &format!("/datasets/{dataset_id}/images/next"))?
+                .query(&request)
+                .send()
+                .await?;
             Self::json(response).await
         })
     }
@@ -460,11 +452,15 @@ impl OfflineApi for HttpLabelloApi {
         request: OfflineBundleRequest,
     ) -> crate::ApiFuture<'a, OfflineBundle> {
         Box::pin(async move {
-            let path = format!(
-                "/datasets/{dataset_id}/offline-bundle?limit={}&include_image_bytes={}",
-                request.limit, request.include_image_bytes
-            );
-            Self::json(self.request(Method::GET, &path)?.send().await?).await
+            let response = self
+                .request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/offline-bundle"),
+                )?
+                .query(&request)
+                .send()
+                .await?;
+            Self::json(response).await
         })
     }
 

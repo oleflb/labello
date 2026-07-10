@@ -12,7 +12,7 @@ use labello_client::{
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType, DatasetId,
     DatasetRole, EventPayload, ImageId, KeybindingSet, OfflineSyncRequest, PrelabelSuggestion,
-    ReviewDecision, ReviewTarget, TaskState, TaskStatus,
+    ReviewDecision, ReviewTarget, ReviewWorkflow, TaskState, TaskStatus,
 };
 
 use crate::{
@@ -40,7 +40,7 @@ pub(crate) async fn assign_next(
     headers: HeaderMap,
 ) -> ApiResult<Json<Option<labello_domain::Assignment>>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     Ok(Json(
         repo.assign_next_image(
             &actor.user_id,
@@ -58,8 +58,9 @@ pub(crate) async fn get_image_state(
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::ImageState>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     repo.load_image_record(&image_id).await?;
@@ -71,8 +72,9 @@ pub(crate) async fn get_image_record(
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::ImageRecord>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     let record = repo.load_image_record(&image_id).await?;
@@ -84,8 +86,9 @@ pub(crate) async fn get_image_file(
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     let record = repo.load_image_record(&image_id).await?;
@@ -110,8 +113,9 @@ pub(crate) async fn get_image_preview(
     Query(query): Query<PreviewQuery>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     let record = repo.load_image_record(&image_id).await?;
@@ -157,8 +161,9 @@ pub(crate) async fn append_event(
     headers: HeaderMap,
     Json(request): Json<AppendEventRequest>,
 ) -> ApiResult<Json<labello_domain::EventLogEntry>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     let required_role = required_role_for_payload(&actor, &request.payload)?;
     ensure_dataset_role(&metadata, &actor, required_role.clone())?;
@@ -178,8 +183,9 @@ pub(crate) async fn rebuild_image(
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::ImageState>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     repo.load_image_record(&image_id).await?;
@@ -192,10 +198,63 @@ pub(crate) async fn record_review(
     headers: HeaderMap,
     Json(review): Json<labello_domain::ReviewRecord>,
 ) -> ApiResult<Json<labello_domain::EventLogEntry>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    if review.reviewer_user_id != actor.user_id {
+        return Err(ApiError::Unauthorized(
+            "cannot record reviews for another user".to_string(),
+        ));
+    }
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Reviewer)?;
+    if !metadata.images.contains_key(&image_id) {
+        return Err(ApiError::NotFound(format!("image {image_id}")));
+    }
+    let image_state = repo.load_image_state(&image_id).await?;
+    let reviewed_task = match &review.target {
+        ReviewTarget::Image {
+            image_id: target_image_id,
+        } => {
+            if target_image_id != &image_id {
+                return Err(ApiError::BadRequest(
+                    "review target image does not match path image".to_string(),
+                ));
+            }
+            None
+        }
+        ReviewTarget::Task { task_id } => Some(
+            metadata
+                .task(task_id)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown task {task_id}")))?,
+        ),
+        ReviewTarget::AnnotationVersion {
+            annotation_id,
+            version,
+        } => {
+            let annotation = image_state
+                .annotations
+                .get(annotation_id)
+                .and_then(|versions| {
+                    versions
+                        .iter()
+                        .find(|candidate| candidate.version == *version)
+                })
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "annotation {annotation_id} version {version} does not exist"
+                    ))
+                })?;
+            Some(metadata.task(&annotation.task_id).ok_or_else(|| {
+                ApiError::BadRequest(format!("unknown task {}", annotation.task_id))
+            })?)
+        }
+    };
+    if reviewed_task.is_some_and(|task| task.review.workflow == ReviewWorkflow::None) {
+        return Err(ApiError::BadRequest(
+            "reviews are disabled for this task".to_string(),
+        ));
+    }
     let event_actor = Actor {
         user_id: actor.user_id.clone(),
         role: DatasetRole::Reviewer,
@@ -210,8 +269,29 @@ pub(crate) async fn record_review(
         )
         .await?;
     if let ReviewTarget::Task { task_id } = review.target {
+        let task = metadata
+            .task(&task_id)
+            .expect("task target was validated before recording the review");
+        let image_state = repo.load_image_state(&image_id).await?;
+        let approval_count = image_state
+            .reviews
+            .iter()
+            .filter_map(|candidate| match (&candidate.target, &candidate.decision) {
+                (
+                    ReviewTarget::Task {
+                        task_id: candidate_task_id,
+                    },
+                    ReviewDecision::Approved,
+                ) if candidate_task_id == &task_id => Some(&candidate.reviewer_user_id),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u32;
         let status = match review.decision {
-            ReviewDecision::Approved => TaskStatus::Completed,
+            ReviewDecision::Approved if approval_count >= task.review.required_reviews => {
+                TaskStatus::Completed
+            }
+            ReviewDecision::Approved => return Ok(Json(event)),
             ReviewDecision::Rejected => TaskStatus::NeedsCorrection,
         };
         let timestamp = labello_domain::now();
@@ -240,8 +320,9 @@ pub(crate) async fn record_correction(
     headers: HeaderMap,
     Json(request): Json<CorrectionRequest>,
 ) -> ApiResult<Json<labello_domain::EventLogEntry>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Reviewer)?;
     let event_actor = Actor {
@@ -274,8 +355,14 @@ pub(crate) async fn record_adjudication(
     headers: HeaderMap,
     Json(adjudication): Json<labello_domain::AdjudicationRecord>,
 ) -> ApiResult<Json<labello_domain::EventLogEntry>> {
+    image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    if adjudication.adjudicator_user_id != actor.user_id {
+        return Err(ApiError::Unauthorized(
+            "cannot record adjudications for another user".to_string(),
+        ));
+    }
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Adjudicator)?;
     let event_actor = Actor {
@@ -323,7 +410,7 @@ pub(crate) async fn offline_bundle(
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::OfflineBundle>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     Ok(Json(
         repo.create_offline_bundle(&actor.user_id, query.limit, query.include_image_bytes)
             .await?,
@@ -333,14 +420,38 @@ pub(crate) async fn offline_bundle(
 pub(crate) async fn offline_sync(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
     Json(request): Json<OfflineSyncRequest>,
 ) -> ApiResult<Json<labello_domain::OfflineSyncResult>> {
+    let actor = actor_from_headers(&state, &headers)?;
     if request.dataset_id != dataset_id {
         return Err(ApiError::BadRequest(
             "request datasetId does not match path".to_string(),
         ));
     }
-    let repo = state.repo(&dataset_id);
+    if request.user_id != actor.user_id {
+        return Err(ApiError::Unauthorized(
+            "offline sync userId must match the authenticated user".to_string(),
+        ));
+    }
+    for fragment in &request.fragments {
+        fragment.image_id.validate_path_segment()?;
+        for event in &fragment.events {
+            event.image_id.validate_path_segment()?;
+            if event.actor_user_id != actor.user_id {
+                return Err(ApiError::Unauthorized(
+                    "offline events must belong to the authenticated user".to_string(),
+                ));
+            }
+            let required_role = required_role_for_payload(&actor, &event.payload)?;
+            if event.actor_role != required_role {
+                return Err(ApiError::Unauthorized(
+                    "offline event role does not match its payload".to_string(),
+                ));
+            }
+        }
+    }
+    let repo = state.repo(&dataset_id)?;
     Ok(Json(repo.sync_offline_events(request).await?))
 }
 
@@ -350,7 +461,7 @@ pub(crate) async fn stats(
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::DatasetStats>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(repo.dataset_stats().await?))
@@ -362,7 +473,8 @@ pub(crate) async fn get_keybindings(
     headers: HeaderMap,
 ) -> ApiResult<Json<KeybindingSet>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    actor.user_id.validate_path_segment()?;
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     Ok(Json(repo.load_keybindings(&actor.user_id).await?))
@@ -380,7 +492,8 @@ pub(crate) async fn put_keybindings(
             "cannot edit another user's keybindings".to_string(),
         ));
     }
-    let repo = state.repo(&dataset_id);
+    actor.user_id.validate_path_segment()?;
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
     repo.save_keybindings(&bindings).await?;
@@ -394,7 +507,7 @@ pub(crate) async fn prelabel_suggestions(
     Json(request): Json<PrelabelSuggestionRequest>,
 ) -> ApiResult<Json<Vec<PrelabelSuggestion>>> {
     let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id);
+    let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Annotator)?;
     let config = metadata

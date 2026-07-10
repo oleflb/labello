@@ -48,6 +48,8 @@ impl DatasetRepository {
         let mut report = IngestReport::default();
         let mut path_to_hash = path_to_hash(&metadata.images);
         let mut seen_by_hash: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut reconciled_roots = Vec::new();
+        let mut preserve_paths = BTreeSet::new();
 
         for scan_root in self.scan_roots(&metadata).await? {
             if !tokio::fs::try_exists(&scan_root)
@@ -59,6 +61,7 @@ impl DatasetRepository {
                     .push(self.relative_path_lossy(&scan_root));
                 continue;
             }
+            reconciled_roots.push(self.relative_path(&scan_root)?);
 
             for entry in WalkDir::new(&scan_root)
                 .into_iter()
@@ -90,7 +93,8 @@ impl DatasetRepository {
                             .or_default()
                             .insert(relative_path.clone());
                         if let Some(existing) = index.images_by_hash.get_mut(&hash) {
-                            if !existing.known_paths.contains(&relative_path) {
+                            let newly_discovered = !existing.known_paths.contains(&relative_path);
+                            if newly_discovered {
                                 existing.known_paths.push(relative_path.clone());
                             }
                             if relative_path != existing.canonical_path
@@ -98,26 +102,39 @@ impl DatasetRepository {
                             {
                                 existing.duplicate_paths.push(relative_path.clone());
                             }
-                            report.duplicate_files.push(DuplicateImage {
-                                image_id: existing.image_id.clone(),
-                                canonical_path: existing.canonical_path.clone(),
-                                duplicate_path: relative_path,
-                                blake3: hash,
-                            });
+                            if newly_discovered && relative_path != existing.canonical_path {
+                                report.duplicate_files.push(DuplicateImage {
+                                    image_id: existing.image_id.clone(),
+                                    canonical_path: existing.canonical_path.clone(),
+                                    duplicate_path: relative_path,
+                                    blake3: hash,
+                                });
+                            }
                         } else {
                             index.images_by_hash.insert(hash.clone(), partial);
                             report.new_images += 1;
                         }
                     }
-                    Err(_) => report.unreadable_files.push(relative_path),
+                    Err(_) => {
+                        preserve_paths.insert(relative_path.clone());
+                        report.unreadable_files.push(relative_path);
+                    }
                 }
             }
         }
 
-        for (hash, paths_seen) in seen_by_hash {
-            if let Some(record) = index.images_by_hash.get_mut(&hash)
-                && !paths_seen.contains(&record.canonical_path)
-                && let Some(new_canonical) = paths_seen.iter().next()
+        for (hash, record) in &mut index.images_by_hash {
+            let paths_seen = seen_by_hash.get(hash);
+            record.known_paths.retain(|path| {
+                !path_in_roots(path, &reconciled_roots)
+                    || paths_seen.is_some_and(|paths| paths.contains(path))
+                    || preserve_paths.contains(path)
+            });
+            record
+                .duplicate_paths
+                .retain(|path| record.known_paths.contains(path) && path != &record.canonical_path);
+            if !record.known_paths.contains(&record.canonical_path)
+                && let Some(new_canonical) = record.known_paths.first()
             {
                 record.canonical_path = new_canonical.clone();
                 record.file_name = Path::new(new_canonical)
@@ -127,6 +144,9 @@ impl DatasetRepository {
                     .to_string();
             }
         }
+        index
+            .images_by_hash
+            .retain(|_, record| !record.known_paths.is_empty());
 
         metadata.images = index
             .images_by_hash
@@ -258,6 +278,12 @@ fn path_to_hash(images: &BTreeMap<ImageId, ImageRecord>) -> BTreeMap<String, Str
     map
 }
 
+fn path_in_roots(path: &str, roots: &[String]) -> bool {
+    roots
+        .iter()
+        .any(|root| path == root || path.starts_with(&format!("{root}/")))
+}
+
 #[cfg(test)]
 mod tests {
     use image::{ImageBuffer, Rgba};
@@ -292,6 +318,9 @@ mod tests {
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 2);
         assert_eq!(image.duplicate_paths.len(), 1);
+
+        let repeated = repo.ingest_images().await.unwrap();
+        assert!(repeated.duplicate_files.is_empty());
     }
 
     #[tokio::test]
@@ -321,9 +350,47 @@ mod tests {
         assert!(repo.safe_relative_root("/tmp/images").is_err());
     }
 
+    #[tokio::test]
+    async fn reconciles_changed_and_removed_paths_without_stale_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_path = temp.path().join(paths::IMAGES_DIR).join("a.png");
+        write_png_color(&image_path, [1, 2, 3, 255]);
+        repo.ingest_images().await.unwrap();
+        let original_id = repo
+            .load_dataset()
+            .await
+            .unwrap()
+            .images
+            .into_keys()
+            .next()
+            .unwrap();
+
+        write_png_color(&image_path, [9, 8, 7, 255]);
+        let changed = repo.ingest_images().await.unwrap();
+        let metadata = repo.load_dataset().await.unwrap();
+        assert_eq!(changed.changed_paths.len(), 1);
+        assert_eq!(metadata.images.len(), 1);
+        assert!(!metadata.images.contains_key(&original_id));
+
+        std::fs::remove_file(image_path).unwrap();
+        repo.ingest_images().await.unwrap();
+        assert!(repo.load_dataset().await.unwrap().images.is_empty());
+    }
+
     fn write_png(path: &Path) {
-        let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_pixel(2, 2, Rgba([1, 2, 3, 255]));
+        write_png_color(path, [1, 2, 3, 255]);
+    }
+
+    fn write_png_color(path: &Path, color: [u8; 4]) {
+        let image: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_pixel(2, 2, Rgba(color));
         image.save(path).unwrap();
     }
 }

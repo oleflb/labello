@@ -2,7 +2,7 @@ use eframe::egui::{self, RichText};
 use labello_domain::{DatasetRole, UserId};
 
 use crate::{
-    app::{AppView, LabelloApp},
+    app::{AppView, LabelloApp, PendingTransition},
     theme,
 };
 
@@ -25,19 +25,22 @@ impl LabelloApp {
             });
             ui.horizontal(|ui| {
                 ui.label("Dev token");
-                ui.text_edit_singleline(&mut self.config.dev_token)
+                ui.add(egui::TextEdit::singleline(&mut self.config.dev_token).password(true))
                     .on_hover_text(
                         "Must match devAuth.token in labello.server.toml when dev auth is enabled.",
                     );
             });
             let mut user_id = self.config.user_id.to_string();
-            if ui
-                .text_edit_singleline(&mut user_id)
-                .on_hover_text("User id sent to the backend for local testing.")
-                .changed()
-            {
-                self.config.user_id = UserId::from(user_id);
-            }
+            ui.horizontal(|ui| {
+                ui.label("User ID");
+                if ui
+                    .text_edit_singleline(&mut user_id)
+                    .on_hover_text("User id sent to the backend for local testing.")
+                    .changed()
+                {
+                    self.config.user_id = UserId::from(user_id);
+                }
+            });
             egui::ComboBox::from_label("Role header")
                 .selected_text(self.config.role.to_string())
                 .show_ui(ui, |ui| {
@@ -61,9 +64,18 @@ impl LabelloApp {
                 )
                 .clicked()
             {
-                self.rebuild_http_api();
-                self.setup.started = true;
-                self.request_dataset_list();
+                if let Err(error) = self.config.user_id.validate_path_segment() {
+                    self.runtime.error = Some(format!("User ID: {error}"));
+                } else {
+                    self.current = None;
+                    self.datasets.metadata = None;
+                    self.datasets.admin_config = None;
+                    self.datasets.admin_baseline = None;
+                    self.datasets.summaries.clear();
+                    self.rebuild_http_api();
+                    self.setup.started = true;
+                    self.request_dataset_list();
+                }
             }
         });
 
@@ -140,27 +152,37 @@ impl LabelloApp {
     }
 
     pub(crate) fn mode_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.selectable_value(&mut self.view, AppView::Setup, "Setup");
+        if ui
+            .selectable_label(self.view == AppView::Setup, "Setup")
+            .clicked()
+        {
+            self.request_transition(PendingTransition::View(AppView::Setup));
+        }
         if ui
             .selectable_label(self.view == AppView::Annotate, "Work")
             .clicked()
         {
             self.open_work_view();
         }
-        ui.selectable_value(&mut self.view, AppView::Stats, "Stats");
+        if ui
+            .selectable_label(self.view == AppView::Stats, "Stats")
+            .clicked()
+        {
+            self.request_transition(PendingTransition::View(AppView::Stats));
+        }
         if self.can_admin()
             && ui
                 .button("Admin")
                 .on_hover_text("Open admin settings. Requires DataAdmin role.")
                 .clicked()
         {
-            self.request_admin_dataset();
+            self.request_transition(PendingTransition::Admin);
         }
     }
 
     pub(crate) fn open_work_view(&mut self) {
-        self.view = AppView::Annotate;
         if self.datasets.metadata.is_none() {
+            self.view = AppView::Annotate;
             self.request_load_dataset();
             return;
         }
@@ -171,9 +193,7 @@ impl LabelloApp {
             );
             return;
         }
-        if self.current.is_none() {
-            self.request_next_image();
-        }
+        self.request_transition(PendingTransition::View(AppView::Annotate));
     }
 
     pub(crate) fn can_admin(&self) -> bool {

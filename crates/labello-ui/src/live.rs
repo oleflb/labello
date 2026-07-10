@@ -59,8 +59,8 @@ impl LabelloApp {
                         self.config.dataset_id = metadata.dataset_id.clone();
                         self.setup.create_dataset_id = metadata.dataset_id.to_string();
                         self.setup.create_dataset_name = metadata.name.clone();
+                        self.upsert_dataset_summary(&metadata);
                         self.runtime.error = None;
-                        self.request_dataset_list();
                         self.request_load_dataset();
                     }
                     Err(error) => {
@@ -71,7 +71,10 @@ impl LabelloApp {
                 UiMessage::DatasetLoaded(result) => {
                     self.loading.dataset = false;
                     match result {
-                        Ok(loaded) => self.apply_loaded_dataset(loaded),
+                        Ok(loaded) => {
+                            self.upsert_dataset_summary(&loaded.metadata);
+                            self.apply_loaded_dataset(loaded);
+                        }
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
@@ -80,6 +83,8 @@ impl LabelloApp {
                     match result {
                         Ok(metadata) => {
                             self.sync_work_config(metadata.clone());
+                            self.upsert_dataset_summary(&metadata);
+                            self.datasets.admin_baseline = Some(metadata.clone());
                             self.datasets.admin_config = Some(metadata);
                             self.view = AppView::Admin;
                             self.runtime.error = None;
@@ -91,28 +96,57 @@ impl LabelloApp {
                     Ok(metadata) => {
                         self.loading.admin = false;
                         self.sync_work_config(metadata.clone());
+                        self.upsert_dataset_summary(&metadata);
+                        self.datasets.admin_baseline = Some(metadata.clone());
                         self.datasets.admin_config = Some(metadata);
                         self.runtime.notice = Some("Admin config saved".to_string());
                         self.runtime.error = None;
-                        self.request_dataset_list();
                     }
                     Err(error) => {
                         self.loading.admin = false;
                         self.runtime.error = Some(error);
                     }
                 },
-                UiMessage::ImageLoaded(result) => {
+                UiMessage::ImageLoaded { generation, result } => {
+                    if generation != self.load_generation {
+                        continue;
+                    }
                     self.loading.image = false;
                     self.queue.set_loading(false);
                     match result {
-                        Ok(loaded) => {
+                        Ok(Some(loaded)) => {
                             self.runtime.error = None;
+                            self.runtime.notice = None;
                             self.apply_loaded_image(ctx, loaded);
+                        }
+                        Ok(None) => {
+                            self.runtime.error = None;
+                            self.runtime.notice = Some(
+                                match self.queue_mode {
+                                    crate::app::QueueMode::Annotate => {
+                                        "No annotation work is currently available."
+                                    }
+                                    crate::app::QueueMode::Review => {
+                                        "No reviews are currently waiting."
+                                    }
+                                    crate::app::QueueMode::Adjudicate => {
+                                        "No adjudications are currently waiting."
+                                    }
+                                }
+                                .to_string(),
+                            );
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
-                UiMessage::SaveFinished(result) => {
+                UiMessage::SaveFinished { image_id, result } => {
+                    if self
+                        .current
+                        .as_ref()
+                        .is_none_or(|current| current.image.image_id != image_id)
+                    {
+                        continue;
+                    }
                     self.loading.saving = false;
                     match result {
                         Ok(state) => {
@@ -120,6 +154,9 @@ impl LabelloApp {
                             self.save_status = SaveStatus::Saved;
                             self.runtime.error = None;
                             self.request_stats();
+                            if let Some(transition) = self.pending_transition.take() {
+                                self.execute_transition(transition);
+                            }
                         }
                         Err(error) => {
                             self.save_status = SaveStatus::Dirty;
@@ -127,24 +164,61 @@ impl LabelloApp {
                         }
                     }
                 }
-                UiMessage::ReviewFinished(result) => {
+                UiMessage::ReviewFinished {
+                    image_id,
+                    phase,
+                    decision,
+                    result,
+                } => {
+                    if self
+                        .current
+                        .as_ref()
+                        .is_none_or(|current| current.image.image_id != image_id)
+                    {
+                        continue;
+                    }
                     self.loading.saving = false;
                     match result {
                         Ok(()) => {
                             self.runtime.error = None;
-                            self.request_stats();
-                            self.next_image();
+                            match phase {
+                                crate::app::ReviewPhase::Object
+                                    if decision == labello_domain::ReviewDecision::Approved =>
+                                {
+                                    self.review_index = self.review_index.saturating_add(1);
+                                    self.sync_review_selection();
+                                }
+                                crate::app::ReviewPhase::Object => {
+                                    self.review_rejected = true;
+                                    self.request_full_image_review(
+                                        labello_domain::ReviewDecision::Rejected,
+                                    );
+                                }
+                                crate::app::ReviewPhase::FullImage => {
+                                    self.request_stats();
+                                    self.execute_transition(
+                                        crate::app::PendingTransition::NextImage,
+                                    );
+                                }
+                            }
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
-                UiMessage::AdjudicationFinished(result) => {
+                UiMessage::AdjudicationFinished { image_id, result } => {
+                    if self
+                        .current
+                        .as_ref()
+                        .is_none_or(|current| current.image.image_id != image_id)
+                    {
+                        continue;
+                    }
                     self.loading.saving = false;
                     match result {
                         Ok(()) => {
                             self.runtime.error = None;
                             self.request_stats();
-                            self.next_image();
+                            self.execute_transition(crate::app::PendingTransition::NextImage);
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
@@ -154,6 +228,17 @@ impl LabelloApp {
                     self.loading.stats = false;
                     match result {
                         Ok(stats) => self.datasets.stats = stats,
+                        Err(error) => self.runtime.error = Some(error),
+                    }
+                }
+                UiMessage::KeybindingsSaved(result) => {
+                    self.loading.keybindings = false;
+                    match result {
+                        Ok(keybindings) => {
+                            self.keybindings = keybindings;
+                            self.runtime.notice = Some("Keyboard shortcuts saved".to_string());
+                            self.runtime.error = None;
+                        }
                         Err(error) => self.runtime.error = Some(error),
                     }
                 }
@@ -262,6 +347,16 @@ impl LabelloApp {
                         .map_err(|error| error.to_string()),
                 )
             }),
+            UiCommand::SaveKeybindings {
+                dataset_id,
+                keybindings,
+            } => self.spawn_message(async move {
+                UiMessage::KeybindingsSaved(
+                    api.save_keybindings(&dataset_id, keybindings)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
             command => self.start_workflow_command(api, command),
         }
     }
@@ -329,10 +424,20 @@ impl LabelloApp {
         if self.loading.dataset || self.runtime.api.is_none() {
             return;
         }
+        let dataset_id = labello_domain::DatasetId::from(self.setup.create_dataset_id.trim());
+        if let Err(error) = dataset_id.validate_path_segment() {
+            self.runtime.error = Some(format!("Dataset ID: {error}"));
+            return;
+        }
+        let name = self.setup.create_dataset_name.trim().to_string();
+        if name.is_empty() {
+            self.runtime.error = Some("Dataset name cannot be empty".to_string());
+            return;
+        }
         self.loading.dataset = true;
         self.queue_command(UiCommand::CreateDataset {
-            dataset_id: self.setup.create_dataset_id.trim().to_string().into(),
-            name: self.setup.create_dataset_name.trim().to_string(),
+            dataset_id,
+            name,
             admin_user_id: self.config.user_id.clone(),
         });
     }
@@ -398,10 +503,46 @@ impl LabelloApp {
         });
     }
 
+    pub(crate) fn request_keybindings_save(&mut self) {
+        if self.loading.keybindings || self.runtime.api.is_none() {
+            return;
+        }
+        if let Err(error) = self.keybindings.validate_conflicts() {
+            self.runtime.error = Some(error.to_string());
+            return;
+        }
+        self.loading.keybindings = true;
+        self.queue_command(UiCommand::SaveKeybindings {
+            dataset_id: self.config.dataset_id.clone(),
+            keybindings: self.keybindings.clone(),
+        });
+    }
+
     fn apply_loaded_dataset(&mut self, loaded: LoadedDataset) {
+        self.clear_current_image();
         self.sync_work_config(loaded.metadata);
         self.keybindings = loaded.keybindings;
-        self.view = AppView::Annotate;
+        self.keybindings
+            .bindings
+            .remove(&labello_domain::UserAction::PreviousImage);
+        self.keybindings
+            .bindings
+            .remove(&labello_domain::UserAction::ToggleOfflineMode);
+        if !self.can_use_queue_mode(self.queue_mode) {
+            self.queue_mode = [
+                crate::app::QueueMode::Annotate,
+                crate::app::QueueMode::Review,
+                crate::app::QueueMode::Adjudicate,
+            ]
+            .into_iter()
+            .find(|mode| self.can_use_queue_mode(*mode))
+            .unwrap_or(crate::app::QueueMode::Annotate);
+        }
+        self.view = if self.can_use_queue_mode(self.queue_mode) {
+            AppView::Annotate
+        } else {
+            AppView::Stats
+        };
         if self.ensure_valid_task_selection() {
             self.runtime.error = None;
         } else {
@@ -410,7 +551,7 @@ impl LabelloApp {
                     .to_string(),
             );
         }
-        if self.current.is_none() && self.selected_class_id().is_some() {
+        if self.view == AppView::Annotate && self.selected_class_id().is_some() {
             self.request_next_image();
         }
     }
@@ -431,12 +572,16 @@ impl LabelloApp {
                     self.loading.ingest_job_id = None;
                     self.loading.last_ingest_poll = None;
                     let report = job.report.unwrap_or_default();
+                    self.bump_dataset_image_count(report.new_images);
                     self.runtime.notice = Some(format!(
-                        "Ingested {} new images from {} discovered files",
-                        report.new_images, report.discovered_files
+                        "Ingest complete: {} new, {} duplicate, {} changed, {} unreadable ({} discovered)",
+                        report.new_images,
+                        report.duplicate_files.len(),
+                        report.changed_paths.len(),
+                        report.unreadable_files.len(),
+                        report.discovered_files,
                     ));
                     self.runtime.error = None;
-                    self.request_admin_dataset();
                     self.request_dataset_list();
                     if self.view == AppView::Annotate && self.current.is_none() {
                         self.request_next_image();
@@ -459,6 +604,54 @@ impl LabelloApp {
         }
     }
 
+    fn upsert_dataset_summary(&mut self, metadata: &labello_domain::DatasetMetadata) {
+        let roles = metadata
+            .role_assignments
+            .iter()
+            .find(|assignment| assignment.user_id == self.config.user_id)
+            .map(|assignment| assignment.roles.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let existing = self
+            .datasets
+            .summaries
+            .iter_mut()
+            .find(|summary| summary.dataset_id == metadata.dataset_id);
+        match existing {
+            Some(summary) => {
+                summary.name = metadata.name.clone();
+                if !roles.is_empty() {
+                    summary.roles = roles;
+                }
+                if !metadata.images.is_empty() {
+                    summary.total_images = metadata.images.len();
+                }
+            }
+            None => self
+                .datasets
+                .summaries
+                .push(labello_client::DatasetSummary {
+                    dataset_id: metadata.dataset_id.clone(),
+                    name: metadata.name.clone(),
+                    roles,
+                    total_images: metadata.images.len(),
+                }),
+        }
+    }
+
+    fn bump_dataset_image_count(&mut self, new_images: usize) {
+        if new_images == 0 {
+            return;
+        }
+        if let Some(summary) = self
+            .datasets
+            .summaries
+            .iter_mut()
+            .find(|summary| summary.dataset_id == self.config.dataset_id)
+        {
+            summary.total_images += new_images;
+        }
+    }
+
     fn apply_loaded_image(&mut self, ctx: &egui::Context, loaded: LoadedImage) {
         let image_id = loaded.queued.image.image_id.clone();
         self.current = Some(loaded.queued);
@@ -469,8 +662,11 @@ impl LabelloApp {
             .iter()
             .map(|annotation| annotation.annotation_id.clone())
             .collect();
+        self.modified_annotations.clear();
         self.accepted_prelabels.clear();
         self.selected_annotation = None;
+        self.review_index = 0;
+        self.review_rejected = false;
         self.save_status = SaveStatus::Idle;
         self.current_texture = loaded.color_image.map(|image| {
             ctx.load_texture(
@@ -479,6 +675,7 @@ impl LabelloApp {
                 egui::TextureOptions::LINEAR,
             )
         });
+        self.sync_review_selection();
     }
 
     fn apply_state(&mut self, state: labello_domain::ImageState) {
@@ -489,6 +686,22 @@ impl LabelloApp {
             .map(|annotation| annotation.annotation_id.clone())
             .collect();
         self.current_state = Some(state);
+        self.modified_annotations.clear();
+    }
+
+    pub(crate) fn sync_review_selection(&mut self) {
+        if self.queue_mode != crate::app::QueueMode::Review {
+            return;
+        }
+        let selected = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
+            .nth(self.review_index)
+            .map(|annotation| annotation.annotation_id.clone());
+        self.selected_annotation = selected;
     }
 
     pub(crate) fn spawn_message<F>(&self, future: F)

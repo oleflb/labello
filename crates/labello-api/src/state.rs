@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use labello_client::IngestJob;
-use labello_domain::UserId;
+use labello_domain::{DatasetId, IdValidationError, UserId};
 use labello_storage::DatasetRepository;
 use tokio::sync::RwLock;
 
@@ -17,6 +17,7 @@ pub struct ApiState {
     bootstrap_admins: Arc<BTreeSet<UserId>>,
     dev_auth_token: Option<Arc<String>>,
     ingest_jobs: Arc<RwLock<BTreeMap<String, IngestJob>>>,
+    repositories: Arc<Mutex<BTreeMap<DatasetId, Arc<DatasetRepository>>>>,
     pub github_oauth: Option<GithubOAuthConfig>,
     pub http: reqwest::Client,
 }
@@ -28,6 +29,7 @@ impl ApiState {
             bootstrap_admins: Arc::new(BTreeSet::from([UserId::from("admin")])),
             dev_auth_token: None,
             ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
+            repositories: Arc::new(Mutex::new(BTreeMap::new())),
             github_oauth: None,
             http: reqwest::Client::new(),
         }
@@ -60,8 +62,23 @@ impl ApiState {
         self
     }
 
-    pub fn repo(&self, dataset_id: &labello_domain::DatasetId) -> DatasetRepository {
-        DatasetRepository::new(self.datasets_root.join(dataset_id.as_str()))
+    pub fn repo(
+        &self,
+        dataset_id: &DatasetId,
+    ) -> Result<Arc<DatasetRepository>, IdValidationError> {
+        dataset_id.validate_path_segment()?;
+        let mut repositories = self
+            .repositories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(repositories
+            .entry(dataset_id.clone())
+            .or_insert_with(|| {
+                Arc::new(DatasetRepository::new(
+                    self.datasets_root.join(dataset_id.as_str()),
+                ))
+            })
+            .clone())
     }
 
     pub async fn put_ingest_job(&self, job: IngestJob) {
@@ -73,5 +90,27 @@ impl ApiState {
 
     pub async fn get_ingest_job(&self, job_id: &str) -> Option<IngestJob> {
         self.ingest_jobs.read().await.get(job_id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caches_repository_instances_by_dataset() {
+        let state = ApiState::new("/tmp/labello-datasets");
+        let first = state.repo(&DatasetId::from("ds")).unwrap();
+        let second = state.clone().repo(&DatasetId::from("ds")).unwrap();
+        let other = state.repo(&DatasetId::from("other")).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn rejects_unsafe_dataset_ids_before_building_paths() {
+        let state = ApiState::new("/tmp/labello-datasets");
+        assert!(state.repo(&DatasetId::from("../escape")).is_err());
     }
 }
