@@ -8,11 +8,11 @@ use labello_domain::{
 };
 
 use crate::{
-    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
-    CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi, ImageFile,
-    ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest,
-    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
+    AuthApi, ClientError, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary,
+    ImageApi, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
+    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Default)]
@@ -196,6 +196,30 @@ impl ImageApi for DemoLabelloApi {
         _request: AssignNextRequest,
     ) -> crate::ApiFuture<'a, Option<Assignment>> {
         Box::pin(async move { Ok(None) })
+    }
+
+    fn release_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Err(ClientError::Demo(
+                "the demo backend does not create assignments".to_string(),
+            ))
+        })
+    }
+
+    fn complete_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Err(ClientError::Demo(
+                "the demo backend does not create assignments".to_string(),
+            ))
+        })
     }
 
     fn get_image_state<'a>(

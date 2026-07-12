@@ -73,7 +73,6 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
         api_base_url: app.config.api_base_url.clone(),
         dataset_id: app.config.dataset_id.to_string(),
         user_id: app.config.user_id.to_string(),
-        role: app.config.role.to_string(),
         dev_token: app.config.dev_token.clone(),
         root,
     };
@@ -100,7 +99,6 @@ struct UploadConfig {
     api_base_url: String,
     dataset_id: String,
     user_id: String,
-    role: String,
     dev_token: String,
     root: String,
 }
@@ -321,10 +319,6 @@ async fn fetch(
     request
         .headers()
         .set("x-user-id", &config.user_id)
-        .map_err(js_error)?;
-    request
-        .headers()
-        .set("x-user-role", &config.role)
         .map_err(js_error)?;
     if !config.dev_token.is_empty() {
         request

@@ -50,6 +50,12 @@ impl IntoResponse for ApiError {
             ApiError::Storage(labello_storage::StorageError::Unauthorized(_)) => {
                 StatusCode::UNAUTHORIZED
             }
+            ApiError::Storage(labello_storage::StorageError::InvalidAssignment(_)) => {
+                StatusCode::BAD_REQUEST
+            }
+            ApiError::Storage(labello_storage::StorageError::AssignmentConflict(_)) => {
+                StatusCode::CONFLICT
+            }
             ApiError::Storage(_) | ApiError::Http(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (

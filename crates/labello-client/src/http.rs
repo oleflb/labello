@@ -9,11 +9,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use url::Url;
 
 use crate::{
-    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AuthApi, ClientError,
-    ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi,
-    ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi, OAuthCallbackRequest,
-    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
+    AuthApi, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi,
+    DatasetSummary, ImageApi, ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
+    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -234,6 +234,40 @@ impl ImageApi for HttpLabelloApi {
         })
     }
 
+    fn release_assignment<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!("/datasets/{dataset_id}/assignments/release"),
+                )?,
+                &request,
+            )
+            .await
+        })
+    }
+
+    fn complete_assignment<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!("/datasets/{dataset_id}/assignments/complete"),
+                )?,
+                &request,
+            )
+            .await
+        })
+    }
+
     fn get_image_state<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -385,6 +419,28 @@ impl AnnotationApi for HttpLabelloApi {
             .await
         })
     }
+
+    fn append_assigned_event<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AppendEventRequest,
+    ) -> crate::ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{}/events",
+                        assignment.image_id
+                    ),
+                )?
+                .query(&assignment),
+                &request,
+            )
+            .await
+        })
+    }
 }
 
 impl ReviewApi for HttpLabelloApi {
@@ -400,6 +456,28 @@ impl ReviewApi for HttpLabelloApi {
                     Method::POST,
                     &format!("/datasets/{dataset_id}/images/{image_id}/reviews"),
                 )?,
+                &review,
+            )
+            .await
+        })
+    }
+
+    fn record_assigned_review<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        review: ReviewRecord,
+    ) -> crate::ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{}/reviews",
+                        assignment.image_id
+                    ),
+                )?
+                .query(&assignment),
                 &review,
             )
             .await
@@ -423,6 +501,28 @@ impl ReviewApi for HttpLabelloApi {
             .await
         })
     }
+
+    fn record_assigned_correction<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: CorrectionRequest,
+    ) -> crate::ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{}/corrections",
+                        assignment.image_id
+                    ),
+                )?
+                .query(&assignment),
+                &request,
+            )
+            .await
+        })
+    }
 }
 
 impl AdjudicationApi for HttpLabelloApi {
@@ -438,6 +538,28 @@ impl AdjudicationApi for HttpLabelloApi {
                     Method::POST,
                     &format!("/datasets/{dataset_id}/images/{image_id}/adjudications"),
                 )?,
+                &adjudication,
+            )
+            .await
+        })
+    }
+
+    fn record_assigned_adjudication<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        adjudication: AdjudicationRecord,
+    ) -> crate::ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{}/adjudications",
+                        assignment.image_id
+                    ),
+                )?
+                .query(&assignment),
                 &adjudication,
             )
             .await

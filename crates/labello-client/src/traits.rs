@@ -8,9 +8,10 @@ use labello_domain::{
 };
 
 use crate::{
-    AppendEventRequest, AssignNextRequest, ClientResult, CorrectionRequest, CreateDatasetRequest,
-    DatasetSummary, ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest,
-    OAuthLoginRequest, OfflineBundleRequest, PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
+    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, ClientError, ClientResult,
+    CorrectionRequest, CreateDatasetRequest, DatasetSummary, ImageFile, ImagePreview, IngestJob,
+    IngestReport, OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest,
+    PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -53,6 +54,28 @@ pub trait ImageApi {
         dataset_id: &'a DatasetId,
         request: AssignNextRequest,
     ) -> ApiFuture<'a, Option<Assignment>>;
+    fn release_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Assignment> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "assignment release is not implemented by this client".to_string(),
+            ))
+        })
+    }
+    fn complete_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Assignment> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "assignment completion is not implemented by this client".to_string(),
+            ))
+        })
+    }
     fn get_image_state<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -97,6 +120,18 @@ pub trait AnnotationApi {
     ) -> ApiFuture<'a, EventLogEntry> {
         self.append_event(dataset_id, image_id, AppendEventRequest { payload })
     }
+
+    fn append_assigned_event<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AppendEventRequest,
+    ) -> ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            self.append_event(dataset_id, &assignment.image_id, request)
+                .await
+        })
+    }
 }
 
 pub trait ReviewApi {
@@ -107,12 +142,36 @@ pub trait ReviewApi {
         review: ReviewRecord,
     ) -> ApiFuture<'a, EventLogEntry>;
 
+    fn record_assigned_review<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        review: ReviewRecord,
+    ) -> ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            self.record_review(dataset_id, &assignment.image_id, review)
+                .await
+        })
+    }
+
     fn record_correction<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
         request: CorrectionRequest,
     ) -> ApiFuture<'a, EventLogEntry>;
+
+    fn record_assigned_correction<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: CorrectionRequest,
+    ) -> ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            self.record_correction(dataset_id, &assignment.image_id, request)
+                .await
+        })
+    }
 }
 
 pub trait AdjudicationApi {
@@ -122,6 +181,18 @@ pub trait AdjudicationApi {
         image_id: &'a ImageId,
         adjudication: AdjudicationRecord,
     ) -> ApiFuture<'a, EventLogEntry>;
+
+    fn record_assigned_adjudication<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        adjudication: AdjudicationRecord,
+    ) -> ApiFuture<'a, EventLogEntry> {
+        Box::pin(async move {
+            self.record_adjudication(dataset_id, &assignment.image_id, adjudication)
+                .await
+        })
+    }
 }
 
 pub trait OfflineApi {

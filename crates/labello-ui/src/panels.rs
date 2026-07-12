@@ -3,29 +3,28 @@ use labello_domain::{AdjudicationDecision, ReviewDecision};
 
 use crate::{
     app::{
-        AppView, LabelloApp, PendingTransition, QueueMode, SaveStatus, Tool, annotation_type_label,
+        AppView, Drawer, LabelloApp, LayoutMode, PendingTransition, SaveStatus, Tool,
+        annotation_type_label,
     },
     canvas::{CanvasAction, show_canvas_interactive},
     theme,
 };
 
 impl LabelloApp {
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.set_max_height(32.0);
-        ui.horizontal_wrapped(|ui| {
+    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        ui.horizontal(|ui| {
             ui.label(
                 RichText::new("Labello")
                     .size(22.0)
                     .strong()
                     .color(theme::TEXT),
             );
-            ui.add_space(8.0);
             badge(
                 ui,
                 &format!("Dataset {}", self.config.dataset_id),
                 theme::BLUE,
             );
-            if self.view == AppView::Annotate {
+            if self.work_view() {
                 badge(
                     ui,
                     status_text(self.save_status),
@@ -37,128 +36,117 @@ impl LabelloApp {
             } else if let Some(notice) = &self.runtime.notice {
                 ui.colored_label(theme::TEAL, bounded_message(notice));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.mode_toolbar(ui);
-                if self.view == AppView::Annotate
-                    && ui
-                        .add_enabled(
-                            self.current.is_some() && !self.loading.saving && !self.loading.image,
-                            egui::Button::new("Next image"),
-                        )
-                        .on_hover_text("Save pending edits, then load the next assigned image.")
-                        .clicked()
-                {
-                    self.next_image();
-                }
-                if self.view == AppView::Annotate && self.queue_mode == QueueMode::Annotate {
-                    if ui
-                        .add_enabled(
-                            self.current.is_some()
-                                && self.save_status == SaveStatus::Dirty
-                                && !self.loading.saving,
-                            egui::Button::new("Save"),
-                        )
-                        .on_hover_text("Persist current annotation edits as event-log entries.")
-                        .clicked()
-                    {
-                        self.autosave();
-                    }
-                    if ui
-                        .add_enabled(
-                            self.current.is_some() && !self.loading.saving,
-                            egui::Button::new("Submit & next"),
-                        )
-                        .on_hover_text("Save annotations and mark the active task as submitted.")
-                        .clicked()
-                    {
-                        self.submit_and_advance();
-                    }
-                }
-                if self.view == AppView::Annotate {
-                    ui.toggle_value(&mut self.show_tutorial, "Tutorial");
-                }
-            });
         });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            self.mode_toolbar(ui);
+            if layout == LayoutMode::Tablet && self.work_view() {
+                if ui.button("Workflow").clicked() {
+                    self.drawer = if self.drawer == Some(Drawer::Workflow) {
+                        None
+                    } else {
+                        Some(Drawer::Workflow)
+                    };
+                }
+                if ui.button("Inspector").clicked() {
+                    self.drawer = if self.drawer == Some(Drawer::Inspector) {
+                        None
+                    } else {
+                        Some(Drawer::Inspector)
+                    };
+                }
+            }
+            if self.work_view() && ui.button("Settings").clicked() {
+                self.show_settings = true;
+            }
+            if layout == LayoutMode::Desktop {
+                self.workspace_actions(ui);
+            }
+        });
+        if layout == LayoutMode::Tablet {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| self.workspace_actions(ui));
+        }
+    }
+
+    fn workspace_actions(&mut self, ui: &mut egui::Ui) {
+        if !self.work_view() {
+            return;
+        }
+        let ready = self.assignment.is_some()
+            && !self.loading.saving
+            && !self.loading.image
+            && self.pending_transition.is_none();
+        if self.view == AppView::Annotate {
+            if ui
+                .add_enabled(
+                    ready && self.save_status == SaveStatus::Dirty,
+                    egui::Button::new("Save"),
+                )
+                .on_hover_text("Save edits and keep this assignment active.")
+                .clicked()
+            {
+                self.autosave();
+            }
+            if ui
+                .add_enabled(ready, egui::Button::new("Submit & next"))
+                .on_hover_text("Save, complete this assignment, and claim another.")
+                .clicked()
+            {
+                self.submit_and_advance();
+            }
+        }
+        if ui
+            .add_enabled(ready, egui::Button::new("Skip"))
+            .on_hover_text("Release this assignment and claim another.")
+            .clicked()
+        {
+            self.skip_assignment();
+        }
+        ui.toggle_value(&mut self.show_tutorial, "Tutorial");
     }
 
     pub(crate) fn task_panel(&mut self, ui: &mut egui::Ui) {
-        if matches!(self.view, AppView::Setup | AppView::Admin | AppView::Stats) {
-            return;
-        }
-        ui.heading(RichText::new("Workflow Focus").color(theme::TEXT));
-        ui.label(
-            RichText::new("Pick one class and annotation type for this work session.")
-                .color(theme::MUTED),
-        );
+        ui.heading(RichText::new("Workflow").color(theme::TEXT));
+        ui.label(RichText::new("Choose one enabled class workflow.").color(theme::MUTED));
         ui.add_space(8.0);
-        let selected_class_id = self.selected_class_id().cloned();
         let workflows = self.workflow_choices();
         if workflows.is_empty() {
-            ui.colored_label(theme::AMBER, "No enabled workflows configured.");
+            ui.colored_label(theme::AMBER, "No enabled one-class workflows configured.");
         }
         for workflow in workflows {
-            let selected = self.selected_task == workflow.task_index
-                && selected_class_id.as_ref() == Some(&workflow.class_id);
+            let selected = self.selected_task_id.as_ref() == Some(&workflow.task_id);
             theme::card_frame().show(ui, |ui| {
                 if ui
                     .selectable_label(selected, RichText::new(workflow.label()).strong())
                     .clicked()
                     && !selected
                 {
-                    self.request_transition(PendingTransition::Workflow {
-                        task_index: workflow.task_index,
-                        class_id: workflow.class_id.clone(),
-                    });
+                    self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
                 }
+                ui.label(annotation_type_label(&workflow.annotation_type));
                 ui.small(format!("Task: {}", workflow.task_name));
+                if selected {
+                    badge(ui, "Current", theme::TEAL);
+                }
             });
-        }
-        ui.add_space(10.0);
-        ui.label(RichText::new("Queue Mode").strong());
-        for (mode, label) in [
-            (QueueMode::Annotate, "Annotate"),
-            (QueueMode::Review, "Review"),
-            (QueueMode::Adjudicate, "Adjudicate"),
-        ] {
-            if self.can_use_queue_mode(mode)
-                && ui
-                    .selectable_label(self.queue_mode == mode, label)
-                    .clicked()
-            {
-                self.set_queue_mode(mode);
-            }
+            ui.add_space(6.0);
         }
         ui.separator();
-        if self.queue_mode == QueueMode::Annotate {
-            ui.label(RichText::new("Tools").strong());
-            if let Some(workflow) = self.selected_workflow() {
-                badge(
-                    ui,
-                    annotation_type_label(&workflow.annotation_type),
-                    theme::BLUE,
-                );
-            }
-            ui.separator();
-            ui.label(RichText::new("Classes").strong());
-            if let Some(workflow) = self.selected_workflow() {
-                badge(ui, &workflow.class_name, theme::TEAL);
-            }
-            ui.separator();
-        }
-        ui.label(RichText::new("Image Queue").strong());
-        ui.label("Assignments are reserved one at a time to avoid duplicate work.");
-        if self.loading.dataset || self.queue.is_loading() || self.current.is_none() {
-            ui.colored_label(theme::AMBER, "Loading next image...");
+        ui.label(RichText::new("Assignment").strong());
+        if self.assignment.is_some() {
+            ui.label("Active assignment");
+            ui.small("Reserved for you until you submit or skip it.");
+        } else if self.loading.image {
+            ui.spinner();
+            ui.label("Claiming work...");
         } else {
-            ui.colored_label(theme::MUTED, format!("{} images ready", self.queue.len()));
+            ui.label(RichText::new("No active assignment").color(theme::MUTED));
         }
     }
 
     pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui) {
-        if matches!(self.view, AppView::Setup | AppView::Admin | AppView::Stats) {
-            return;
-        }
-        ui.heading(RichText::new("Review & Sync").color(theme::TEXT));
+        ui.heading(RichText::new("Inspector").color(theme::TEXT));
         let active_count = self
             .annotations
             .iter()
@@ -167,28 +155,37 @@ impl LabelloApp {
             })
             .count();
         metric(ui, "Active annotations", active_count.to_string());
-        if self.queue_mode == QueueMode::Annotate && self.tool == Tool::Keypoints {
-            let spec = self.selected_task().and_then(|task| task.skeleton.clone());
-            let next_keypoint = spec.as_ref().and_then(|skeleton| {
-                skeleton
-                    .keypoints
-                    .get(self.skeleton_keypoint_index)
-                    .map(|keypoint| keypoint.name.clone())
-            });
-            if let Some(name) = next_keypoint {
-                metric(
-                    ui,
-                    if self.active_skeleton.is_some() {
-                        "Place keypoint"
-                    } else {
-                        "Start skeleton"
-                    },
-                    name,
-                );
-                ui.small(
-                    "Tap keypoints in order. The next tap starts a new object after completion.",
-                );
-                if let Some(spec) = spec {
+        if self.view == AppView::Annotate && self.tool == Tool::Keypoints {
+            self.keypoint_actions(ui);
+        }
+        match self.view {
+            AppView::Annotate => self.prelabel_panel(ui),
+            AppView::Review => self.review_actions(ui),
+            AppView::Adjudicate => self.adjudication_actions(ui),
+            AppView::Setup | AppView::Admin | AppView::Stats => {}
+        }
+    }
+
+    fn keypoint_actions(&mut self, ui: &mut egui::Ui) {
+        let spec = self.selected_task().and_then(|task| task.skeleton.clone());
+        let next_keypoint = spec.as_ref().and_then(|skeleton| {
+            skeleton
+                .keypoints
+                .get(self.skeleton_keypoint_index)
+                .map(|keypoint| keypoint.name.clone())
+        });
+        if let Some(name) = next_keypoint {
+            metric(
+                ui,
+                if self.active_skeleton.is_some() {
+                    "Place keypoint"
+                } else {
+                    "Start skeleton"
+                },
+                name,
+            );
+            if let Some(spec) = spec {
+                ui.add_enabled_ui(!self.loading.saving, |ui| {
                     ui.horizontal(|ui| {
                         if spec.allow_hidden {
                             ui.checkbox(&mut self.next_keypoint_hidden, "Hidden");
@@ -200,144 +197,67 @@ impl LabelloApp {
                             self.skip_keypoint();
                         }
                     });
-                }
-            }
-        }
-        match self.queue_mode {
-            QueueMode::Annotate => self.prelabel_panel(ui),
-            QueueMode::Review => {
-                let total = self
-                    .annotations
-                    .iter()
-                    .filter(|annotation| {
-                        !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
-                    })
-                    .count();
-                if self.review_index < total {
-                    metric(
-                        ui,
-                        "Object review",
-                        format!("{} of {total}", self.review_index + 1),
-                    );
-                    ui.label("The active object is highlighted on the canvas.");
-                } else {
-                    metric(ui, "Final check", "Full image".to_string());
-                    ui.label("Check for missed objects before completing this review.");
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.loading.saving, egui::Button::new("Approve  Y"))
-                        .on_hover_text(if self.review_index < total {
-                            "Approve the highlighted object."
-                        } else {
-                            "Confirm that no objects were missed."
-                        })
-                        .clicked()
-                    {
-                        if self.runtime.api.is_some() {
-                            self.request_review(ReviewDecision::Approved);
-                        } else {
-                            self.review_index = self.review_index.saturating_add(1);
-                        }
-                    }
-                    if ui
-                        .add_enabled(!self.loading.saving, egui::Button::new("Reject  N"))
-                        .on_hover_text(if self.review_index < total {
-                            "Reject the highlighted object and request correction."
-                        } else {
-                            "Report a missed or incorrect object."
-                        })
-                        .clicked()
-                    {
-                        if self.runtime.api.is_some() {
-                            self.request_review(ReviewDecision::Rejected);
-                        } else {
-                            self.save_status = SaveStatus::Dirty;
-                        }
-                    }
-                });
-            }
-            QueueMode::Adjudicate => {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Adjudicate accept")
-                        .on_hover_text("Resolve adjudication by accepting annotations.")
-                        .clicked()
-                    {
-                        self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
-                    }
-                    if ui
-                        .button("Needs correction")
-                        .on_hover_text(
-                            "Resolve adjudication by sending the task back for correction.",
-                        )
-                        .clicked()
-                    {
-                        self.request_adjudication(AdjudicationDecision::NeedsCorrection);
-                    }
                 });
             }
         }
-        ui.separator();
-        ui.heading("Keyboard shortcuts");
-        egui::ScrollArea::vertical()
-            .max_height(260.0)
-            .show(ui, |ui| {
-                for (action, chord) in &mut self.keybindings.bindings {
-                    if matches!(
-                        action,
-                        labello_domain::UserAction::PreviousImage
-                            | labello_domain::UserAction::ToggleOfflineMode
-                    ) {
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(action_label(action));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut chord.key)
-                                .desired_width(88.0)
-                                .hint_text("Key"),
-                        );
-                        ui.checkbox(&mut chord.ctrl, "Ctrl");
-                        ui.checkbox(&mut chord.shift, "Shift");
-                        ui.checkbox(&mut chord.alt, "Alt");
-                        ui.checkbox(&mut chord.command, "Cmd");
-                    });
-                }
-            });
-        let conflicts = self.keybindings.validate_conflicts().err();
-        if let Some(error) = conflicts.as_ref() {
-            ui.colored_label(theme::RED, error.to_string());
+    }
+
+    fn review_actions(&mut self, ui: &mut egui::Ui) {
+        let total = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
+            .count();
+        if self.review_index < total {
+            metric(
+                ui,
+                "Object review",
+                format!("{} of {total}", self.review_index + 1),
+            );
+            ui.label("The active object is highlighted on the canvas.");
+        } else {
+            metric(ui, "Final check", "Full image".to_string());
+            ui.label("Check for missed objects before completing this review.");
         }
+        let ready = self.assignment.is_some() && !self.loading.saving;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(
-                    conflicts.is_none() && !self.loading.keybindings,
-                    egui::Button::new("Save shortcuts"),
-                )
+                .add_enabled(ready, egui::Button::new("Approve  Y"))
                 .clicked()
             {
-                self.request_keybindings_save();
+                self.request_review(ReviewDecision::Approved);
             }
-            if ui.button("Reset defaults").clicked() {
-                self.keybindings.reset_to_defaults();
-                self.keybindings
-                    .bindings
-                    .remove(&labello_domain::UserAction::PreviousImage);
-                self.keybindings
-                    .bindings
-                    .remove(&labello_domain::UserAction::ToggleOfflineMode);
-            }
-            if self.loading.keybindings {
-                ui.spinner();
+            if ui
+                .add_enabled(ready, egui::Button::new("Reject  N"))
+                .clicked()
+            {
+                self.request_review(ReviewDecision::Rejected);
             }
         });
+    }
+
+    fn adjudication_actions(&mut self, ui: &mut egui::Ui) {
+        let ready = self.assignment.is_some() && !self.loading.saving;
+        if ui
+            .add_enabled(ready, egui::Button::new("Adjudicate accept"))
+            .clicked()
+        {
+            self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
+        }
+        if ui
+            .add_enabled(ready, egui::Button::new("Needs correction"))
+            .clicked()
+        {
+            self.request_adjudication(AdjudicationDecision::NeedsCorrection);
+        }
     }
 
     pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
         match self.view {
             AppView::Setup => {
-                self.setup_view(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| self.setup_view(ui));
                 return;
             }
             AppView::Admin => {
@@ -345,21 +265,10 @@ impl LabelloApp {
                 return;
             }
             AppView::Stats => {
-                self.stats_view(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| self.stats_view(ui));
                 return;
             }
-            AppView::Annotate => {}
-        }
-        if ui.available_width() < 900.0 {
-            ui.horizontal(|ui| {
-                egui::CollapsingHeader::new("Workflow")
-                    .default_open(false)
-                    .show(ui, |ui| self.task_panel(ui));
-                egui::CollapsingHeader::new("Review and tools")
-                    .default_open(false)
-                    .show(ui, |ui| self.right_panel(ui));
-            });
-            ui.separator();
+            AppView::Annotate | AppView::Review | AppView::Adjudicate => {}
         }
         if self.show_tutorial
             && let Some(task) = self.selected_task()
@@ -367,19 +276,12 @@ impl LabelloApp {
             theme::card_frame().show(ui, |ui| {
                 ui.heading(&task.instructions.title);
                 ui.label(&task.instructions.example_text);
-                for image in &task.instructions.example_images {
-                    ui.small(format!("Example image: {image}"));
-                }
             });
-            ui.add_space(12.0);
+            ui.add_space(8.0);
         }
         if let Some(current) = self.current.clone() {
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&current.image.file_name)
-                        .strong()
-                        .color(theme::TEXT),
-                );
+                ui.label(RichText::new(&current.image.file_name).strong());
                 ui.label(
                     RichText::new(format!(
                         "{} x {}",
@@ -387,8 +289,11 @@ impl LabelloApp {
                     ))
                     .color(theme::MUTED),
                 );
+                if let Some(workflow) = self.selected_workflow() {
+                    badge(ui, &workflow.label(), theme::TEAL);
+                }
             });
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             let texture = self.current_texture.clone();
             let annotations = self
                 .annotations
@@ -396,9 +301,6 @@ impl LabelloApp {
                 .filter(|annotation| self.annotation_matches_selected_workflow(annotation))
                 .cloned()
                 .collect::<Vec<_>>();
-            let bounding_box_tool = self.tool == Tool::BoundingBox;
-            let selected_annotation = self.selected_annotation.clone();
-            let editable = self.queue_mode == QueueMode::Annotate;
             let skeleton_edges = self
                 .selected_task()
                 .and_then(|task| task.skeleton.as_ref())
@@ -410,24 +312,12 @@ impl LabelloApp {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let prelabels = self
-                .current
-                .as_ref()
-                .map(|current| {
-                    current
-                        .prelabels
-                        .iter()
-                        .filter(|suggestion| {
-                            !self.accepted_prelabels.contains(&suggestion.suggestion_id)
-                                && self
-                                    .selected_task()
-                                    .is_some_and(|task| task.task_id == suggestion.task_id)
-                                && self.selected_class_id() == Some(&suggestion.class_id)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let prelabels = self.visible_prelabels();
+            let editable = self.view == AppView::Annotate
+                && !self.loading.saving
+                && self.pending_transition.is_none();
+            let bounding_box_tool = self.tool == Tool::BoundingBox;
+            let selected_annotation = self.selected_annotation.clone();
             let action = show_canvas_interactive(
                 ui,
                 &mut self.canvas,
@@ -440,83 +330,247 @@ impl LabelloApp {
                 &skeleton_edges,
                 &prelabels,
             );
-            match action {
-                Some(CanvasAction::CreateBoundingBox(bbox)) => self.create_bbox(bbox),
-                Some(CanvasAction::PlaceKeypoint(point)) => self.place_keypoint(point),
-                Some(CanvasAction::Select(id)) => self.selected_annotation = Some(id),
-                Some(CanvasAction::EditBoundingBox(edit)) => self.edit_bbox(edit),
-                None => {}
+            if editable {
+                match action {
+                    Some(CanvasAction::CreateBoundingBox(bbox)) => self.create_bbox(bbox),
+                    Some(CanvasAction::PlaceKeypoint(point)) => self.place_keypoint(point),
+                    Some(CanvasAction::Select(id)) => self.selected_annotation = Some(id),
+                    Some(CanvasAction::EditBoundingBox(edit)) => self.edit_bbox(edit),
+                    None => {}
+                }
             }
         } else {
             ui.vertical_centered(|ui| {
                 if self.loading.dataset {
                     ui.spinner();
                     ui.label("Opening dataset...");
-                } else if self.loading.image || self.queue.is_loading() {
+                } else if self.loading.image {
                     ui.spinner();
-                    ui.label("Loading next image...");
+                    ui.label("Loading assignment...");
                 } else if let Some(error) = self.runtime.error.clone() {
                     ui.colored_label(theme::AMBER, error);
                     if ui.button("Retry image load").clicked() {
-                        self.request_next_image();
+                        self.retry_assignment_load();
                     }
                 } else {
-                    ui.label(match self.queue_mode {
-                        QueueMode::Annotate => "No annotation images available.",
-                        QueueMode::Review => "No review images available.",
-                        QueueMode::Adjudicate => "No adjudication images available.",
+                    ui.label(match self.view {
+                        AppView::Annotate => "No annotation assignments available.",
+                        AppView::Review => "No review assignments available.",
+                        AppView::Adjudicate => "No adjudication assignments available.",
+                        _ => "No assignments available.",
                     });
                     if ui.button("Retry image load").clicked() {
-                        self.request_next_image();
+                        self.retry_assignment_load();
                     }
                 }
             });
         }
     }
 
-    fn prelabel_panel(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.heading("Prelabels");
-        let task_id = self.selected_task().map(|task| task.task_id.clone());
-        let class_id = self.selected_class_id().cloned();
-        let prelabels = self
-            .current
+    pub(crate) fn overlays(&mut self, ctx: &egui::Context, layout: LayoutMode) {
+        if layout == LayoutMode::Tablet {
+            match self.drawer {
+                Some(Drawer::Workflow) => {
+                    let mut open = true;
+                    egui::Window::new("Workflow drawer")
+                        .open(&mut open)
+                        .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 118.0))
+                        .default_width(320.0)
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
+                        });
+                    if !open {
+                        self.drawer = None;
+                    }
+                }
+                Some(Drawer::Inspector) => {
+                    let mut open = true;
+                    egui::Window::new("Inspector drawer")
+                        .open(&mut open)
+                        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 118.0))
+                        .default_width(340.0)
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui));
+                        });
+                    if !open {
+                        self.drawer = None;
+                    }
+                }
+                None => {}
+            }
+        }
+        self.transition_modal(ctx);
+        self.settings_modal(ctx);
+    }
+
+    fn transition_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_transition.clone() else {
+            return;
+        };
+        let current = self
+            .selected_workflow()
+            .map(|workflow| workflow.label())
+            .unwrap_or_else(|| "No workflow".to_string());
+        let destination = self.transition_label(&pending);
+        egui::Window::new("Switch active assignment?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("Current workflow: {current}"));
+                ui.label(format!("Pending destination: {destination}"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if self.view == AppView::Annotate
+                        && ui
+                            .add_enabled(
+                                !self.loading.saving,
+                                egui::Button::new("Submit and switch"),
+                            )
+                            .clicked()
+                    {
+                        self.submit_pending_transition();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.loading.saving,
+                            egui::Button::new("Release and switch"),
+                        )
+                        .clicked()
+                    {
+                        self.release_pending_transition();
+                    }
+                    if ui
+                        .add_enabled(!self.loading.saving, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.cancel_pending_transition();
+                    }
+                });
+            });
+    }
+
+    fn transition_label(&self, transition: &PendingTransition) -> String {
+        match transition {
+            PendingTransition::NextAssignment => "Next assignment".to_string(),
+            PendingTransition::Workflow(task_id) => self
+                .workflow_choices()
+                .into_iter()
+                .find(|workflow| workflow.task_id == *task_id)
+                .map(|workflow| workflow.label())
+                .unwrap_or_else(|| task_id.to_string()),
+            PendingTransition::View(view) => view_label(*view).to_string(),
+        }
+    }
+
+    fn settings_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = self.show_settings;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.heading("Keyboard shortcuts");
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (action, chord) in &mut self.keybindings.bindings {
+                            if matches!(
+                                action,
+                                labello_domain::UserAction::PreviousImage
+                                    | labello_domain::UserAction::ToggleOfflineMode
+                            ) {
+                                continue;
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(action_label(action));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut chord.key).desired_width(88.0),
+                                );
+                                ui.checkbox(&mut chord.ctrl, "Ctrl");
+                                ui.checkbox(&mut chord.shift, "Shift");
+                                ui.checkbox(&mut chord.alt, "Alt");
+                                ui.checkbox(&mut chord.command, "Cmd");
+                            });
+                        }
+                    });
+                let conflicts = self.keybindings.validate_conflicts().err();
+                if let Some(error) = conflicts.as_ref() {
+                    ui.colored_label(theme::RED, error.to_string());
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            conflicts.is_none() && !self.loading.keybindings,
+                            egui::Button::new("Save shortcuts"),
+                        )
+                        .clicked()
+                    {
+                        self.request_keybindings_save();
+                    }
+                    if ui.button("Reset defaults").clicked() {
+                        self.keybindings.reset_to_defaults();
+                        self.keybindings
+                            .bindings
+                            .remove(&labello_domain::UserAction::PreviousImage);
+                        self.keybindings
+                            .bindings
+                            .remove(&labello_domain::UserAction::ToggleOfflineMode);
+                    }
+                });
+            });
+        self.show_settings = open;
+    }
+
+    fn visible_prelabels(&self) -> Vec<labello_domain::PrelabelSuggestion> {
+        if self.view != AppView::Annotate {
+            return Vec::new();
+        }
+        self.current
             .as_ref()
-            .map(|image| {
-                image
+            .map(|current| {
+                current
                     .prelabels
                     .iter()
                     .filter(|suggestion| {
-                        task_id.as_ref() == Some(&suggestion.task_id)
-                            && class_id.as_ref() == Some(&suggestion.class_id)
-                            && !self.accepted_prelabels.contains(&suggestion.suggestion_id)
+                        !self.accepted_prelabels.contains(&suggestion.suggestion_id)
+                            && self
+                                .selected_task()
+                                .is_some_and(|task| task.task_id == suggestion.task_id)
+                            && self.selected_class_id() == Some(&suggestion.class_id)
                     })
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn prelabel_panel(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Prelabels");
+        let prelabels = self.visible_prelabels();
         if prelabels.is_empty() {
             ui.label(RichText::new("No suggestions for this image.").color(theme::MUTED));
         }
         for suggestion in &prelabels {
             theme::card_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{}", suggestion.class_id));
+                    ui.label(suggestion.class_id.to_string());
                     badge(
                         ui,
                         &format!("{:.0}%", suggestion.confidence * 100.0),
                         theme::TEAL,
                     );
                     if ui
-                        .button("Accept")
-                        .on_hover_text("Convert this suggestion into an annotation.")
+                        .add_enabled(!self.loading.saving, egui::Button::new("Accept"))
                         .clicked()
                     {
                         self.accept_prelabel(suggestion);
                     }
                     if ui
-                        .button("Discard")
-                        .on_hover_text("Hide this suggestion for the current image.")
+                        .add_enabled(!self.loading.saving, egui::Button::new("Discard"))
                         .clicked()
                     {
                         self.accepted_prelabels
@@ -529,7 +583,6 @@ impl LabelloApp {
 }
 
 fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    ui.set_max_height(26.0);
     egui::Frame::new()
         .fill(Color32::from_rgba_unmultiplied(
             color.r(),
@@ -541,13 +594,12 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .corner_radius(egui::CornerRadius::same(18))
         .inner_margin(egui::Margin::symmetric(9, 4))
         .show(ui, |ui| {
-            ui.set_max_height(24.0);
             ui.label(RichText::new(text).color(color).strong());
         });
 }
 
 fn bounded_message(message: &str) -> String {
-    const MAX_CHARS: usize = 90;
+    const MAX_CHARS: usize = 70;
     if message.chars().count() <= MAX_CHARS {
         message.to_string()
     } else {
@@ -569,16 +621,27 @@ fn metric(ui: &mut egui::Ui, label: &str, value: String) {
 fn action_label(action: &labello_domain::UserAction) -> &'static str {
     use labello_domain::UserAction;
     match action {
-        UserAction::NextImage => "Shortcut: next image",
-        UserAction::PreviousImage => "Shortcut: previous image",
-        UserAction::SaveAnnotations => "Shortcut: save annotations",
-        UserAction::DeleteAnnotation => "Shortcut: delete annotation",
-        UserAction::SelectBoundingBoxTool => "Shortcut: bounding-box tool",
-        UserAction::SelectKeypointTool => "Shortcut: keypoint tool",
-        UserAction::AcceptReviewObject => "Shortcut: approve review object",
-        UserAction::RejectReviewObject => "Shortcut: reject review object",
-        UserAction::OpenTutorial => "Shortcut: open tutorial",
-        UserAction::ToggleOfflineMode => "Shortcut: offline mode",
+        UserAction::NextImage => "Submit and next",
+        UserAction::PreviousImage => "Previous image",
+        UserAction::SaveAnnotations => "Save annotations",
+        UserAction::DeleteAnnotation => "Delete annotation",
+        UserAction::SelectBoundingBoxTool => "Bounding-box tool",
+        UserAction::SelectKeypointTool => "Keypoint tool",
+        UserAction::AcceptReviewObject => "Approve review object",
+        UserAction::RejectReviewObject => "Reject review object",
+        UserAction::OpenTutorial => "Open tutorial",
+        UserAction::ToggleOfflineMode => "Offline mode",
+    }
+}
+
+fn view_label(view: AppView) -> &'static str {
+    match view {
+        AppView::Setup => "Setup",
+        AppView::Annotate => "Annotate",
+        AppView::Review => "Review",
+        AppView::Adjudicate => "Adjudicate",
+        AppView::Admin => "Admin",
+        AppView::Stats => "Stats",
     }
 }
 
@@ -587,7 +650,7 @@ fn status_text(status: SaveStatus) -> &'static str {
         SaveStatus::Idle => "Idle",
         SaveStatus::Dirty => "Unsaved",
         SaveStatus::Saved => "Saved",
-        SaveStatus::Syncing => "Sync pending",
+        SaveStatus::Syncing => "Syncing",
     }
 }
 

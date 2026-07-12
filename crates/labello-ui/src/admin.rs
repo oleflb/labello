@@ -506,10 +506,12 @@ fn edit_tasks(
     prelabels: &[PrelabelConfig],
 ) {
     theme::card_frame().show(ui, |ui| {
-        ui.heading("Advanced Workflows");
+        ui.heading("Labeling Workflows");
         ui.label(
-            RichText::new("Most datasets only need the Class Workflows card above.")
-                .color(theme::MUTED),
+            RichText::new(
+                "Each workflow is one annotation type and one class. Annotators choose between these workflows before claiming work.",
+            )
+            .color(theme::MUTED),
         );
         let mut remove = None;
         for (index, task) in tasks.iter_mut().enumerate() {
@@ -575,24 +577,37 @@ fn edit_tasks(
                 "Add example image",
                 "tutorial/example.png",
             );
-            ui.label("Allowed classes");
+            ui.label("Class");
             if labels.is_empty() {
                 ui.label(
                     RichText::new("Add a class before configuring this task.").color(theme::RED),
                 );
-            }
-            for label in labels {
-                let mut enabled = task.class_ids.contains(&label.class_id);
-                if ui
-                    .checkbox(&mut enabled, format!("{} ({})", label.name, label.class_id))
-                    .changed()
+            } else {
+                let mut selected = task.class_ids.first().cloned();
+                let selected_text = selected
+                    .as_ref()
+                    .and_then(|class_id| {
+                        labels
+                            .iter()
+                            .find(|label| &label.class_id == class_id)
+                            .map(|label| label.name.clone())
+                    })
+                    .unwrap_or_else(|| "Select a class".to_string());
+                egui::ComboBox::from_id_salt(format!("task-class-{index}"))
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        for label in labels {
+                            ui.selectable_value(
+                                &mut selected,
+                                Some(label.class_id.clone()),
+                                &label.name,
+                            );
+                        }
+                    });
+                if selected.as_ref() != task.class_ids.first()
+                    || task.class_ids.len() != usize::from(selected.is_some())
                 {
-                    if enabled {
-                        task.class_ids.push(label.class_id.clone());
-                    } else {
-                        task.class_ids
-                            .retain(|class_id| class_id != &label.class_id);
-                    }
+                    task.class_ids = selected.into_iter().collect();
                 }
             }
             ui.label("Prelabel sources");
@@ -1236,9 +1251,14 @@ fn task_issues(
         if task.name.trim().is_empty() {
             issues.push(format!("{context}: enter a non-empty task name."));
         }
-        if task.class_ids.is_empty() {
+        if task.enabled && task.class_ids.len() != 1 {
             issues.push(format!(
-                "{context}: select at least one allowed class for task '{}'.",
+                "{context}: enabled workflow '{}' must select exactly one class.",
+                task.task_id
+            ));
+        } else if task.class_ids.len() > 1 {
+            issues.push(format!(
+                "{context}: workflow '{}' can reference only one class.",
                 task.task_id
             ));
         }
@@ -1673,5 +1693,29 @@ mod tests {
 
         set_task_annotation_type(&mut task, AnnotationType::BoundingBox);
         assert!(task.skeleton.is_none());
+    }
+
+    #[test]
+    fn enabled_workflows_require_exactly_one_class() {
+        let person = LabelClass {
+            class_id: ClassId::from("person"),
+            name: "Person".to_string(),
+            color: "#5eead4".to_string(),
+            description: None,
+        };
+        let vehicle = LabelClass {
+            class_id: ClassId::from("vehicle"),
+            name: "Vehicle".to_string(),
+            color: "#60a5fa".to_string(),
+            description: None,
+        };
+        let mut task = workflow_task_for_class(&person, AnnotationType::BoundingBox);
+        task.class_ids.push(vehicle.class_id.clone());
+
+        assert!(
+            task_issues(&[task], &[person, vehicle], &[])
+                .iter()
+                .any(|issue| issue.contains("exactly one class"))
+        );
     }
 }

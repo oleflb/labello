@@ -18,7 +18,7 @@ impl LabelloApp {
         match HttpLabelloApi::new(&self.config.api_base_url).map(|api| {
             api.with_auth(AuthHeaders {
                 user_id: Some(self.config.user_id.clone()),
-                role: Some(self.config.role.clone()),
+                role: None,
                 dev_token: if self.config.dev_token.is_empty() {
                     None
                 } else {
@@ -61,6 +61,7 @@ impl LabelloApp {
                         self.setup.create_dataset_name = metadata.name.clone();
                         self.upsert_dataset_summary(&metadata);
                         self.runtime.error = None;
+                        self.request_dataset_list();
                         self.request_load_dataset();
                     }
                     Err(error) => {
@@ -107,46 +108,56 @@ impl LabelloApp {
                         self.runtime.error = Some(error);
                     }
                 },
-                UiMessage::ImageLoaded { generation, result } => {
-                    if generation != self.load_generation {
+                UiMessage::ImageLoaded {
+                    operation_id,
+                    assignment,
+                    result,
+                } => {
+                    if self.active_load_id != Some(operation_id) {
                         continue;
                     }
+                    self.active_load_id = None;
                     self.loading.image = false;
                     self.queue.set_loading(false);
-                    match result {
+                    match *result {
                         Ok(Some(loaded)) => {
                             self.runtime.error = None;
                             self.runtime.notice = None;
                             self.apply_loaded_image(ctx, loaded);
                         }
                         Ok(None) => {
+                            self.assignment = None;
                             self.runtime.error = None;
                             self.runtime.notice = Some(
-                                match self.queue_mode {
-                                    crate::app::QueueMode::Annotate => {
+                                match self.view {
+                                    AppView::Annotate => {
                                         "No annotation work is currently available."
                                     }
-                                    crate::app::QueueMode::Review => {
-                                        "No reviews are currently waiting."
-                                    }
-                                    crate::app::QueueMode::Adjudicate => {
+                                    AppView::Review => "No reviews are currently waiting.",
+                                    AppView::Adjudicate => {
                                         "No adjudications are currently waiting."
                                     }
+                                    _ => "No work is currently available.",
                                 }
                                 .to_string(),
                             );
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.assignment = assignment;
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
-                UiMessage::SaveFinished { image_id, result } => {
-                    if self
-                        .current
-                        .as_ref()
-                        .is_none_or(|current| current.image.image_id != image_id)
-                    {
+                UiMessage::SaveFinished {
+                    operation_id,
+                    assignment_id,
+                    completed,
+                    result,
+                } => {
+                    if !self.matches_operation(operation_id, &assignment_id) {
                         continue;
                     }
+                    self.active_operation_id = None;
                     self.loading.saving = false;
                     match result {
                         Ok(state) => {
@@ -154,29 +165,57 @@ impl LabelloApp {
                             self.save_status = SaveStatus::Saved;
                             self.runtime.error = None;
                             self.request_stats();
+                            if completed {
+                                self.clear_current_image();
+                                if let Some(transition) = self.pending_transition.take() {
+                                    self.execute_transition(transition);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.save_status = SaveStatus::Dirty;
+                            if completed {
+                                self.pending_transition = None;
+                            }
+                            self.runtime.error = Some(error);
+                        }
+                    }
+                }
+                UiMessage::ReleaseFinished {
+                    operation_id,
+                    assignment_id,
+                    result,
+                } => {
+                    if !self.matches_operation(operation_id, &assignment_id) {
+                        continue;
+                    }
+                    self.active_operation_id = None;
+                    self.loading.saving = false;
+                    match result {
+                        Ok(()) => {
+                            self.runtime.error = None;
+                            self.clear_current_image();
                             if let Some(transition) = self.pending_transition.take() {
                                 self.execute_transition(transition);
                             }
                         }
                         Err(error) => {
-                            self.save_status = SaveStatus::Dirty;
+                            self.pending_transition = None;
                             self.runtime.error = Some(error);
                         }
                     }
                 }
                 UiMessage::ReviewFinished {
-                    image_id,
+                    operation_id,
+                    assignment_id,
                     phase,
                     decision,
                     result,
                 } => {
-                    if self
-                        .current
-                        .as_ref()
-                        .is_none_or(|current| current.image.image_id != image_id)
-                    {
+                    if !self.matches_operation(operation_id, &assignment_id) {
                         continue;
                     }
+                    self.active_operation_id = None;
                     self.loading.saving = false;
                     match result {
                         Ok(()) => {
@@ -196,31 +235,40 @@ impl LabelloApp {
                                 }
                                 crate::app::ReviewPhase::FullImage => {
                                     self.request_stats();
+                                    self.clear_current_image();
                                     self.execute_transition(
-                                        crate::app::PendingTransition::NextImage,
+                                        crate::app::PendingTransition::NextAssignment,
                                     );
                                 }
                             }
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.pending_transition = None;
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
-                UiMessage::AdjudicationFinished { image_id, result } => {
-                    if self
-                        .current
-                        .as_ref()
-                        .is_none_or(|current| current.image.image_id != image_id)
-                    {
+                UiMessage::AdjudicationFinished {
+                    operation_id,
+                    assignment_id,
+                    result,
+                } => {
+                    if !self.matches_operation(operation_id, &assignment_id) {
                         continue;
                     }
+                    self.active_operation_id = None;
                     self.loading.saving = false;
                     match result {
                         Ok(()) => {
                             self.runtime.error = None;
                             self.request_stats();
-                            self.execute_transition(crate::app::PendingTransition::NextImage);
+                            self.clear_current_image();
+                            self.execute_transition(crate::app::PendingTransition::NextAssignment);
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.pending_transition = None;
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::IngestJobLoaded(result) => self.handle_ingest_job(result),
@@ -528,31 +576,37 @@ impl LabelloApp {
         self.keybindings
             .bindings
             .remove(&labello_domain::UserAction::ToggleOfflineMode);
-        if !self.can_use_queue_mode(self.queue_mode) {
-            self.queue_mode = [
-                crate::app::QueueMode::Annotate,
-                crate::app::QueueMode::Review,
-                crate::app::QueueMode::Adjudicate,
-            ]
-            .into_iter()
-            .find(|mode| self.can_use_queue_mode(*mode))
-            .unwrap_or(crate::app::QueueMode::Annotate);
+        let requested = self.datasets.requested_view.take().unwrap_or_else(|| {
+            [AppView::Annotate, AppView::Review, AppView::Adjudicate]
+                .into_iter()
+                .find(|view| self.can_open_view(*view))
+                .unwrap_or(AppView::Stats)
+        });
+        if !self.can_open_view(requested) {
+            self.runtime.error = Some(format!(
+                "The current user is not authorized for {}.",
+                view_label(requested)
+            ));
+            self.view = AppView::Setup;
+            return;
         }
-        self.view = if self.can_use_queue_mode(self.queue_mode) {
-            AppView::Annotate
-        } else {
-            AppView::Stats
-        };
         if self.ensure_valid_task_selection() {
             self.runtime.error = None;
         } else {
             self.runtime.error = Some(
-                "No enabled workflow is configured. Ask a data admin to enable at least one class workflow."
+                "No enabled one-class workflow is configured. Ask a data admin to enable one."
                     .to_string(),
             );
         }
-        if self.view == AppView::Annotate && self.selected_class_id().is_some() {
-            self.request_next_image();
+        if requested == AppView::Admin {
+            self.request_admin_dataset();
+        } else {
+            self.view = requested;
+            if self.work_view() && self.selected_task().is_some() {
+                self.request_next_image();
+            } else if self.view == AppView::Stats {
+                self.request_stats();
+            }
         }
     }
 
@@ -583,7 +637,7 @@ impl LabelloApp {
                     ));
                     self.runtime.error = None;
                     self.request_dataset_list();
-                    if self.view == AppView::Annotate && self.current.is_none() {
+                    if self.work_view() && self.current.is_none() {
                         self.request_next_image();
                     }
                 }
@@ -605,7 +659,7 @@ impl LabelloApp {
     }
 
     fn upsert_dataset_summary(&mut self, metadata: &labello_domain::DatasetMetadata) {
-        let roles = metadata
+        let metadata_roles = metadata
             .role_assignments
             .iter()
             .find(|assignment| assignment.user_id == self.config.user_id)
@@ -619,9 +673,6 @@ impl LabelloApp {
         match existing {
             Some(summary) => {
                 summary.name = metadata.name.clone();
-                if !roles.is_empty() {
-                    summary.roles = roles;
-                }
                 if !metadata.images.is_empty() {
                     summary.total_images = metadata.images.len();
                 }
@@ -632,7 +683,7 @@ impl LabelloApp {
                 .push(labello_client::DatasetSummary {
                     dataset_id: metadata.dataset_id.clone(),
                     name: metadata.name.clone(),
-                    roles,
+                    roles: metadata_roles,
                     total_images: metadata.images.len(),
                 }),
         }
@@ -654,6 +705,7 @@ impl LabelloApp {
 
     fn apply_loaded_image(&mut self, ctx: &egui::Context, loaded: LoadedImage) {
         let image_id = loaded.queued.image.image_id.clone();
+        self.assignment = Some(loaded.assignment);
         self.current = Some(loaded.queued);
         self.current_state = Some(loaded.state.clone());
         self.annotations = loaded.annotations;
@@ -690,7 +742,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn sync_review_selection(&mut self) {
-        if self.queue_mode != crate::app::QueueMode::Review {
+        if self.view != AppView::Review {
             return;
         }
         let selected = self
@@ -702,6 +754,18 @@ impl LabelloApp {
             .nth(self.review_index)
             .map(|annotation| annotation.annotation_id.clone());
         self.selected_annotation = selected;
+    }
+
+    fn matches_operation(
+        &self,
+        operation_id: u64,
+        assignment_id: &labello_domain::AssignmentId,
+    ) -> bool {
+        self.active_operation_id == Some(operation_id)
+            && self
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.assignment_id == *assignment_id)
     }
 
     pub(crate) fn spawn_message<F>(&self, future: F)
@@ -724,6 +788,17 @@ impl LabelloApp {
                 "live HTTP UI is available in the WASM build".to_string(),
             )));
         }
+    }
+}
+
+fn view_label(view: AppView) -> &'static str {
+    match view {
+        AppView::Setup => "setup",
+        AppView::Annotate => "annotation",
+        AppView::Review => "review",
+        AppView::Adjudicate => "adjudication",
+        AppView::Admin => "administration",
+        AppView::Stats => "statistics",
     }
 }
 

@@ -41,22 +41,6 @@ impl LabelloApp {
                     self.config.user_id = UserId::from(user_id);
                 }
             });
-            egui::ComboBox::from_label("Role header")
-                .selected_text(self.config.role.to_string())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.config.role, DatasetRole::Annotator, "annotator");
-                    ui.selectable_value(&mut self.config.role, DatasetRole::Reviewer, "reviewer");
-                    ui.selectable_value(
-                        &mut self.config.role,
-                        DatasetRole::Adjudicator,
-                        "adjudicator",
-                    );
-                    ui.selectable_value(
-                        &mut self.config.role,
-                        DatasetRole::DataAdmin,
-                        "data_admin",
-                    );
-                });
             if ui
                 .button("Apply and refresh datasets")
                 .on_hover_text(
@@ -102,28 +86,35 @@ impl LabelloApp {
             }
             let datasets = self.datasets.summaries.clone();
             for dataset in datasets {
-                ui.horizontal(|ui| {
+                theme::card_frame().show(ui, |ui| {
                     ui.label(RichText::new(&dataset.name).strong());
                     ui.small(format!("{} images", dataset.total_images));
-                    ui.small(format!("roles: {}", roles_text(&dataset.roles)));
-                    if ui
-                        .button("Open")
-                        .on_hover_text("Open this dataset for annotation/review work.")
-                        .clicked()
-                    {
-                        self.config.dataset_id = dataset.dataset_id.clone();
-                        self.request_load_dataset();
-                    }
-                    if dataset.roles.contains(&DatasetRole::DataAdmin)
-                        && ui
-                            .button("Admin")
-                            .on_hover_text("Open role-protected admin settings for this dataset.")
-                            .clicked()
-                    {
-                        self.config.dataset_id = dataset.dataset_id.clone();
-                        self.request_admin_dataset();
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        for role in &dataset.roles {
+                            role_badge(ui, role);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (role, view, label) in [
+                            (DatasetRole::Annotator, AppView::Annotate, "Annotate"),
+                            (DatasetRole::Reviewer, AppView::Review, "Review"),
+                            (DatasetRole::Adjudicator, AppView::Adjudicate, "Adjudicate"),
+                        ] {
+                            if dataset.roles.contains(&role) && ui.button(label).clicked() {
+                                self.open_dataset(dataset.dataset_id.clone(), view);
+                            }
+                        }
+                        if dataset.roles.contains(&DatasetRole::DataAdmin)
+                            && ui.button("Admin").clicked()
+                        {
+                            self.open_dataset(dataset.dataset_id.clone(), AppView::Admin);
+                        }
+                        if !dataset.roles.is_empty() && ui.button("Stats").clicked() {
+                            self.open_dataset(dataset.dataset_id.clone(), AppView::Stats);
+                        }
+                    });
                 });
+                ui.add_space(8.0);
             }
         });
 
@@ -156,67 +147,84 @@ impl LabelloApp {
             .selectable_label(self.view == AppView::Setup, "Setup")
             .clicked()
         {
-            self.request_transition(PendingTransition::View(AppView::Setup));
+            self.open_view(AppView::Setup);
         }
-        if ui
-            .selectable_label(self.view == AppView::Annotate, "Work")
-            .clicked()
-        {
-            self.open_work_view();
+        for (view, role, label) in [
+            (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
+            (AppView::Review, DatasetRole::Reviewer, "Review"),
+            (AppView::Adjudicate, DatasetRole::Adjudicator, "Adjudicate"),
+        ] {
+            if self.has_dataset_role(role)
+                && ui.selectable_label(self.view == view, label).clicked()
+            {
+                self.open_view(view);
+            }
         }
-        if ui
-            .selectable_label(self.view == AppView::Stats, "Stats")
-            .clicked()
+        if self.datasets.metadata.is_some()
+            && ui
+                .selectable_label(self.view == AppView::Stats, "Stats")
+                .clicked()
         {
-            self.request_transition(PendingTransition::View(AppView::Stats));
+            self.open_view(AppView::Stats);
         }
         if self.can_admin()
             && ui
-                .button("Admin")
-                .on_hover_text("Open admin settings. Requires DataAdmin role.")
+                .selectable_label(self.view == AppView::Admin, "Admin")
                 .clicked()
         {
-            self.request_transition(PendingTransition::Admin);
+            self.open_view(AppView::Admin);
         }
     }
 
-    pub(crate) fn open_work_view(&mut self) {
+    pub(crate) fn open_view(&mut self, view: AppView) {
+        if view == AppView::Setup {
+            self.request_transition(PendingTransition::View(view));
+            return;
+        }
         if self.datasets.metadata.is_none() {
-            self.view = AppView::Annotate;
+            self.datasets.requested_view = Some(view);
             self.request_load_dataset();
             return;
         }
-        if !self.ensure_valid_task_selection() {
+        if !self.can_open_view(view) {
+            self.runtime.error =
+                Some("The current user is not authorized for that view.".to_string());
+            return;
+        }
+        if matches!(
+            view,
+            AppView::Annotate | AppView::Review | AppView::Adjudicate
+        ) && !self.ensure_valid_task_selection()
+        {
             self.runtime.error = Some(
-                "No enabled workflow is configured. Ask a data admin to enable at least one class workflow."
+                "No enabled one-class workflow is configured. Ask a data admin to enable one."
                     .to_string(),
             );
             return;
         }
-        self.request_transition(PendingTransition::View(AppView::Annotate));
+        self.request_transition(PendingTransition::View(view));
+    }
+
+    pub(crate) fn open_dataset(&mut self, dataset_id: labello_domain::DatasetId, view: AppView) {
+        if self.loading.dataset {
+            return;
+        }
+        self.config.dataset_id = dataset_id;
+        self.datasets.requested_view = Some(view);
+        self.request_load_dataset();
     }
 
     pub(crate) fn can_admin(&self) -> bool {
-        self.datasets.summaries.iter().any(|dataset| {
-            dataset.dataset_id == self.config.dataset_id
-                && dataset.roles.contains(&DatasetRole::DataAdmin)
-        }) || self.datasets.metadata.as_ref().is_some_and(|metadata| {
-            metadata.role_assignments.iter().any(|assignment| {
-                assignment.user_id == self.config.user_id
-                    && assignment.roles.contains(&DatasetRole::DataAdmin)
-            })
-        })
+        self.has_dataset_role(DatasetRole::DataAdmin)
     }
 }
 
-fn roles_text(roles: &[DatasetRole]) -> String {
-    if roles.is_empty() {
-        "none".to_string()
-    } else {
-        roles
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+fn role_badge(ui: &mut egui::Ui, role: &DatasetRole) {
+    egui::Frame::new()
+        .fill(theme::BLUE.gamma_multiply(0.16))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(7, 3))
+        .show(ui, |ui| {
+            ui.label(RichText::new(role.to_string()).color(theme::BLUE));
+        });
 }

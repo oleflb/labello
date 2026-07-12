@@ -5,9 +5,8 @@ use std::{
 };
 
 use labello_domain::{
-    Actor, Assignment, AssignmentKind, AssignmentStatus, DatasetConfig, DatasetMetadata,
-    EventLogEntry, EventPayload, ImageId, ImageRecord, ImageState, ImagesIndex, ReviewTarget,
-    SCHEMA_VERSION, TaskStatus, labello_schema_bundle, now, rebuild_state,
+    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageRecord,
+    ImageState, ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -249,36 +248,38 @@ impl DatasetRepository {
     ) -> StorageResult<EventLogEntry> {
         let lock = self.image_lock(image_id);
         let _guard = lock.lock().await;
-        let state = self.load_image_state(image_id).await?;
-        let event = EventLogEntry::new(
-            state.current_sequence + 1,
-            image_id.clone(),
-            actor.user_id.clone(),
-            actor.role.clone(),
-            now(),
-            payload,
-        );
-        let mut next_state = state.clone();
-        next_state.apply_event(&event)?;
-        let completion = completed_assignment(&state, actor, &event.payload).map(|assignment| {
-            EventLogEntry::new(
-                event.event_sequence + 1,
+        self.append_payloads_unlocked(image_id, actor, vec![payload])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StorageError::Unauthorized("no payload was appended".to_string()))
+    }
+
+    pub(crate) async fn append_payloads_unlocked(
+        &self,
+        image_id: &ImageId,
+        actor: &Actor,
+        payloads: Vec<EventPayload>,
+    ) -> StorageResult<Vec<EventLogEntry>> {
+        let mut next_state = self.load_image_state(image_id).await?;
+        let mut events = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let event = EventLogEntry::new(
+                next_state.current_sequence + 1,
                 image_id.clone(),
                 actor.user_id.clone(),
                 actor.role.clone(),
                 now(),
-                EventPayload::AssignmentUpdated { assignment },
-            )
-        });
-        if let Some(completion) = &completion {
-            next_state.apply_event(completion)?;
+                payload,
+            );
+            next_state.apply_event(&event)?;
+            events.push(event);
         }
-        self.append_event_line(&event).await?;
-        if let Some(completion) = &completion {
-            self.append_event_line(completion).await?;
+        for event in &events {
+            self.append_event_line(event).await?;
         }
         write_json_atomic(&self.state_path(image_id), &next_state).await?;
-        Ok(event)
+        Ok(events)
     }
 
     pub(crate) async fn append_resequenced_events(
@@ -294,26 +295,7 @@ impl DatasetRepository {
             event.event_sequence = next_state.current_sequence + 1;
             event.image_id = image_id.clone();
             next_state.apply_event(&event)?;
-            let actor = Actor {
-                user_id: event.actor_user_id.clone(),
-                role: event.actor_role.clone(),
-            };
-            let completion =
-                completed_assignment(&next_state, &actor, &event.payload).map(|assignment| {
-                    EventLogEntry::new(
-                        next_state.current_sequence + 1,
-                        image_id.clone(),
-                        actor.user_id,
-                        actor.role,
-                        now(),
-                        EventPayload::AssignmentUpdated { assignment },
-                    )
-                });
             resequenced.push(event);
-            if let Some(completion) = completion {
-                next_state.apply_event(&completion)?;
-                resequenced.push(completion);
-            }
         }
         for event in &resequenced {
             self.append_event_line(event).await?;
@@ -348,47 +330,6 @@ impl DatasetRepository {
         file.flush().await.with_path(&path)?;
         Ok(())
     }
-}
-
-fn completed_assignment(
-    state: &ImageState,
-    actor: &Actor,
-    payload: &EventPayload,
-) -> Option<Assignment> {
-    let (kind, task_id) = match payload {
-        EventPayload::TaskStateChanged { task_state }
-            if task_state.status == TaskStatus::Submitted =>
-        {
-            (AssignmentKind::Annotation, Some(&task_state.task_id))
-        }
-        EventPayload::ReviewRecorded { review } => {
-            let task_id = match &review.target {
-                ReviewTarget::Task { task_id } => Some(task_id),
-                // Object decisions are followed by a full-image task decision. Keep the
-                // assignment active until that final completeness check is recorded.
-                ReviewTarget::AnnotationVersion { .. } => return None,
-                ReviewTarget::Image { .. } => None,
-            };
-            (AssignmentKind::Review, task_id)
-        }
-        EventPayload::AdjudicationRecorded { adjudication } => {
-            (AssignmentKind::Adjudication, Some(&adjudication.task_id))
-        }
-        _ => return None,
-    };
-    let mut assignment = state
-        .assignments
-        .iter()
-        .find(|assignment| {
-            assignment.kind == kind
-                && assignment.status == AssignmentStatus::Active
-                && assignment.assigned_to == actor.user_id
-                && task_id.is_none_or(|task_id| &assignment.task_id == task_id)
-        })?
-        .clone();
-    assignment.status = AssignmentStatus::Completed;
-    assignment.updated_at = now();
-    Some(assignment)
 }
 
 fn extract_image_count_hint(text: &str) -> Option<usize> {

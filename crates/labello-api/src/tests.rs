@@ -246,6 +246,7 @@ async fn protects_admin_dataset_config() {
     value["name"] = json!("Updated Dataset");
     value["imageRoots"] = json!(["images", "imports/batch-1"]);
     let update = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("PUT")
@@ -270,6 +271,34 @@ async fn protects_admin_dataset_config() {
         .await
         .unwrap();
     assert_eq!(update.status(), StatusCode::OK);
+
+    let mut duplicate_roles = value["roleAssignments"].as_array().unwrap().clone();
+    duplicate_roles.push(duplicate_roles[0].clone());
+    let duplicate = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/datasets/ds/admin")
+                .header("x-user-id", "admin")
+                .header("x-user-role", "data_admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": value["name"],
+                        "imageRoots": value["imageRoots"],
+                        "labelClasses": value["labelClasses"],
+                        "tasks": value["tasks"],
+                        "roleAssignments": duplicate_roles,
+                        "imbalance": value["imbalance"],
+                        "prelabelConfigs": value["prelabelConfigs"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -336,7 +365,7 @@ async fn review_and_adjudication_actor_ids_must_match_caller() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/datasets/ds/images/img_1/reviews")
+                .uri("/datasets/ds/images/img_1/reviews?assignmentId=asg_1&imageId=img_1&taskId=task_1&kind=review")
                 .header("x-user-id", "admin")
                 .header("x-user-role", "reviewer")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -371,7 +400,7 @@ async fn review_and_adjudication_actor_ids_must_match_caller() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/datasets/ds/images/img_1/adjudications")
+                .uri("/datasets/ds/images/img_1/adjudications?assignmentId=asg_1&imageId=img_1&taskId=task_1&kind=adjudication")
                 .header("x-user-id", "admin")
                 .header("x-user-role", "adjudicator")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -767,18 +796,16 @@ async fn validates_review_targets_and_counts_distinct_task_approvals() {
         "submitted"
     );
 
-    for review_id in ["review_first", "review_duplicate"] {
-        let approval = post_test_review(
-            &app,
-            &image_id,
-            "admin",
-            review_id,
-            json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
-            "approved",
-        )
-        .await;
-        assert_eq!(approval.status(), StatusCode::OK);
-    }
+    let approval = post_test_review(
+        &app,
+        &image_id,
+        "admin",
+        "review_first",
+        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
+        "approved",
+    )
+    .await;
+    assert_eq!(approval.status(), StatusCode::OK);
     assert_eq!(
         load_test_image_state(&app, &image_id).await["taskStates"]["bounding_box:pixel"]["status"],
         "submitted"
@@ -800,16 +827,8 @@ async fn validates_review_targets_and_counts_distinct_task_approvals() {
     );
 
     configure_pixel_task_review(&app, 2, "none").await;
-    let disabled = post_test_review(
-        &app,
-        &image_id,
-        "admin",
-        "review_disabled",
-        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
-        "approved",
-    )
-    .await;
-    assert_eq!(disabled.status(), StatusCode::BAD_REQUEST);
+    let disabled = claim_assignment(&app, "admin", "review").await;
+    assert!(disabled.is_null());
 }
 
 #[tokio::test]
@@ -897,6 +916,113 @@ async fn assign_next_uses_camel_case_query() {
         .await
         .unwrap();
     assert_eq!(stale_snake_case.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn assignment_lifecycle_is_exact_owned_and_resumable() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "first.png", &png_bytes(2, 2)).await;
+    upload_test_image(&app, "second.png", &png_bytes(3, 2)).await;
+
+    let first = claim_assignment(&app, "admin", "annotation").await;
+    let retry = claim_assignment(&app, "admin", "annotation").await;
+    assert_eq!(retry["assignmentId"], first["assignmentId"]);
+
+    let timestamp = labello_domain::now().to_rfc3339();
+    let query = format!(
+        "assignmentId={}&imageId={}&taskId={}&kind=annotation",
+        first["assignmentId"].as_str().unwrap(),
+        first["imageId"].as_str().unwrap(),
+        urlencoding::encode(first["taskId"].as_str().unwrap())
+    );
+    let wrong_user = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{}/events?{query}",
+                    first["imageId"].as_str().unwrap()
+                ))
+                .header("x-user-id", "other_annotator")
+                .header("x-user-role", "annotator")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "payload": {
+                            "kind": "annotation_version_created",
+                            "annotation": {
+                                "annotationId": "ann_wrong_user",
+                                "version": 1,
+                                "taskId": "bounding_box:pixel",
+                                "classId": "pixel",
+                                "type": "bounding_box",
+                                "source": { "source": "human" },
+                                "geometry": {
+                                    "type": "bounding_box",
+                                    "geometry": { "x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5 }
+                                },
+                                "authorUserId": "other_annotator",
+                                "createdAt": timestamp,
+                                "updatedAt": timestamp,
+                                "deleted": false
+                            },
+                            "previous_version": null,
+                            "reason": null
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_user.status(), StatusCode::UNAUTHORIZED);
+
+    let completed = post_assignment_action(&app, "admin", "complete", &first).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    let first_state =
+        load_test_image_state(&app, &ImageId::from(first["imageId"].as_str().unwrap())).await;
+    assert_eq!(
+        first_state["taskStates"]["bounding_box:pixel"]["status"],
+        "submitted"
+    );
+
+    let review = claim_assignment(&app, "admin", "review").await;
+    let bypass_review = post_assignment_action(&app, "admin", "complete", &review).await;
+    assert_eq!(bypass_review.status(), StatusCode::BAD_REQUEST);
+    let released_review = post_assignment_action(&app, "admin", "release", &review).await;
+    assert_eq!(released_review.status(), StatusCode::OK);
+
+    let next = claim_assignment(&app, "admin", "annotation").await;
+    assert_ne!(next["imageId"], first["imageId"]);
+    assert_ne!(next["assignmentId"], first["assignmentId"]);
+    let released = post_assignment_action(&app, "admin", "release", &next).await;
+    assert_eq!(released.status(), StatusCode::OK);
+    let reclaimed = claim_assignment(&app, "admin", "annotation").await;
+    assert_eq!(reclaimed["imageId"], next["imageId"]);
+    assert_ne!(reclaimed["assignmentId"], next["assignmentId"]);
+}
+
+#[tokio::test]
+async fn concurrent_api_claims_do_not_share_annotation_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "only.png", &png_bytes(2, 2)).await;
+
+    let (first, second) = tokio::join!(
+        claim_assignment(&app, "admin", "annotation"),
+        claim_assignment(&app, "other_annotator", "annotation")
+    );
+    assert_eq!(
+        usize::from(!first.is_null()) + usize::from(!second.is_null()),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1053,6 +1179,23 @@ async fn configure_pixel_task_review(app: &axum::Router, required_reviews: u32, 
                 "assignedBy": "admin"
             }));
     }
+    if !metadata["roleAssignments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|assignment| assignment["userId"] == "other_annotator")
+    {
+        metadata["roleAssignments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "datasetId": "ds",
+                "userId": "other_annotator",
+                "roles": ["annotator"],
+                "assignedAt": labello_domain::now().to_rfc3339(),
+                "assignedBy": "admin"
+            }));
+    }
 
     let update = app
         .clone()
@@ -1109,9 +1252,9 @@ async fn append_test_event(app: &axum::Router, image_id: &ImageId, payload: serd
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/datasets/ds/images/{image_id}/events"))
+                .uri(format!("/datasets/ds/images/{image_id}/admin/events"))
                 .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-user-role", "data_admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(json!({ "payload": payload }).to_string()))
                 .unwrap(),
@@ -1124,23 +1267,31 @@ async fn append_test_event(app: &axum::Router, image_id: &ImageId, payload: serd
 }
 
 async fn submit_test_task(app: &axum::Router, image_id: &ImageId) {
-    let timestamp = labello_domain::now().to_rfc3339();
-    append_test_event(
-        app,
-        image_id,
-        json!({
-            "kind": "task_state_changed",
-            "task_state": {
-                "taskId": "bounding_box:pixel",
-                "status": "submitted",
-                "assignedTo": "admin",
-                "completedBy": "admin",
-                "completedAt": timestamp,
-                "updatedAt": timestamp
-            }
-        }),
-    )
-    .await;
+    let assignment = claim_assignment(app, "admin", "annotation").await;
+    assert_eq!(assignment["imageId"], image_id.as_str());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/datasets/ds/assignments/complete")
+                .header("x-user-id", "admin")
+                .header("x-user-role", "annotator")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "assignmentId": assignment["assignmentId"],
+                        "imageId": assignment["imageId"],
+                        "taskId": assignment["taskId"],
+                        "kind": "annotation"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn post_test_review(
@@ -1151,11 +1302,19 @@ async fn post_test_review(
     target: serde_json::Value,
     decision: &str,
 ) -> axum::response::Response {
+    let assignment = claim_assignment(app, reviewer, "review").await;
+    assert!(!assignment.is_null(), "expected a review assignment");
+    let query = format!(
+        "assignmentId={}&imageId={}&taskId={}&kind=review",
+        assignment["assignmentId"].as_str().unwrap(),
+        assignment["imageId"].as_str().unwrap(),
+        urlencoding::encode(assignment["taskId"].as_str().unwrap())
+    );
     app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/datasets/ds/images/{image_id}/reviews"))
+                .uri(format!("/datasets/ds/images/{image_id}/reviews?{query}"))
                 .header("x-user-id", reviewer)
                 .header("x-user-role", "reviewer")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -1167,6 +1326,62 @@ async fn post_test_review(
                         "decision": decision,
                         "timestamp": labello_domain::now().to_rfc3339(),
                         "comment": null
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn claim_assignment(app: &axum::Router, user_id: &str, kind: &str) -> serde_json::Value {
+    let role = match kind {
+        "annotation" => "annotator",
+        "review" => "reviewer",
+        "adjudication" => "adjudicator",
+        _ => unreachable!(),
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind={kind}"
+                ))
+                .header("x-user-id", user_id)
+                .header("x-user-role", role)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn post_assignment_action(
+    app: &axum::Router,
+    user_id: &str,
+    action: &str,
+    assignment: &serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/datasets/ds/assignments/{action}"))
+                .header("x-user-id", user_id)
+                .header("x-user-role", "annotator")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "assignmentId": assignment["assignmentId"],
+                        "imageId": assignment["imageId"],
+                        "taskId": assignment["taskId"],
+                        "kind": assignment["kind"]
                     })
                     .to_string(),
                 ))

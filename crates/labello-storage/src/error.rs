@@ -48,6 +48,12 @@ pub enum StorageError {
 
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("invalid assignment: {0}")]
+    InvalidAssignment(String),
+
+    #[error("assignment conflict: {0}")]
+    AssignmentConflict(String),
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;

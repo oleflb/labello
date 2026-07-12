@@ -60,6 +60,14 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::assign_next),
         )
         .route(
+            "/datasets/{dataset_id}/assignments/release",
+            post(workflow::release_assignment),
+        )
+        .route(
+            "/datasets/{dataset_id}/assignments/complete",
+            post(workflow::complete_assignment),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}",
             get(workflow::get_image_state),
         )
@@ -78,6 +86,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/datasets/{dataset_id}/images/{image_id}/events",
             post(workflow::append_event),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/admin/events",
+            post(workflow::append_admin_repair_event),
         )
         .route(
             "/datasets/{dataset_id}/images/{image_id}/rebuild",
@@ -482,6 +494,19 @@ async fn add_task(
     let repo = state.repo(&dataset_id)?;
     let mut metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    validate_enabled_task(&task)?;
+    for class_id in &task.class_ids {
+        if !metadata
+            .label_classes
+            .iter()
+            .any(|class| &class.class_id == class_id)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "task {} references unknown class {class_id}",
+                task.task_id
+            )));
+        }
+    }
     metadata
         .tasks
         .retain(|existing| existing.task_id != task.task_id);
@@ -684,6 +709,7 @@ fn validate_config_update(
         return Err(ApiError::BadRequest("duplicate task ids".to_string()));
     }
     for task in &request.tasks {
+        validate_enabled_task(task)?;
         for class_id in &task.class_ids {
             if !class_ids.contains(class_id) {
                 return Err(ApiError::BadRequest(format!(
@@ -691,6 +717,28 @@ fn validate_config_update(
                     task.task_id
                 )));
             }
+        }
+    }
+    let mut role_users = BTreeSet::new();
+    for assignment in &request.role_assignments {
+        assignment.user_id.validate_path_segment()?;
+        if assignment.dataset_id != metadata.dataset_id {
+            return Err(ApiError::BadRequest(format!(
+                "role assignment for {} belongs to a different dataset",
+                assignment.user_id
+            )));
+        }
+        if assignment.roles.is_empty() {
+            return Err(ApiError::BadRequest(format!(
+                "role assignment for {} must contain at least one role",
+                assignment.user_id
+            )));
+        }
+        if !role_users.insert(&assignment.user_id) {
+            return Err(ApiError::BadRequest(format!(
+                "duplicate role assignment for user {}",
+                assignment.user_id
+            )));
         }
     }
     let has_admin = request.role_assignments.iter().any(|assignment| {
@@ -715,6 +763,16 @@ fn validate_config_update(
     Ok(())
 }
 
+fn validate_enabled_task(task: &TaskDefinition) -> ApiResult<()> {
+    if task.enabled && task.class_ids.len() != 1 {
+        return Err(ApiError::BadRequest(format!(
+            "enabled task {} must have exactly one class",
+            task.task_id
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_roots(roots: Vec<String>) -> Vec<String> {
     let mut normalized: Vec<_> = roots
         .into_iter()
@@ -732,6 +790,33 @@ fn normalize_roots(roots: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod report_tests {
     use super::*;
+
+    #[test]
+    fn enabled_tasks_require_exactly_one_class() {
+        let mut task = TaskDefinition {
+            task_id: labello_domain::TaskId::from("task"),
+            name: "Task".to_string(),
+            annotation_type: labello_domain::AnnotationType::BoundingBox,
+            class_ids: Vec::new(),
+            instructions: labello_domain::TutorialContent {
+                title: "Instructions".to_string(),
+                example_text: "Label it".to_string(),
+                example_images: Vec::new(),
+            },
+            skeleton: None,
+            review: labello_domain::ReviewConfig::default(),
+            prelabel_config_ids: Vec::new(),
+            enabled: true,
+        };
+        assert!(validate_enabled_task(&task).is_err());
+        task.class_ids = vec![
+            labello_domain::ClassId::from("one"),
+            labello_domain::ClassId::from("two"),
+        ];
+        assert!(validate_enabled_task(&task).is_err());
+        task.class_ids.truncate(1);
+        assert!(validate_enabled_task(&task).is_ok());
+    }
 
     #[test]
     fn caps_ingest_report_details() {

@@ -1,7 +1,7 @@
 use labello_domain::{
-    AnnotationVersion, AssignmentKind, ClassId, DatasetId, DatasetRole, DatasetRoleAssignment,
-    EventPayload, ImageId, ImageRecord, ImbalanceConfig, LabelClass, OfflineSyncRequest,
-    PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, UserId,
+    AnnotationVersion, AssignmentId, AssignmentKind, ClassId, DatasetId, DatasetRole,
+    DatasetRoleAssignment, EventPayload, ImageId, ImageRecord, ImbalanceConfig, LabelClass,
+    OfflineSyncRequest, PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +60,15 @@ impl UpdateDatasetConfigRequest {
 pub struct AssignNextRequest {
     pub task_id: TaskId,
     pub kind: Option<AssignmentKind>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentActionRequest {
+    pub assignment_id: AssignmentId,
+    pub image_id: ImageId,
+    pub task_id: TaskId,
+    pub kind: AssignmentKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

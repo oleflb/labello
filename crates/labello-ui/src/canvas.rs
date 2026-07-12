@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 
 use egui::{
-    Button, Color32, CornerRadius, PointerButton, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
-    Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Button, Color32, CornerRadius, Key, Label, PointerButton, Pos2, Rect, Response, Sense, Stroke,
+    StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AnnotationVersion, BoundingBox, NormalizedPoint,
@@ -11,9 +11,15 @@ use labello_domain::{
 
 const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 12.0;
+const ZOOM_STEP: f32 = 1.25;
 const MIN_BOX_SIZE: f32 = 0.001;
 const HANDLE_HIT_RADIUS: f32 = 12.0;
 const HANDLE_SIZE: f32 = 8.0;
+const CONTROL_BAR_HEIGHT: f32 = 52.0;
+const CONTROL_HEIGHT: f32 = 30.0;
+const CONTROL_GAP: f32 = 4.0;
+const DOUBLE_CLICK_DELAY: f64 = 0.3;
+const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 
 /// The result of moving or resizing an existing bounding-box annotation.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +47,8 @@ pub struct CanvasState {
     draft_box: Option<BoundingBox>,
     zoom: f32,
     pan: Vec2,
+    space_pan: bool,
+    last_canvas_click: Option<(f64, Pos2)>,
 }
 
 impl Default for CanvasState {
@@ -50,20 +58,49 @@ impl Default for CanvasState {
             draft_box: None,
             zoom: MIN_ZOOM,
             pan: Vec2::ZERO,
+            space_pan: false,
+            last_canvas_click: None,
         }
     }
 }
 
 impl CanvasState {
-    /// Return the current zoom factor relative to a fitted image.
-    pub fn zoom(&self) -> f32 {
+    /// Return the current zoom factor relative to the aspect-fitted image.
+    pub fn current_zoom(&self) -> f32 {
         self.zoom
+    }
+
+    /// Zoom in one step around the center of the viewport.
+    pub fn zoom_in(&mut self) {
+        let old_zoom = self.zoom;
+        self.zoom = (old_zoom * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan *= self.zoom / old_zoom;
+    }
+
+    /// Zoom out one step around the center of the viewport.
+    pub fn zoom_out(&mut self) {
+        let old_zoom = self.zoom;
+        self.zoom = (old_zoom / ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan *= self.zoom / old_zoom;
+        if self.zoom == MIN_ZOOM {
+            self.pan = Vec2::ZERO;
+        }
     }
 
     /// Fit the image to the canvas and center it.
     pub fn fit_view(&mut self) {
         self.zoom = MIN_ZOOM;
         self.pan = Vec2::ZERO;
+    }
+
+    /// Backward-compatible alias for [`Self::current_zoom`].
+    pub fn zoom(&self) -> f32 {
+        self.current_zoom()
+    }
+
+    fn clamp_to_viewport(&mut self, viewport: Rect, fitted_image: Rect) {
+        self.zoom = finite_or(self.zoom, MIN_ZOOM).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan = clamp_pan(viewport, fitted_image, self.zoom, self.pan);
     }
 }
 
@@ -130,11 +167,17 @@ pub fn show_canvas(
 
 /// Show a canvas with selection, box editing, and read-only support.
 ///
-/// Mouse users can pan with the middle button and zoom over the pointer with
-/// ctrl-scroll. Touch users can pan and pinch with two fingers. The `Fit`
-/// button and a double-click on empty canvas reset the viewport. A single
-/// pointer or stylus moves a selected box, resizes it from any of its eight
-/// handles, or creates a box when the bounding-box tool is active.
+/// Integration is unchanged: place this call in the center UI after surrounding
+/// panels and pass the source image dimensions in `image_size`. The canvas
+/// consumes all remaining UI space, derives the fitted image rectangle itself,
+/// and retains viewport state in `state`; no separate available-size or viewport
+/// argument is required.
+///
+/// A plain wheel or pinch zooms around the pointer. Middle-button drag,
+/// space+primary drag, and a two-finger translation pan. The visible controls
+/// and a double-click reset or adjust the view. A single pointer or stylus keeps
+/// its annotation behavior: it moves or resizes a selected box, creates a box
+/// with the bounding-box tool, or places a skeleton keypoint.
 #[allow(clippy::too_many_arguments)]
 pub fn show_canvas_interactive(
     ui: &mut Ui,
@@ -148,23 +191,31 @@ pub fn show_canvas_interactive(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
-    // Never allocate beyond the viewport. Compact tablet layouts place controls
-    // in drawers, leaving the canvas whatever space remains.
     let available = ui.available_size().max(vec2(1.0, 1.0));
-    let image_ratio = image_size[0].max(1) as f32 / image_size[1].max(1) as f32;
-    let mut canvas_size = available;
-    if canvas_size.x / canvas_size.y > image_ratio {
-        canvas_size.x = canvas_size.y * image_ratio;
-    } else {
-        canvas_size.y = canvas_size.x / image_ratio;
-    }
-
-    let (viewport, response) = ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
+    let (viewport, _) = ui.allocate_exact_size(available, Sense::hover());
+    let controls = control_bar_rect(viewport);
+    let interaction_rect = Rect::from_min_max(
+        pos2(viewport.left(), controls.bottom()),
+        viewport.right_bottom(),
+    );
+    let fitted_image = fitted_image_rect(interaction_rect, image_size);
+    state.clamp_to_viewport(interaction_rect, fitted_image);
+    let response = ui.interact(
+        interaction_rect,
+        ui.id().with("annotation_canvas"),
+        Sense::click_and_drag(),
+    );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Annotation canvas"));
 
-    let fit_rect = Rect::from_min_size(viewport.min + vec2(10.0, 10.0), vec2(42.0, 28.0));
-    handle_view_gestures(ui, &response, viewport, fit_rect, state);
-    let image_rect = transformed_image_rect(viewport, state.zoom, state.pan);
+    let view_consumed = handle_view_gestures(
+        ui,
+        &response,
+        interaction_rect,
+        fitted_image,
+        interaction_rect,
+        state,
+    );
+    let image_rect = transformed_image_rect(fitted_image, state.zoom, state.pan);
 
     let preview = if editable {
         state.draft_box.and_then(|bbox| match &state.drag {
@@ -194,27 +245,21 @@ pub fn show_canvas_interactive(
         prelabels,
     );
 
-    // Paint controls last so zoomed image content cannot obscure them.
-    let fit_clicked = ui
-        .put(fit_rect, Button::new("Fit").corner_radius(6))
-        .on_hover_text("Fit image to canvas (double-click also resets the view)")
-        .clicked();
-    if fit_clicked {
-        state.fit_view();
-        return None;
-    }
-    handle_annotation_pointer(
+    let action = handle_annotation_pointer(
         ui,
         response,
-        viewport,
-        fit_rect,
+        interaction_rect,
         image_rect,
         state,
         annotations,
         bounding_box_tool,
         selected_annotation,
         editable,
-    )
+        view_consumed,
+    );
+    show_view_controls(ui, controls, state);
+    state.clamp_to_viewport(interaction_rect, fitted_image);
+    action
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -430,70 +475,199 @@ fn paint_dashed_segment(painter: &egui::Painter, start: Pos2, end: Pos2, color: 
     }
 }
 
+fn control_bar_rect(viewport: Rect) -> Rect {
+    Rect::from_min_max(
+        viewport.min,
+        pos2(
+            viewport.right(),
+            (viewport.top() + CONTROL_BAR_HEIGHT).min(viewport.bottom()),
+        ),
+    )
+}
+
+fn show_view_controls(ui: &mut Ui, bar: Rect, state: &mut CanvasState) {
+    ui.painter().rect_filled(
+        bar,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(11, 16, 25, 224),
+    );
+
+    let widths = [30.0, 58.0, 30.0, 44.0];
+    let total_width = widths.iter().sum::<f32>() + CONTROL_GAP * 3.0;
+    let mut left = (bar.center().x - total_width * 0.5).max(bar.left() + 4.0);
+    let top = bar.center().y - CONTROL_HEIGHT * 0.5;
+    let next_rect = |left: &mut f32, width: f32| {
+        let rect = Rect::from_min_size(pos2(*left, top), vec2(width, CONTROL_HEIGHT));
+        *left += width + CONTROL_GAP;
+        rect
+    };
+
+    let zoom_out = ui.put(
+        next_rect(&mut left, widths[0]),
+        Button::new("-").corner_radius(6),
+    );
+    zoom_out.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Zoom out"));
+    if zoom_out.on_hover_text("Zoom out").clicked() {
+        state.zoom_out();
+    }
+
+    let percentage_rect = next_rect(&mut left, widths[1]);
+
+    let zoom_in = ui.put(
+        next_rect(&mut left, widths[2]),
+        Button::new("+").corner_radius(6),
+    );
+    zoom_in.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Zoom in"));
+    if zoom_in.on_hover_text("Zoom in").clicked() {
+        state.zoom_in();
+    }
+
+    let fit = ui.put(
+        next_rect(&mut left, widths[3]),
+        Button::new("Fit").corner_radius(6),
+    );
+    fit.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Fit"));
+    if fit
+        .on_hover_text("Fit and center the image (double-click also fits)")
+        .clicked()
+    {
+        state.fit_view();
+    }
+
+    let percentage = format!("{:.0}%", state.current_zoom() * 100.0);
+    let zoom_label = ui.put(
+        percentage_rect,
+        Label::new(&percentage).sense(Sense::hover()),
+    );
+    zoom_label.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Label, true, format!("Zoom: {percentage}"))
+    });
+}
+
 fn handle_view_gestures(
     ui: &Ui,
     response: &Response,
     viewport: Rect,
-    fit_rect: Rect,
+    fitted_image: Rect,
+    interaction_rect: Rect,
     state: &mut CanvasState,
-) {
+) -> bool {
     let pointer = response.hover_pos();
     let multi_touch = ui.input(|input| input.multi_touch());
-    if let Some(touch) = multi_touch.filter(|touch| viewport.contains(touch.center_pos)) {
+    if let Some(touch) = multi_touch.filter(|touch| interaction_rect.contains(touch.center_pos)) {
         set_zoom_around(
             state,
             viewport,
+            fitted_image,
             touch.center_pos,
             state.zoom * touch.zoom_delta,
         );
         state.pan += touch.translation_delta;
-        state.pan = clamp_pan(viewport, state.zoom, state.pan);
-        // A second finger always means viewport manipulation, never annotation editing.
+        state.clamp_to_viewport(viewport, fitted_image);
         state.drag = None;
         state.draft_box = None;
-        return;
+        state.space_pan = false;
+        return true;
+    }
+
+    let (space_down, primary_down, primary_pressed, primary_released, pointer_delta) =
+        ui.input(|input| {
+            (
+                input.key_down(Key::Space),
+                input.pointer.primary_down(),
+                input.pointer.primary_pressed(),
+                input.pointer.primary_released(),
+                input.pointer.delta(),
+            )
+        });
+    if space_down && primary_pressed && response.is_pointer_button_down_on() {
+        state.space_pan = true;
+    }
+    if state.space_pan {
+        if primary_down {
+            state.pan += pointer_delta;
+            state.clamp_to_viewport(viewport, fitted_image);
+        }
+        state.drag = None;
+        state.draft_box = None;
+        if primary_released {
+            state.space_pan = false;
+        }
+        return true;
     }
 
     if response.dragged_by(PointerButton::Middle) {
         state.pan += response.drag_delta();
-        state.pan = clamp_pan(viewport, state.zoom, state.pan);
+        state.clamp_to_viewport(viewport, fitted_image);
+        state.drag = None;
+        state.draft_box = None;
+        return true;
     }
 
-    if let Some(pointer) = pointer.filter(|pointer| !fit_rect.contains(*pointer)) {
-        let zoom_delta = ui.input(|input| input.zoom_delta());
+    if let Some(pointer) = pointer {
+        let (zoom_delta, wheel_delta) =
+            ui.input(|input| (input.zoom_delta(), input.smooth_scroll_delta()));
         if (zoom_delta - 1.0).abs() > f32::EPSILON {
-            set_zoom_around(state, viewport, pointer, state.zoom * zoom_delta);
-        } else {
-            let pan_delta = ui.input(|input| input.smooth_scroll_delta());
-            if pan_delta != Vec2::ZERO && state.zoom > MIN_ZOOM {
-                state.pan += pan_delta;
-                state.pan = clamp_pan(viewport, state.zoom, state.pan);
-            }
+            set_zoom_around(
+                state,
+                viewport,
+                fitted_image,
+                pointer,
+                state.zoom * zoom_delta,
+            );
+            return true;
+        }
+        if wheel_delta != Vec2::ZERO {
+            set_zoom_around(
+                state,
+                viewport,
+                fitted_image,
+                pointer,
+                state.zoom * wheel_zoom_factor(wheel_delta),
+            );
+            return true;
         }
     }
 
-    if response.double_clicked() && pointer.is_some_and(|pointer| !fit_rect.contains(pointer)) {
+    let repeated_click = if response.clicked() {
+        let now = ui.input(|input| input.time);
+        let position = response.interact_pointer_pos();
+        let repeated = position.is_some_and(|position| {
+            state
+                .last_canvas_click
+                .is_some_and(|(last_time, last_position)| {
+                    now - last_time <= DOUBLE_CLICK_DELAY
+                        && position.distance(last_position) <= DOUBLE_CLICK_DISTANCE
+                })
+        });
+        state.last_canvas_click = position.map(|position| (now, position));
+        repeated
+    } else {
+        false
+    };
+    if response.double_clicked() || repeated_click {
         state.fit_view();
         state.drag = None;
         state.draft_box = None;
+        return true;
     }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_annotation_pointer(
     ui: &Ui,
     response: Response,
-    viewport: Rect,
-    fit_rect: Rect,
+    interaction_rect: Rect,
     image_rect: Rect,
     state: &mut CanvasState,
     annotations: &[AnnotationVersion],
     bounding_box_tool: bool,
     selected_annotation: Option<&AnnotationId>,
     editable: bool,
+    view_consumed: bool,
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
-    if ui.input(|input| input.multi_touch().is_some()) || response.dragged_by(PointerButton::Middle)
-    {
+    if view_consumed || ui.input(|input| input.multi_touch().is_some()) {
         return None;
     }
 
@@ -503,8 +677,7 @@ fn handle_annotation_pointer(
         && primary_pressed
         && state.drag.is_none()
         && let Some(pointer) = pointer
-        && viewport.contains(pointer)
-        && !fit_rect.contains(pointer)
+        && interaction_rect.contains(pointer)
     {
         let normalized_pointer = screen_to_normalized(image_rect, pointer);
         let selected_box = selected_annotation.and_then(|id| annotation_bbox(id, annotations));
@@ -529,6 +702,7 @@ fn handle_annotation_pointer(
 
         if state.drag.is_none()
             && bounding_box_tool
+            && image_rect.contains(pointer)
             && annotation_at(pointer, image_rect, annotations).is_none()
         {
             state.drag = Some(DragOperation::Create {
@@ -579,7 +753,7 @@ fn handle_annotation_pointer(
 
     if response.clicked()
         && let Some(pointer) = pointer
-        && !fit_rect.contains(pointer)
+        && interaction_rect.contains(pointer)
     {
         if let Some(annotation) = annotation_at(pointer, image_rect, annotations) {
             return Some(CanvasAction::Select(annotation.annotation_id.clone()));
@@ -648,8 +822,14 @@ fn annotation_at(
         })
 }
 
-fn transformed_image_rect(viewport: Rect, zoom: f32, pan: Vec2) -> Rect {
-    Rect::from_center_size(viewport.center() + pan, viewport.size() * zoom)
+fn fitted_image_rect(viewport: Rect, image_size: [u32; 2]) -> Rect {
+    let source = vec2(image_size[0].max(1) as f32, image_size[1].max(1) as f32);
+    let scale = (viewport.width() / source.x).min(viewport.height() / source.y);
+    Rect::from_center_size(viewport.center(), source * scale)
+}
+
+fn transformed_image_rect(fitted_image: Rect, zoom: f32, pan: Vec2) -> Rect {
+    Rect::from_center_size(fitted_image.center() + pan, fitted_image.size() * zoom)
 }
 
 fn normalized_to_screen(image_rect: Rect, point: Pos2) -> Pos2 {
@@ -674,23 +854,39 @@ fn bbox_to_screen_rect(image_rect: Rect, bbox: BoundingBox) -> Rect {
     )
 }
 
-fn set_zoom_around(state: &mut CanvasState, viewport: Rect, focus: Pos2, requested_zoom: f32) {
-    let old_rect = transformed_image_rect(viewport, state.zoom, state.pan);
+fn set_zoom_around(
+    state: &mut CanvasState,
+    viewport: Rect,
+    fitted_image: Rect,
+    focus: Pos2,
+    requested_zoom: f32,
+) {
+    let old_rect = transformed_image_rect(fitted_image, state.zoom, state.pan);
     let anchor = screen_to_normalized(old_rect, focus);
-    let zoom = requested_zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    let centered = Rect::from_center_size(viewport.center(), viewport.size() * zoom);
-    let desired_min = focus - (viewport.size() * zoom * anchor.to_vec2());
+    let zoom = finite_or(requested_zoom, state.zoom).clamp(MIN_ZOOM, MAX_ZOOM);
+    let scaled_size = fitted_image.size() * zoom;
+    let centered = Rect::from_center_size(fitted_image.center(), scaled_size);
+    let desired_min = focus - (scaled_size * anchor.to_vec2());
     state.zoom = zoom;
     state.pan = desired_min - centered.min;
-    state.pan = clamp_pan(viewport, state.zoom, state.pan);
+    state.pan = clamp_pan(viewport, fitted_image, state.zoom, state.pan);
 }
 
-fn clamp_pan(viewport: Rect, zoom: f32, pan: Vec2) -> Vec2 {
-    let limit = viewport.size() * ((zoom.max(MIN_ZOOM) - 1.0) * 0.5);
+fn clamp_pan(viewport: Rect, fitted_image: Rect, zoom: f32, pan: Vec2) -> Vec2 {
+    let overflow = ((fitted_image.size() * zoom - viewport.size()) * 0.5).max(Vec2::ZERO);
     vec2(
-        pan.x.clamp(-limit.x, limit.x),
-        pan.y.clamp(-limit.y, limit.y),
+        finite_or(pan.x, 0.0).clamp(-overflow.x, overflow.x),
+        finite_or(pan.y, 0.0).clamp(-overflow.y, overflow.y),
     )
+}
+
+fn wheel_zoom_factor(delta: Vec2) -> f32 {
+    let points = if delta.y.abs() >= delta.x.abs() {
+        delta.y
+    } else {
+        delta.x
+    };
+    (points.clamp(-500.0, 500.0) * 0.005).exp()
 }
 
 fn bbox_from_normalized_points(a: Pos2, b: Pos2) -> Option<BoundingBox> {
@@ -803,6 +999,75 @@ fn resize_handle_at(pointer: Pos2, rect: Rect) -> Option<ResizeHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Event, Modifiers, MouseWheelUnit, TouchDeviceId, TouchId, TouchPhase};
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[derive(Default)]
+    struct InteractiveTestState {
+        canvas: CanvasState,
+        actions: Vec<CanvasAction<BoundingBoxEdit>>,
+    }
+
+    fn canvas_harness(bounding_box_tool: bool) -> Harness<'static, InteractiveTestState> {
+        Harness::builder()
+            .with_size(vec2(400.0, 300.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                move |ui, test: &mut InteractiveTestState| {
+                    if let Some(action) = show_canvas_interactive(
+                        ui,
+                        &mut test.canvas,
+                        None,
+                        &[],
+                        [400, 200],
+                        bounding_box_tool,
+                        None,
+                        true,
+                        &[],
+                        &[],
+                    ) {
+                        test.actions.push(action);
+                    }
+                },
+                InteractiveTestState::default(),
+            )
+    }
+
+    fn click_at(harness: &mut Harness<'_, InteractiveTestState>, pos: Pos2) {
+        harness.event(Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.step();
+    }
+
+    fn drag_at(
+        harness: &mut Harness<'_, InteractiveTestState>,
+        button: PointerButton,
+        start: Pos2,
+        end: Pos2,
+    ) {
+        harness.event(Event::PointerMoved(start));
+        harness.event(Event::PointerButton {
+            pos: start,
+            button,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.event(Event::PointerMoved(end));
+        harness.event(Event::PointerButton {
+            pos: end,
+            button,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+    }
 
     fn bbox(x: f32, y: f32, width: f32, height: f32) -> BoundingBox {
         BoundingBox {
@@ -977,28 +1242,269 @@ mod tests {
     }
 
     #[test]
+    fn aspect_fit_letterboxes_landscape_and_portrait_images() {
+        let viewport = Rect::from_min_size(pos2(100.0, 200.0), vec2(400.0, 200.0));
+        let landscape = fitted_image_rect(viewport, [800, 200]);
+        assert_eq!(landscape.size(), vec2(400.0, 100.0));
+        assert_eq!(landscape.center(), viewport.center());
+
+        let portrait = fitted_image_rect(viewport, [100, 400]);
+        assert_eq!(portrait.size(), vec2(50.0, 200.0));
+        assert_eq!(portrait.center(), viewport.center());
+
+        let zero_dimensions = fitted_image_rect(viewport, [0, 0]);
+        assert_eq!(zero_dimensions.size(), vec2(200.0, 200.0));
+    }
+
+    #[test]
+    fn zoom_scales_the_fitted_image_in_a_fixed_viewport() {
+        let viewport = Rect::from_min_size(pos2(10.0, 20.0), vec2(400.0, 300.0));
+        let fitted = fitted_image_rect(viewport, [800, 200]);
+        let transformed = transformed_image_rect(fitted, 2.0, vec2(25.0, -10.0));
+        assert_eq!(transformed.size(), vec2(800.0, 200.0));
+        assert_eq!(transformed.center(), viewport.center() + vec2(25.0, -10.0));
+    }
+
+    #[test]
+    fn pan_clamps_only_on_axes_with_actual_image_overflow() {
+        let viewport = Rect::from_min_size(pos2(100.0, 200.0), vec2(400.0, 300.0));
+        let fitted = fitted_image_rect(viewport, [800, 200]);
+        assert_eq!(fitted.size(), vec2(400.0, 100.0));
+        assert_eq!(
+            clamp_pan(viewport, fitted, 2.0, vec2(999.0, -999.0)),
+            vec2(200.0, 0.0)
+        );
+        assert_eq!(
+            clamp_pan(viewport, fitted, 4.0, vec2(-999.0, 999.0)),
+            vec2(-600.0, 50.0)
+        );
+    }
+
+    #[test]
+    fn pan_is_reclamped_when_the_viewport_resizes() {
+        let old_viewport = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0));
+        let old_fit = fitted_image_rect(old_viewport, [800, 400]);
+        let mut state = CanvasState {
+            zoom: 2.0,
+            pan: vec2(400.0, 200.0),
+            ..Default::default()
+        };
+        state.clamp_to_viewport(old_viewport, old_fit);
+        assert_eq!(state.pan, vec2(400.0, 200.0));
+
+        let resized = Rect::from_min_size(Pos2::ZERO, vec2(300.0, 500.0));
+        let resized_fit = fitted_image_rect(resized, [800, 400]);
+        state.clamp_to_viewport(resized, resized_fit);
+        assert_eq!(state.pan, vec2(150.0, 0.0));
+    }
+
+    #[test]
     fn zoom_is_anchored_under_pointer_and_pan_is_clamped() {
         let viewport = Rect::from_min_size(pos2(100.0, 200.0), vec2(400.0, 200.0));
+        let fitted = fitted_image_rect(viewport, [400, 200]);
         let focus = pos2(200.0, 250.0);
         let mut state = CanvasState::default();
-        let before = screen_to_normalized(
-            transformed_image_rect(viewport, state.zoom, state.pan),
-            focus,
-        );
-        set_zoom_around(&mut state, viewport, focus, 2.0);
-        let after = screen_to_normalized(
-            transformed_image_rect(viewport, state.zoom, state.pan),
-            focus,
-        );
+        let before =
+            screen_to_normalized(transformed_image_rect(fitted, state.zoom, state.pan), focus);
+        set_zoom_around(&mut state, viewport, fitted, focus, 2.0);
+        let after =
+            screen_to_normalized(transformed_image_rect(fitted, state.zoom, state.pan), focus);
         assert!((before.x - after.x).abs() < 0.000_01);
         assert!((before.y - after.y).abs() < 0.000_01);
         assert_eq!(
-            clamp_pan(viewport, 2.0, vec2(999.0, -999.0)),
+            clamp_pan(viewport, fitted, 2.0, vec2(999.0, -999.0)),
             vec2(200.0, -100.0)
         );
 
         state.fit_view();
         assert_eq!(state.zoom(), 1.0);
         assert_eq!(state.pan, Vec2::ZERO);
+    }
+
+    #[test]
+    fn canvas_state_zoom_methods_are_bounded_and_fit_clears_pan() {
+        let mut state = CanvasState::default();
+        state.zoom_in();
+        assert_eq!(state.current_zoom(), ZOOM_STEP);
+        state.pan = vec2(20.0, -10.0);
+        state.zoom_in();
+        assert_eq!(state.pan, vec2(25.0, -12.5));
+
+        for _ in 0..100 {
+            state.zoom_in();
+        }
+        assert_eq!(state.current_zoom(), MAX_ZOOM);
+        for _ in 0..100 {
+            state.zoom_out();
+        }
+        assert_eq!(state.current_zoom(), MIN_ZOOM);
+        assert_eq!(state.pan, Vec2::ZERO);
+
+        state.zoom_in();
+        state.pan = Vec2::splat(12.0);
+        state.fit_view();
+        assert_eq!(state.current_zoom(), MIN_ZOOM);
+        assert_eq!(state.pan, Vec2::ZERO);
+    }
+
+    #[test]
+    fn wheel_zoom_factor_is_directional_symmetric_and_finite() {
+        let inward = wheel_zoom_factor(vec2(0.0, 120.0));
+        let outward = wheel_zoom_factor(vec2(0.0, -120.0));
+        assert!(inward > 1.0);
+        assert!(outward < 1.0);
+        assert!((inward * outward - 1.0).abs() < 0.000_01);
+        assert!(wheel_zoom_factor(vec2(f32::INFINITY, 0.0)).is_finite());
+    }
+
+    #[test]
+    fn explicit_zoom_controls_are_accessible_and_change_state() {
+        let mut harness = canvas_harness(false);
+        assert!(harness.query_by_label("Zoom out").is_some());
+        assert!(harness.query_by_label("Zoom: 100%").is_some());
+        assert!(harness.query_by_label("Zoom in").is_some());
+        assert!(harness.query_by_label("Fit").is_some());
+
+        harness.get_by_label("Zoom in").click_accesskit();
+        harness.step();
+        assert_eq!(harness.state().canvas.current_zoom(), ZOOM_STEP);
+        assert!(harness.query_by_label("Zoom: 125%").is_some());
+
+        harness.get_by_label("Zoom out").click_accesskit();
+        harness.step();
+        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
+
+        harness.state_mut().canvas.zoom_in();
+        harness.get_by_label("Fit").click_accesskit();
+        harness.step();
+        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
+    }
+
+    #[test]
+    fn control_bar_is_excluded_from_canvas_hit_testing() {
+        let mut harness = canvas_harness(false);
+        let canvas = harness.get_by_label("Annotation canvas").rect();
+        let control = harness.get_by_label("Zoom: 100%").rect().center();
+        assert!(control.y < canvas.top());
+
+        click_at(&mut harness, pos2(16.0, control.y));
+        assert!(harness.state().actions.is_empty());
+        harness.event(Event::PointerMoved(control));
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, 120.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
+    }
+
+    #[test]
+    fn plain_wheel_over_canvas_zooms_without_a_modifier() {
+        let mut harness = canvas_harness(false);
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        harness.event(Event::PointerMoved(center));
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, 120.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(harness.state().canvas.current_zoom() > MIN_ZOOM);
+    }
+
+    #[test]
+    fn primary_drag_creates_a_normalized_bounding_box() {
+        let mut harness = canvas_harness(true);
+        let canvas = harness.get_by_label("Annotation canvas").rect();
+        let start = canvas.left_top() + vec2(40.0, 30.0);
+        let end = start + vec2(120.0, 80.0);
+        drag_at(&mut harness, PointerButton::Primary, start, end);
+
+        let [CanvasAction::CreateBoundingBox(created)] = harness.state().actions.as_slice() else {
+            panic!("expected one bounding-box creation action");
+        };
+        assert!(created.validate().is_ok());
+        assert!(created.width > 0.0 && created.height > 0.0);
+    }
+
+    #[test]
+    fn middle_and_space_primary_drags_pan_without_annotating() {
+        let mut harness = canvas_harness(true);
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.zoom_in();
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        drag_at(
+            &mut harness,
+            PointerButton::Middle,
+            center,
+            center + vec2(40.0, 15.0),
+        );
+        assert!(harness.state().canvas.pan.x > 0.0);
+        assert!(harness.state().actions.is_empty());
+
+        let pan_before = harness.state().canvas.pan;
+        harness.key_down(Key::Space);
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            center,
+            center - vec2(30.0, 10.0),
+        );
+        harness.key_up(Key::Space);
+        harness.step();
+        assert!(harness.state().canvas.pan.x < pan_before.x);
+        assert!(harness.state().actions.is_empty());
+    }
+
+    #[test]
+    fn two_finger_gesture_zooms_and_pans_without_annotating() {
+        let mut harness = canvas_harness(true);
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        let device = TouchDeviceId(1);
+        let touch = |id, phase, pos| Event::Touch {
+            device_id: device,
+            id: TouchId(id),
+            phase,
+            pos,
+            force: None,
+        };
+        // Touch integrations report the primary pointer position alongside touch events.
+        harness.event(Event::PointerMoved(center));
+        harness.event(touch(1, TouchPhase::Start, center - vec2(50.0, 0.0)));
+        harness.event(touch(2, TouchPhase::Start, center + vec2(50.0, 0.0)));
+        harness.event(touch(1, TouchPhase::Move, center - vec2(70.0, -10.0)));
+        harness.event(touch(2, TouchPhase::Move, center + vec2(90.0, 10.0)));
+        harness.event(touch(1, TouchPhase::End, center - vec2(70.0, -10.0)));
+        harness.event(touch(2, TouchPhase::End, center + vec2(90.0, 10.0)));
+        harness.step();
+
+        assert!(harness.state().canvas.current_zoom() > MIN_ZOOM);
+        assert!(harness.state().actions.is_empty());
+    }
+
+    #[test]
+    fn double_click_fits_view_and_does_not_emit_a_second_annotation_action() {
+        let mut harness = canvas_harness(false);
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        click_at(&mut harness, center);
+        assert_eq!(harness.state().actions.len(), 1);
+        assert!(matches!(
+            harness.state().actions[0],
+            CanvasAction::PlaceKeypoint(_)
+        ));
+        let first_click = harness.state().canvas.last_canvas_click.unwrap();
+
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.pan = vec2(20.0, 10.0);
+        click_at(&mut harness, center);
+        let second_click = harness.state().canvas.last_canvas_click.unwrap();
+        assert!(second_click.0 - first_click.0 <= DOUBLE_CLICK_DELAY);
+        assert!(second_click.1.distance(first_click.1) <= DOUBLE_CLICK_DISTANCE);
+        assert_eq!(harness.state().actions.len(), 1);
+        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
+        assert_eq!(harness.state().canvas.pan, Vec2::ZERO);
     }
 }

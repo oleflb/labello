@@ -10,10 +10,10 @@ use eframe::egui::{self, TextureHandle};
 use labello_client::{DatasetSummary, IngestJob, LabelloApi};
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
-    AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata, DatasetRole, DatasetStats,
-    ImageId, ImageRecord, ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass,
-    NormalizedPoint, PrelabelConfigId, PrelabelSuggestion, ReviewRecord, SkeletonGeometry,
-    TaskDefinition, TaskId, TutorialContent, UserId,
+    Assignment, AssignmentId, AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata,
+    DatasetRole, DatasetStats, ImageId, ImageRecord, ImageState, KeybindingSet, KeypointAnnotation,
+    KeypointState, LabelClass, NormalizedPoint, PrelabelConfigId, PrelabelSuggestion, ReviewRecord,
+    SkeletonGeometry, TaskDefinition, TaskId, TutorialContent, UserId,
 };
 
 use crate::{
@@ -29,7 +29,6 @@ pub struct AppConfig {
     pub api_base_url: String,
     pub dev_token: String,
     pub user_id: UserId,
-    pub role: DatasetRole,
     pub dataset_id: DatasetId,
     pub queue_size: usize,
 }
@@ -40,7 +39,6 @@ impl Default for AppConfig {
             api_base_url: "http://127.0.0.1:8080".to_string(),
             dev_token: "dev-local-token".to_string(),
             user_id: UserId::from("demo_user"),
-            role: DatasetRole::DataAdmin,
             dataset_id: DatasetId::from("demo"),
             queue_size: IMAGE_QUEUE_SIZE,
         }
@@ -65,27 +63,29 @@ pub(crate) enum SaveStatus {
 pub(crate) enum AppView {
     Setup,
     Annotate,
+    Review,
+    Adjudicate,
     Admin,
     Stats,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QueueMode {
-    Annotate,
-    Review,
-    Adjudicate,
+pub(crate) enum LayoutMode {
+    Desktop,
+    Tablet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Drawer {
+    Workflow,
+    Inspector,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingTransition {
-    NextImage,
-    Workflow {
-        task_index: usize,
-        class_id: ClassId,
-    },
-    QueueMode(QueueMode),
+    NextAssignment,
+    Workflow(TaskId),
     View(AppView),
-    Admin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,21 +102,31 @@ pub(crate) enum UiMessage {
     AdminLoaded(Result<DatasetMetadata, String>),
     AdminSaved(Result<DatasetMetadata, String>),
     ImageLoaded {
-        generation: u64,
-        result: Result<Option<LoadedImage>, String>,
+        operation_id: u64,
+        assignment: Option<Assignment>,
+        result: Box<Result<Option<LoadedImage>, String>>,
     },
     SaveFinished {
-        image_id: ImageId,
+        operation_id: u64,
+        assignment_id: AssignmentId,
+        completed: bool,
         result: Result<ImageState, String>,
     },
+    ReleaseFinished {
+        operation_id: u64,
+        assignment_id: AssignmentId,
+        result: Result<(), String>,
+    },
     ReviewFinished {
-        image_id: ImageId,
+        operation_id: u64,
+        assignment_id: AssignmentId,
         phase: ReviewPhase,
         decision: labello_domain::ReviewDecision,
         result: Result<(), String>,
     },
     AdjudicationFinished {
-        image_id: ImageId,
+        operation_id: u64,
+        assignment_id: AssignmentId,
         result: Result<(), String>,
     },
     IngestJobLoaded(Result<IngestJob, String>),
@@ -159,32 +169,45 @@ pub(crate) enum UiCommand {
         dataset_id: DatasetId,
         keybindings: KeybindingSet,
     },
-    NextImage {
-        generation: u64,
+    ClaimAssignment {
+        operation_id: u64,
         dataset_id: DatasetId,
         task_id: TaskId,
         prelabel_config_ids: Vec<PrelabelConfigId>,
         kind: AssignmentKind,
     },
-    SaveAnnotations {
+    ReloadAssignment {
+        operation_id: u64,
         dataset_id: DatasetId,
-        image_id: ImageId,
-        user_id: UserId,
-        task_id: Option<TaskId>,
+        assignment: Assignment,
+        prelabel_config_ids: Vec<PrelabelConfigId>,
+        fetch_prelabels: bool,
+    },
+    SaveAnnotations {
+        operation_id: u64,
+        dataset_id: DatasetId,
+        assignment: Assignment,
         annotations: Vec<labello_domain::AnnotationVersion>,
         persisted: BTreeSet<AnnotationId>,
         modified: BTreeSet<AnnotationId>,
         submit: bool,
     },
-    Review {
+    ReleaseAssignment {
+        operation_id: u64,
         dataset_id: DatasetId,
-        image_id: ImageId,
+        assignment: Assignment,
+    },
+    Review {
+        operation_id: u64,
+        dataset_id: DatasetId,
+        assignment: Assignment,
         review: ReviewRecord,
         phase: ReviewPhase,
     },
     Adjudication {
+        operation_id: u64,
         dataset_id: DatasetId,
-        image_id: ImageId,
+        assignment: Assignment,
         adjudication: AdjudicationRecord,
     },
 }
@@ -197,6 +220,7 @@ pub(crate) struct LoadedDataset {
 
 #[derive(Debug)]
 pub(crate) struct LoadedImage {
+    pub assignment: Assignment,
     pub queued: QueuedImage,
     pub annotations: Vec<labello_domain::AnnotationVersion>,
     pub state: ImageState,
@@ -285,6 +309,7 @@ pub(crate) struct DatasetState {
     pub admin_baseline: Option<DatasetMetadata>,
     pub stats: DatasetStats,
     pub last_stats_request: Option<Instant>,
+    pub requested_view: Option<AppView>,
 }
 
 impl DatasetState {
@@ -296,17 +321,17 @@ impl DatasetState {
             admin_baseline: None,
             stats: DatasetStats::default(),
             last_stats_request: None,
+            requested_view: None,
         }
     }
 }
 
 pub struct WorkState {
-    pub(crate) queue_mode: QueueMode,
     pub(crate) classes: Vec<LabelClass>,
     pub(crate) tasks: Vec<TaskDefinition>,
-    pub(crate) selected_task: usize,
-    pub(crate) selected_class_id: Option<ClassId>,
+    pub(crate) selected_task_id: Option<TaskId>,
     pub(crate) tool: Tool,
+    pub(crate) assignment: Option<Assignment>,
     pub(crate) current: Option<QueuedImage>,
     pub(crate) current_state: Option<ImageState>,
     pub(crate) current_texture: Option<TextureHandle>,
@@ -327,12 +352,16 @@ pub struct WorkState {
     pub(crate) review_rejected: bool,
     pub(crate) show_tutorial: bool,
     pub(crate) pending_transition: Option<PendingTransition>,
-    pub(crate) load_generation: u64,
+    pub(crate) drawer: Option<Drawer>,
+    pub(crate) show_settings: bool,
+    pub(crate) next_operation_id: u64,
+    pub(crate) active_load_id: Option<u64>,
+    pub(crate) active_operation_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkflowChoice {
-    pub task_index: usize,
+    pub task_id: TaskId,
     pub task_name: String,
     pub class_id: ClassId,
     pub class_name: String,
@@ -414,12 +443,11 @@ impl LabelloApp {
             started: true,
         };
         let work = WorkState {
-            queue_mode: QueueMode::Annotate,
             classes,
             tasks,
-            selected_task: 0,
-            selected_class_id: Some(ClassId::from("person")),
+            selected_task_id: Some(TaskId::from("bounding_box:person")),
             tool: Tool::BoundingBox,
+            assignment: None,
             current,
             current_state: None,
             current_texture: None,
@@ -440,7 +468,11 @@ impl LabelloApp {
             review_rejected: false,
             show_tutorial: false,
             pending_transition: None,
-            load_generation: 0,
+            drawer: None,
+            show_settings: false,
+            next_operation_id: 0,
+            active_load_id: None,
+            active_operation_id: None,
         };
         Self {
             runtime: RuntimeState::new(),
@@ -465,33 +497,30 @@ impl LabelloApp {
     }
 
     pub(crate) fn selected_task(&self) -> Option<&TaskDefinition> {
+        let selected = self.selected_task_id.as_ref()?;
         self.tasks
-            .get(self.selected_task)
-            .filter(|task| task.enabled && !task.class_ids.is_empty())
+            .iter()
+            .find(|task| task.task_id == *selected && valid_workflow(task))
     }
 
     pub(crate) fn selected_class_id(&self) -> Option<&ClassId> {
-        let task = self.selected_task()?;
-        self.selected_class_id
-            .as_ref()
-            .filter(|class_id| task.class_ids.contains(class_id))
+        self.selected_task()?.class_ids.first()
     }
 
     pub(crate) fn workflow_choices(&self) -> Vec<WorkflowChoice> {
         let mut choices = Vec::new();
-        for (task_index, task) in self.tasks.iter().enumerate() {
-            if !task.enabled {
+        for task in &self.tasks {
+            if !valid_workflow(task) {
                 continue;
             }
-            for class_id in &task.class_ids {
-                choices.push(WorkflowChoice {
-                    task_index,
-                    task_name: task.name.clone(),
-                    class_id: class_id.clone(),
-                    class_name: self.class_name(class_id),
-                    annotation_type: task.annotation_type.clone(),
-                });
-            }
+            let class_id = task.class_ids[0].clone();
+            choices.push(WorkflowChoice {
+                task_id: task.task_id.clone(),
+                task_name: task.name.clone(),
+                class_name: self.class_name(&class_id),
+                class_id,
+                annotation_type: task.annotation_type.clone(),
+            });
         }
         choices
     }
@@ -500,7 +529,7 @@ impl LabelloApp {
         let task = self.selected_task()?;
         let class_id = self.selected_class_id()?;
         Some(WorkflowChoice {
-            task_index: self.selected_task,
+            task_id: task.task_id.clone(),
             task_name: task.name.clone(),
             class_id: class_id.clone(),
             class_name: self.class_name(class_id),
@@ -508,44 +537,37 @@ impl LabelloApp {
         })
     }
 
-    pub(crate) fn select_workflow(&mut self, task_index: usize, class_id: ClassId) -> bool {
-        let Some(task) = self.tasks.get(task_index) else {
+    pub(crate) fn select_workflow(&mut self, task_id: &TaskId) -> bool {
+        let Some(task) = self
+            .tasks
+            .iter()
+            .find(|task| task.task_id == *task_id && valid_workflow(task))
+        else {
             return false;
         };
-        if !task.enabled || !task.class_ids.contains(&class_id) {
-            return false;
-        }
-        if self.selected_task == task_index && self.selected_class_id.as_ref() == Some(&class_id) {
+        if self.selected_task_id.as_ref() == Some(task_id) {
             return false;
         }
         let annotation_type = task.annotation_type.clone();
-        self.selected_task = task_index;
-        self.selected_class_id = Some(class_id);
+        self.selected_task_id = Some(task_id.clone());
         self.tool = tool_for_annotation_type(&annotation_type);
         true
     }
 
     pub(crate) fn ensure_valid_task_selection(&mut self) -> bool {
-        if self.selected_class_id().is_some() {
+        if self.selected_task().is_some() {
             return true;
         }
-        let Some((index, class_id, annotation_type)) = self
+        let Some((task_id, annotation_type)) = self
             .tasks
             .iter()
-            .enumerate()
-            .find(|(_, task)| task.enabled && !task.class_ids.is_empty())
-            .map(|(index, task)| {
-                (
-                    index,
-                    task.class_ids[0].clone(),
-                    task.annotation_type.clone(),
-                )
-            })
+            .find(|task| valid_workflow(task))
+            .map(|task| (task.task_id.clone(), task.annotation_type.clone()))
         else {
+            self.selected_task_id = None;
             return false;
         };
-        self.selected_task = index;
-        self.selected_class_id = Some(class_id);
+        self.selected_task_id = Some(task_id);
         self.tool = tool_for_annotation_type(&annotation_type);
         true
     }
@@ -577,20 +599,35 @@ impl LabelloApp {
     }
 
     pub(crate) fn has_dataset_role(&self, role: DatasetRole) -> bool {
-        self.datasets.metadata.as_ref().is_some_and(|metadata| {
-            metadata.role_assignments.iter().any(|assignment| {
-                assignment.user_id == self.config.user_id && assignment.roles.contains(&role)
-            })
-        })
+        self.datasets
+            .summaries
+            .iter()
+            .find(|summary| summary.dataset_id == self.config.dataset_id)
+            .is_some_and(|summary| summary.roles.contains(&role))
     }
 
-    pub(crate) fn can_use_queue_mode(&self, mode: QueueMode) -> bool {
-        let role = match mode {
-            QueueMode::Annotate => DatasetRole::Annotator,
-            QueueMode::Review => DatasetRole::Reviewer,
-            QueueMode::Adjudicate => DatasetRole::Adjudicator,
+    pub(crate) fn can_open_view(&self, view: AppView) -> bool {
+        let role = match view {
+            AppView::Annotate => Some(DatasetRole::Annotator),
+            AppView::Review => Some(DatasetRole::Reviewer),
+            AppView::Adjudicate => Some(DatasetRole::Adjudicator),
+            AppView::Admin => Some(DatasetRole::DataAdmin),
+            AppView::Setup | AppView::Stats => None,
         };
-        self.has_dataset_role(role)
+        role.is_none_or(|role| self.has_dataset_role(role))
+    }
+
+    pub(crate) fn assignment_kind(&self) -> Option<AssignmentKind> {
+        match self.view {
+            AppView::Annotate => Some(AssignmentKind::Annotation),
+            AppView::Review => Some(AssignmentKind::Review),
+            AppView::Adjudicate => Some(AssignmentKind::Adjudication),
+            AppView::Setup | AppView::Admin | AppView::Stats => None,
+        }
+    }
+
+    pub(crate) fn work_view(&self) -> bool {
+        self.assignment_kind().is_some()
     }
 
     fn class_name(&self, class_id: &ClassId) -> String {
@@ -601,17 +638,12 @@ impl LabelloApp {
             .unwrap_or_else(|| class_id.to_string())
     }
 
-    pub(crate) fn next_image(&mut self) {
-        self.request_transition(PendingTransition::NextImage);
-    }
-
     pub(crate) fn request_transition(&mut self, transition: PendingTransition) {
-        if self.loading.saving {
+        if self.loading.saving || self.loading.image || self.transition_is_current(&transition) {
             return;
         }
-        if self.save_status == SaveStatus::Dirty && self.queue_mode == QueueMode::Annotate {
+        if self.assignment.is_some() {
             self.pending_transition = Some(transition);
-            self.request_save(false);
             return;
         }
         self.execute_transition(transition);
@@ -619,7 +651,7 @@ impl LabelloApp {
 
     pub(crate) fn execute_transition(&mut self, transition: PendingTransition) {
         match transition {
-            PendingTransition::NextImage => {
+            PendingTransition::NextAssignment => {
                 if self.runtime.api.is_some() {
                     self.clear_current_image();
                     self.request_next_image();
@@ -627,44 +659,80 @@ impl LabelloApp {
                     self.advance_current_image();
                 }
             }
-            PendingTransition::Workflow {
-                task_index,
-                class_id,
-            } => {
-                if self.select_workflow(task_index, class_id) {
-                    self.clear_current_image();
-                    self.request_next_image();
-                }
-            }
-            PendingTransition::QueueMode(mode) => {
-                if self.queue_mode != mode {
-                    self.queue_mode = mode;
+            PendingTransition::Workflow(task_id) => {
+                if self.select_workflow(&task_id) {
                     self.clear_current_image();
                     self.request_next_image();
                 }
             }
             PendingTransition::View(view) => {
+                if view == AppView::Admin {
+                    self.request_admin_dataset();
+                    return;
+                }
+                self.clear_current_image();
                 self.view = view;
-                if view == AppView::Annotate && self.current.is_none() {
+                if matches!(
+                    view,
+                    AppView::Annotate | AppView::Review | AppView::Adjudicate
+                ) {
                     self.request_next_image();
                 } else if view == AppView::Stats {
                     self.request_stats();
                 }
             }
-            PendingTransition::Admin => self.request_admin_dataset(),
         }
     }
 
-    pub(crate) fn submit_and_advance(&mut self) {
-        if self.loading.saving || self.current.is_none() {
+    fn transition_is_current(&self, transition: &PendingTransition) -> bool {
+        match transition {
+            PendingTransition::NextAssignment => false,
+            PendingTransition::Workflow(task_id) => self.selected_task_id.as_ref() == Some(task_id),
+            PendingTransition::View(view) => self.view == *view,
+        }
+    }
+
+    pub(crate) fn submit_pending_transition(&mut self) {
+        if self.view != AppView::Annotate || self.pending_transition.is_none() {
             return;
         }
         if let Some(issue) = self.submission_issue() {
             self.runtime.error = Some(issue);
             return;
         }
-        self.pending_transition = Some(PendingTransition::NextImage);
         self.request_save(true);
+    }
+
+    pub(crate) fn release_pending_transition(&mut self) {
+        if self.pending_transition.is_some() {
+            self.request_release();
+        }
+    }
+
+    pub(crate) fn cancel_pending_transition(&mut self) {
+        if !self.loading.saving {
+            self.pending_transition = None;
+        }
+    }
+
+    pub(crate) fn submit_and_advance(&mut self) {
+        if self.view != AppView::Annotate || self.loading.saving || self.assignment.is_none() {
+            return;
+        }
+        if let Some(issue) = self.submission_issue() {
+            self.runtime.error = Some(issue);
+            return;
+        }
+        self.pending_transition = Some(PendingTransition::NextAssignment);
+        self.request_save(true);
+    }
+
+    pub(crate) fn skip_assignment(&mut self) {
+        if self.assignment.is_none() || self.loading.saving {
+            return;
+        }
+        self.pending_transition = Some(PendingTransition::NextAssignment);
+        self.request_release();
     }
 
     fn submission_issue(&self) -> Option<String> {
@@ -698,6 +766,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn advance_current_image(&mut self) {
+        self.assignment = None;
         self.current_texture = None;
         self.current_state = None;
         self.current = self.queue.pop_next();
@@ -714,7 +783,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn autosave(&mut self) {
-        if self.save_status == SaveStatus::Dirty {
+        if self.view == AppView::Annotate && self.save_status == SaveStatus::Dirty {
             if self.runtime.api.is_some() {
                 self.request_save(false);
                 return;
@@ -993,7 +1062,12 @@ impl LabelloApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.view != AppView::Annotate || ctx.text_edit_focused() {
+        if !self.work_view()
+            || ctx.text_edit_focused()
+            || self.loading.saving
+            || self.loading.image
+            || self.pending_transition.is_some()
+        {
             return;
         }
         use labello_domain::UserAction;
@@ -1005,17 +1079,17 @@ impl LabelloApp {
             .collect::<Vec<_>>();
         for action in pressed {
             match action {
-                UserAction::NextImage => self.next_image(),
-                UserAction::SaveAnnotations if self.queue_mode == QueueMode::Annotate => {
-                    self.autosave()
+                UserAction::NextImage if self.view == AppView::Annotate => {
+                    self.submit_and_advance()
                 }
-                UserAction::DeleteAnnotation if self.queue_mode == QueueMode::Annotate => {
+                UserAction::SaveAnnotations if self.view == AppView::Annotate => self.autosave(),
+                UserAction::DeleteAnnotation if self.view == AppView::Annotate => {
                     self.delete_selected()
                 }
-                UserAction::AcceptReviewObject if self.queue_mode == QueueMode::Review => {
+                UserAction::AcceptReviewObject if self.view == AppView::Review => {
                     self.request_review(labello_domain::ReviewDecision::Approved)
                 }
-                UserAction::RejectReviewObject if self.queue_mode == QueueMode::Review => {
+                UserAction::RejectReviewObject if self.view == AppView::Review => {
                     self.request_review(labello_domain::ReviewDecision::Rejected)
                 }
                 UserAction::OpenTutorial => self.show_tutorial = !self.show_tutorial,
@@ -1078,6 +1152,10 @@ pub(crate) fn tool_for_annotation_type(annotation_type: &AnnotationType) -> Tool
     }
 }
 
+fn valid_workflow(task: &TaskDefinition) -> bool {
+    task.enabled && task.class_ids.len() == 1
+}
+
 pub(crate) fn annotation_type_label(annotation_type: &AnnotationType) -> &'static str {
     match annotation_type {
         AnnotationType::BoundingBox => "bounding box",
@@ -1096,26 +1174,39 @@ impl eframe::App for LabelloApp {
         self.refresh_stats_if_due();
         self.refresh_ingest_if_due();
         self.handle_shortcuts(ui.ctx());
-        let compact = ui.available_width() < 900.0;
+        let layout = if ui.available_width() >= 1240.0 {
+            LayoutMode::Desktop
+        } else {
+            LayoutMode::Tablet
+        };
         egui::Panel::top("top_bar")
-            .exact_size(if compact { 92.0 } else { 56.0 })
+            .exact_size(if layout == LayoutMode::Desktop {
+                92.0
+            } else {
+                124.0
+            })
             .frame(theme::top_bar_frame())
-            .show(ui, |ui| self.top_bar(ui));
-        if self.view == AppView::Annotate && !compact {
+            .show(ui, |ui| self.top_bar(ui, layout));
+        if self.work_view() && layout == LayoutMode::Desktop {
             egui::Panel::left("task_panel")
-                .resizable(true)
-                .default_size(280.0)
+                .resizable(false)
+                .exact_size(300.0)
                 .frame(theme::side_frame())
-                .show(ui, |ui| self.task_panel(ui));
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
+                });
             egui::Panel::right("review_panel")
-                .resizable(true)
-                .default_size(320.0)
+                .resizable(false)
+                .exact_size(340.0)
                 .frame(theme::side_frame())
-                .show(ui, |ui| self.right_panel(ui));
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui));
+                });
         }
         egui::CentralPanel::default()
             .frame(theme::central_frame())
             .show(ui, |ui| self.central(ui));
+        self.overlays(ui.ctx(), layout);
         self.start_next_command();
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(150));

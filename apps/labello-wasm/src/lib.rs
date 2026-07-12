@@ -38,7 +38,6 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
         // the token in the masked connection field instead.
         dev_token: String::new(),
         user_id: labello_domain::UserId::from(param(&params, "user", "admin")),
-        role: parse_role(&param(&params, "role", "data_admin")),
         dataset_id: labello_domain::DatasetId::from(param(&params, "dataset", "demo")),
         queue_size: labello_ui::IMAGE_QUEUE_SIZE,
     })
@@ -47,17 +46,6 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
 #[cfg(target_arch = "wasm32")]
 fn param(params: &web_sys::UrlSearchParams, name: &str, default: &str) -> String {
     params.get(name).unwrap_or_else(|| default.to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn parse_role(value: &str) -> labello_domain::DatasetRole {
-    match value {
-        "annotator" => labello_domain::DatasetRole::Annotator,
-        "reviewer" => labello_domain::DatasetRole::Reviewer,
-        "adjudicator" => labello_domain::DatasetRole::Adjudicator,
-        "data_admin" => labello_domain::DatasetRole::DataAdmin,
-        _ => labello_domain::DatasetRole::Annotator,
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
