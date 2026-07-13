@@ -359,6 +359,22 @@ pub(crate) async fn record_review(
         return Err(ApiError::NotFound(format!("image {image_id}")));
     }
     let image_state = repo.load_image_state(&image_id).await?;
+    let assignment_task = metadata
+        .task(&assignment.task_id)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown task {}", assignment.task_id)))?;
+    match assignment_task.review.workflow {
+        ReviewWorkflow::None => {
+            return Err(ApiError::BadRequest(
+                "reviews are disabled for this task".to_string(),
+            ));
+        }
+        ReviewWorkflow::IndependentAgreement => {
+            return Err(ApiError::BadRequest(
+                "independent agreement workflow is not implemented".to_string(),
+            ));
+        }
+        ReviewWorkflow::Approval => {}
+    }
     let reviewed_task = match &review.target {
         ReviewTarget::Image {
             image_id: target_image_id,
@@ -397,11 +413,6 @@ pub(crate) async fn record_review(
             })?)
         }
     };
-    if reviewed_task.is_some_and(|task| task.review.workflow == ReviewWorkflow::None) {
-        return Err(ApiError::BadRequest(
-            "reviews are disabled for this task".to_string(),
-        ));
-    }
     if reviewed_task.is_some_and(|task| task.task_id != assignment.task_id) {
         return Err(ApiError::BadRequest(
             "review target task does not match assignment task".to_string(),
@@ -415,8 +426,8 @@ pub(crate) async fn record_review(
         let task = metadata
             .task(task_id)
             .expect("task target was validated before recording the review");
-        let prior_approvers = image_state
-            .reviews
+        let current_reviews = repo.current_task_reviews(&image_id, task_id).await?;
+        let prior_approvers = current_reviews
             .iter()
             .filter_map(|candidate| match (&candidate.target, &candidate.decision) {
                 (

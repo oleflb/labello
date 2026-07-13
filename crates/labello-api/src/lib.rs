@@ -2,6 +2,7 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod oauth;
+mod session;
 pub mod state;
 
 #[cfg(test)]

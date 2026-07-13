@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -9,19 +10,22 @@ use egui_kittest::{Harness, kittest::Queryable};
 use labello_client::{
     AdjudicationApi, AnnotationApi, ApiFuture, AppendEventRequest, AssignNextRequest,
     AssignmentActionRequest, AuthApi, ClientError, ClientResult, CorrectionRequest,
-    CreateDatasetRequest, DatasetApi, DatasetSummary, ImageApi, ImageFile, ImagePreview, IngestJob,
-    IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, StatsApi,
-    TaskApi, UpdateDatasetConfigRequest,
+    CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery,
+    ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
+    PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, SnapshotFile, StatsApi, TaskApi,
+    UpdateDatasetConfigRequest, UserApi,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
     AssignmentKind, AssignmentStatus, BoundingBox, BrowserAcceleration, ClassId, DatasetId,
-    DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetStats, EventLogEntry, EventPayload,
-    ImageId, ImageRecord, ImageState, KeybindingSet, KeypointSpec, LabelClass, ModelSpec,
-    OfflineBundle, OfflineSyncRequest, OfflineSyncResult, OutputProcessing, PrelabelConfig,
-    PrelabelConfigId, PrelabelExecution, PrelabelSuggestion, ReviewConfig, ReviewRecord,
-    SCHEMA_VERSION, SkeletonSpec, TaskDefinition, TaskId, TutorialContent, UserAccount, UserId,
+    DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetSnapshot, DatasetStats,
+    EventLogEntry, EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, ImageRecord,
+    ImageState, KeybindingSet, KeypointSpec, LabelClass, ModelSpec, OfflineBundle,
+    OfflineSyncRequest, OfflineSyncResult, OutputProcessing, PrelabelConfig, PrelabelConfigId,
+    PrelabelExecution, PrelabelSuggestion, ReviewConfig, ReviewRecord, SCHEMA_VERSION,
+    SkeletonSpec, SnapshotFileEntry, TaskDefinition, TaskId, TaskStatus, TutorialContent,
+    UserAccount, UserId,
 };
 
 use crate::app::{
@@ -35,22 +39,21 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
     let mut harness = live_harness(api.clone());
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
 
-    assert!(harness.query_by_label("Connect To Labello").is_some());
+    assert!(harness.query_by_label("Welcome To Labello").is_some());
+    assert_eq!(api.counts().me, 1);
     assert!(harness.query_all_by_label("Annotate").next().is_some());
     assert!(harness.query_all_by_label("Admin").next().is_some());
 
-    click(&mut harness, "Create as current user");
-    step_until(&mut harness, 20, |app| app.current.is_some());
+    harness.state_mut().request_create_dataset();
+    harness.step();
+    step_until(&mut harness, 20, |app| {
+        !app.loading.dataset && api.counts().create_dataset == 1
+    });
     assert_eq!(api.counts().create_dataset, 1);
-    assert_eq!(harness.state().view, AppView::Annotate);
-    assert!(harness.state().current.is_some());
-
-    click(&mut harness, "Setup");
-    release_and_switch(&mut harness);
-    step_until(&mut harness, 8, |app| app.view == AppView::Setup);
-    click(&mut harness, "Admin");
-    step_until(&mut harness, 8, |app| app.view == AppView::Admin);
-    assert_eq!(api.counts().get_admin_dataset, 1);
+    drop(harness);
+    let admin_api = Rc::new(SpyApi::new());
+    let harness = loaded_admin_harness(admin_api.clone());
+    assert_eq!(admin_api.counts().get_admin_dataset, 1);
     assert!(harness.query_by_label("Dataset Admin").is_some());
 }
 
@@ -81,14 +84,11 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     harness.step();
     click_accesskit_button(&mut harness, "Add browser prelabel config");
     harness.step();
-    click_accesskit_button(&mut harness, "Add role assignment");
-    harness.step();
-
     let config = harness.state().datasets.admin_config.as_ref().unwrap();
     assert_eq!(config.image_roots.len(), 2);
     assert_eq!(config.label_classes.len(), 3);
     assert_eq!(config.prelabel_configs.len(), 2);
-    assert_eq!(config.role_assignments.len(), 2);
+    assert_eq!(config.role_assignments.len(), 1);
     assert_eq!(config.tasks.len(), 3);
     assert!(config.tasks.iter().any(|task| {
         task.annotation_type == AnnotationType::BoundingBox
@@ -132,6 +132,158 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     click(&mut harness, "Annotate");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
+}
+
+#[test]
+fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    step_until(&mut harness, 12, |app| {
+        app.admin_tools.images.is_some() && app.admin_tools.snapshots_loaded
+    });
+    assert_eq!(api.counts().list_images, 1);
+    assert_eq!(api.counts().list_snapshots, 1);
+    assert!(harness.query_by_label("one.png").is_some());
+
+    harness.state_mut().admin_tools.image_query.page_size = 1;
+    harness.state_mut().admin_tools.image_search = "png".to_string();
+    harness.state_mut().admin_tools.image_status = Some(TaskStatus::Pending);
+    harness.state_mut().admin_tools.image_task = Some(TaskId::from("bounding_box:person"));
+    harness.state_mut().admin_tools.image_class = Some(ClassId::from("person"));
+    harness.state_mut().request_images();
+    step_until(&mut harness, 8, |app| {
+        app.admin_tools
+            .images
+            .as_ref()
+            .is_some_and(|page| page.page_size == 1)
+    });
+    assert_eq!(api.counts().list_images, 2);
+    let query = api.last_image_query().unwrap();
+    assert_eq!(query.search.as_deref(), Some("png"));
+    assert_eq!(query.status, Some(TaskStatus::Pending));
+    assert_eq!(query.task_id, Some(TaskId::from("bounding_box:person")));
+    assert_eq!(query.class_id, Some(ClassId::from("person")));
+
+    click(&mut harness, "Next images");
+    step_until(&mut harness, 8, |app| {
+        app.admin_tools
+            .images
+            .as_ref()
+            .is_some_and(|page| page.page == 2)
+    });
+    assert_eq!(api.last_image_query().unwrap().page, 2);
+
+    click(&mut harness, "Backups / Snapshots");
+    click(&mut harness, "Create snapshot");
+    step_until(&mut harness, 8, |app| !app.loading.creating_snapshot);
+    assert_eq!(api.counts().create_snapshot, 1);
+    assert!(harness.query_by_label("snapshot-test").is_some());
+
+    click(&mut harness, "Download");
+    step_until(&mut harness, 8, |app| app.loading.snapshot_file.is_none());
+    assert_eq!(api.counts().get_snapshot_file, 1);
+    assert!(
+        harness
+            .state()
+            .admin_tools
+            .snapshots_error
+            .as_deref()
+            .is_some_and(|error| error.contains("browser build"))
+    );
+    assert!(harness.state().runtime.error.is_none());
+}
+
+#[test]
+fn session_is_restored_before_datasets_load_and_logout_clears_it() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api.clone());
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert_eq!(api.counts().me, 1);
+    assert_eq!(api.counts().list_datasets, 1);
+    assert_eq!(
+        harness
+            .state()
+            .auth
+            .account
+            .as_ref()
+            .map(|account| account.user_id.clone()),
+        Some(UserId::from("admin"))
+    );
+    click(&mut harness, "Sign out");
+    step_until(&mut harness, 8, |app| app.auth.account.is_none());
+    assert_eq!(api.counts().logout, 1);
+    assert!(harness.state().datasets.summaries.is_empty());
+}
+
+#[test]
+fn signed_out_session_auth_hides_raw_credentials_and_offers_github() {
+    let api = Rc::new(SpyApi::new());
+    api.fail_me();
+    let mut app = base_live_app(api);
+    app.setup.dev_auth = false;
+    app.config.dev_token.clear();
+    app.auth.checked = false;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 780.0))
+        .with_max_steps(20)
+        .build_eframe(|_| app);
+    step_until(&mut harness, 8, |app| app.auth.checked);
+
+    assert!(harness.query_by_label("Sign in with GitHub").is_some());
+    assert!(harness.query_by_label("Dev token").is_none());
+    assert!(harness.query_by_label("Development user ID").is_none());
+}
+
+#[test]
+fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    harness.set_size(egui::vec2(1300.0, 1800.0));
+    harness.step();
+
+    assert!(harness.query_by_label("People").is_some());
+    assert!(harness.query_by_label("Reviewer Person").is_some());
+    let reviewer = harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap();
+    reviewer.roles.push(DatasetRole::Reviewer);
+    harness
+        .state_mut()
+        .request_role_save(UserId::from("reviewer"));
+    step_until(&mut harness, 8, |app| app.loading.roles_user.is_none());
+    assert_eq!(api.counts().set_dataset_roles, 1);
+    assert!(
+        api.dataset_users()
+            .iter()
+            .find(|user| user.account.user_id == UserId::from("reviewer"))
+            .unwrap()
+            .roles
+            .contains(&DatasetRole::Reviewer)
+    );
+
+    let admin = harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("admin"))
+        .unwrap();
+    admin.roles.retain(|role| role != &DatasetRole::DataAdmin);
+    harness.state_mut().request_role_save(UserId::from("admin"));
+    assert_eq!(api.counts().set_dataset_roles, 1);
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("own data admin"))
+    );
 }
 
 #[test]
@@ -399,6 +551,70 @@ fn save_keeps_the_same_assignment_active() {
     );
     assert_eq!(api.counts().complete_assignment, 0);
     assert_eq!(api.counts().assign_next_image, 1);
+}
+
+#[test]
+fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+
+    click(&mut harness, "Accept");
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(api.counts().append_event, 0);
+    assert!(harness.query_by_label("Undo").is_some());
+
+    harness.state_mut().undo();
+    assert!(harness.state().annotations.is_empty());
+    harness.state_mut().redo();
+    assert_eq!(harness.state().annotations.len(), 1);
+
+    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().autosave_if_due();
+    assert_eq!(harness.state().save_status, SaveStatus::Saving);
+    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    assert_eq!(api.counts().append_event, 1);
+
+    harness.state_mut().autosave();
+    for _ in 0..3 {
+        harness.step();
+    }
+    assert_eq!(api.counts().append_event, 1);
+
+    harness.state_mut().undo();
+    assert!(
+        harness
+            .state()
+            .annotations
+            .iter()
+            .all(|annotation| annotation.deleted)
+    );
+    harness.state_mut().redo();
+    assert_eq!(
+        harness
+            .state()
+            .annotations
+            .iter()
+            .filter(|annotation| !annotation.deleted)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn setup_recommends_a_single_continue_work_action() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Continue Work")
+            .count(),
+        1
+    );
+    click(&mut harness, "Continue Work");
+    step_until(&mut harness, 12, |app| app.current.is_some());
+    assert_eq!(harness.state().view, AppView::Annotate);
 }
 
 #[test]
@@ -692,7 +908,7 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
     });
 
     assert!(api.counts().append_event >= 1);
-    assert!(api.counts().rebuild_image >= 1);
+    assert_eq!(api.counts().complete_assignment, 1);
     assert_ne!(
         harness.state().current.as_ref().unwrap().image.image_id,
         original_image
@@ -776,6 +992,64 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
             .all(|keypoint| keypoint.point.is_some())
     );
     assert!(harness.state().active_skeleton.is_none());
+}
+
+#[test]
+fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().create_bbox(BoundingBox {
+        x: 0.1,
+        y: 0.1,
+        width: 0.2,
+        height: 0.2,
+    });
+    let annotation_id = harness.state().annotations[0].annotation_id.clone();
+    harness.state_mut().edit_bbox(BoundingBoxEdit {
+        annotation_id: annotation_id.clone(),
+        bounding_box: BoundingBox {
+            x: 0.3,
+            y: 0.25,
+            width: 0.4,
+            height: 0.35,
+        },
+    });
+    harness.state_mut().undo();
+    assert!(matches!(
+        harness.state().annotations[0].geometry,
+        AnnotationGeometry::BoundingBox(BoundingBox { x, .. }) if (x - 0.1).abs() < f32::EPSILON
+    ));
+
+    harness.state_mut().selected_annotation = Some(annotation_id);
+    harness.key_press(egui::Key::Delete);
+    harness.step();
+    assert!(harness.state().annotations[0].deleted);
+    harness.state_mut().undo();
+    assert!(!harness.state().annotations[0].deleted);
+
+    let api = Rc::new(SpyApi::new());
+    api.state.borrow_mut().metadata.tasks[0].annotation_type = AnnotationType::Skeleton;
+    api.state.borrow_mut().metadata.tasks[0]
+        .prelabel_config_ids
+        .clear();
+    api.state.borrow_mut().metadata.tasks[0].skeleton = Some(SkeletonSpec {
+        keypoints: vec![KeypointSpec {
+            name: "center".to_string(),
+            required: true,
+        }],
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: false,
+    });
+    let mut harness = loaded_work_harness(api);
+    harness
+        .state_mut()
+        .place_keypoint(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
+    assert_eq!(harness.state().annotations.len(), 1);
+    harness.state_mut().undo();
+    assert!(harness.state().annotations.is_empty());
+    harness.state_mut().redo();
+    assert_eq!(harness.state().annotations.len(), 1);
 }
 
 #[test]
@@ -1023,10 +1297,24 @@ impl SpyApi {
     fn set_summary_roles(&self, roles: Vec<DatasetRole>) {
         self.state.borrow_mut().summary_roles = roles;
     }
+
+    fn fail_me(&self) {
+        self.state.borrow_mut().fail_me = true;
+    }
+
+    fn dataset_users(&self) -> Vec<DatasetUser> {
+        self.state.borrow().users.clone()
+    }
+
+    fn last_image_query(&self) -> Option<ImageExplorerQuery> {
+        self.state.borrow().last_image_query.clone()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CallCounts {
+    me: usize,
+    logout: usize,
     list_datasets: usize,
     create_dataset: usize,
     get_dataset: usize,
@@ -1047,6 +1335,12 @@ struct CallCounts {
     get_keybindings: usize,
     save_keybindings: usize,
     prelabel_suggestions: usize,
+    list_dataset_users: usize,
+    set_dataset_roles: usize,
+    list_images: usize,
+    list_snapshots: usize,
+    create_snapshot: usize,
+    get_snapshot_file: usize,
 }
 
 struct SpyState {
@@ -1059,6 +1353,10 @@ struct SpyState {
     no_assignment: bool,
     active_assignment: Option<Assignment>,
     summary_roles: Vec<DatasetRole>,
+    users: Vec<DatasetUser>,
+    fail_me: bool,
+    last_image_query: Option<ImageExplorerQuery>,
+    snapshots: Vec<DatasetSnapshot>,
 }
 
 impl SpyState {
@@ -1110,6 +1408,36 @@ impl SpyState {
             .map(|image| (image.image_id.clone(), ImageState::new(image.image_id)))
             .collect();
 
+        let timestamp = now();
+        let users = vec![
+            DatasetUser {
+                account: UserAccount {
+                    user_id: UserId::from("admin"),
+                    display_name: "Admin User".to_string(),
+                    github_user_id: Some("1".to_string()),
+                    github_login: Some("admin".to_string()),
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                },
+                roles: vec![
+                    DatasetRole::DataAdmin,
+                    DatasetRole::Annotator,
+                    DatasetRole::Reviewer,
+                    DatasetRole::Adjudicator,
+                ],
+            },
+            DatasetUser {
+                account: UserAccount {
+                    user_id: UserId::from("reviewer"),
+                    display_name: "Reviewer Person".to_string(),
+                    github_user_id: Some("2".to_string()),
+                    github_login: Some("review-person".to_string()),
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                },
+                roles: Vec::new(),
+            },
+        ];
         Self {
             metadata,
             states,
@@ -1125,6 +1453,10 @@ impl SpyState {
                 DatasetRole::Reviewer,
                 DatasetRole::Adjudicator,
             ],
+            users,
+            fail_me: false,
+            last_image_query: None,
+            snapshots: Vec::new(),
         }
     }
 
@@ -1240,6 +1572,37 @@ impl DatasetApi for SpyApi {
             error: None,
         }))
     }
+
+    fn create_snapshot<'a>(&'a self, dataset_id: &'a DatasetId) -> ApiFuture<'a, DatasetSnapshot> {
+        let mut state = self.state.borrow_mut();
+        state.counts.create_snapshot += 1;
+        let snapshot = test_snapshot(dataset_id.clone());
+        state.snapshots.insert(0, snapshot.clone());
+        ready(Ok(snapshot))
+    }
+
+    fn list_snapshots<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, Vec<DatasetSnapshot>> {
+        let mut state = self.state.borrow_mut();
+        state.counts.list_snapshots += 1;
+        ready(Ok(state.snapshots.clone()))
+    }
+
+    fn get_snapshot_file<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _snapshot_id: &'a str,
+        path: &'a str,
+    ) -> ApiFuture<'a, SnapshotFile> {
+        self.state.borrow_mut().counts.get_snapshot_file += 1;
+        ready(Ok(SnapshotFile {
+            file_name: path.to_string(),
+            media_type: "application/json".to_string(),
+            bytes: br#"{"snapshotId":"snapshot-test"}"#.to_vec(),
+        }))
+    }
 }
 
 impl TaskApi for SpyApi {
@@ -1257,6 +1620,65 @@ impl TaskApi for SpyApi {
 }
 
 impl ImageApi for SpyApi {
+    fn list_images<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        query: ImageExplorerQuery,
+    ) -> ApiFuture<'a, ImageExplorerPage> {
+        let mut state = self.state.borrow_mut();
+        state.counts.list_images += 1;
+        state.last_image_query = Some(query.clone());
+        let mut items = state
+            .metadata
+            .images
+            .values()
+            .cloned()
+            .map(|image| ImageExplorerItem {
+                image,
+                task_statuses: BTreeMap::from([(
+                    TaskId::from("bounding_box:person"),
+                    TaskStatus::Pending,
+                )]),
+                class_ids: BTreeSet::from([ClassId::from("person")]),
+            })
+            .filter(|item| {
+                query.search.as_ref().is_none_or(|search| {
+                    item.image.file_name.contains(search)
+                        || item.image.canonical_path.contains(search)
+                }) && query.status.as_ref().is_none_or(|status| {
+                    item.task_statuses
+                        .values()
+                        .any(|existing| existing == status)
+                }) && query
+                    .task_id
+                    .as_ref()
+                    .is_none_or(|task_id| item.task_statuses.contains_key(task_id))
+                    && query
+                        .class_id
+                        .as_ref()
+                        .is_none_or(|class_id| item.class_ids.contains(class_id))
+            })
+            .collect::<Vec<_>>();
+        let total_items = items.len();
+        let page_size = query.page_size.max(1);
+        let total_pages = total_items.div_ceil(page_size);
+        let start = query.page.saturating_sub(1) * page_size;
+        let items = if start < items.len() {
+            items
+                .drain(start..items.len().min(start + page_size))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        ready(Ok(ImageExplorerPage {
+            items,
+            page: query.page,
+            page_size,
+            total_items,
+            total_pages,
+        }))
+    }
+
     fn assign_next_image<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,
@@ -1289,6 +1711,7 @@ impl ImageApi for SpyApi {
             assigned_to: UserId::from("admin"),
             kind,
             status: AssignmentStatus::Active,
+            expires_at: None,
             created_at: now(),
             updated_at: now(),
         };
@@ -1721,6 +2144,51 @@ impl AuthApi for SpyApi {
             updated_at: now(),
         }))
     }
+
+    fn me<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+        let mut state = self.state.borrow_mut();
+        state.counts.me += 1;
+        if state.fail_me {
+            ready(Err(ClientError::Api {
+                status: 401,
+                message: "login required".to_string(),
+            }))
+        } else {
+            ready(Ok(state.users[0].account.clone()))
+        }
+    }
+
+    fn logout<'a>(&'a self) -> ApiFuture<'a, ()> {
+        self.state.borrow_mut().counts.logout += 1;
+        ready(Ok(()))
+    }
+}
+
+impl UserApi for SpyApi {
+    fn list_dataset_users<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, Vec<DatasetUser>> {
+        let mut state = self.state.borrow_mut();
+        state.counts.list_dataset_users += 1;
+        ready(Ok(state.users.clone()))
+    }
+
+    fn set_dataset_roles<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        request: SetDatasetRolesRequest,
+    ) -> ApiFuture<'a, DatasetUser> {
+        let mut state = self.state.borrow_mut();
+        state.counts.set_dataset_roles += 1;
+        let user = state
+            .users
+            .iter_mut()
+            .find(|user| user.account.user_id == request.user_id)
+            .unwrap();
+        user.roles = request.roles;
+        ready(Ok(user.clone()))
+    }
 }
 
 fn ready<'a, T: 'a>(result: ClientResult<T>) -> ApiFuture<'a, T> {
@@ -1747,6 +2215,22 @@ fn image_record(image_id: &str, file_name: &str, width: u32, height: u32) -> Ima
         width,
         height,
         media_type: "image/png".to_string(),
+    }
+}
+
+fn test_snapshot(dataset_id: DatasetId) -> DatasetSnapshot {
+    DatasetSnapshot {
+        schema_version: SCHEMA_VERSION,
+        snapshot_id: "snapshot-test".to_string(),
+        dataset_id,
+        created_at: now(),
+        includes_image_bytes: false,
+        total_bytes: 32,
+        files: vec![SnapshotFileEntry {
+            path: "snapshot.json".to_string(),
+            byte_size: 32,
+            blake3: "snapshot-hash".to_string(),
+        }],
     }
 }
 

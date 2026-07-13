@@ -1,17 +1,18 @@
 use std::{future::Future, pin::Pin};
 
 use labello_domain::{
-    AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    EventPayload, ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle,
-    OfflineSyncRequest, OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord,
-    TaskDefinition, UserAccount, UserId,
+    AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetSnapshot, DatasetStats,
+    EventLogEntry, EventPayload, ImageExplorerPage, ImageId, ImageRecord, ImageState,
+    KeybindingSet, OfflineBundle, OfflineSyncRequest, OfflineSyncResult, PrelabelConfig,
+    PrelabelSuggestion, ReviewRecord, TaskDefinition, UserAccount, UserId,
 };
 
 use crate::{
     AppendEventRequest, AssignNextRequest, AssignmentActionRequest, ClientError, ClientResult,
-    CorrectionRequest, CreateDatasetRequest, DatasetSummary, ImageFile, ImagePreview, IngestJob,
-    IngestReport, OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest,
-    PrelabelSuggestionRequest, UpdateDatasetConfigRequest,
+    CorrectionRequest, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery,
+    ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
+    OfflineBundleRequest, PrelabelSuggestionRequest, SetDatasetRolesRequest,
+    UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -37,6 +38,35 @@ pub trait DatasetApi {
         dataset_id: &'a DatasetId,
         job_id: &'a str,
     ) -> ApiFuture<'a, IngestJob>;
+    fn create_snapshot<'a>(&'a self, _dataset_id: &'a DatasetId) -> ApiFuture<'a, DatasetSnapshot> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "snapshots are not implemented by this client".to_string(),
+            ))
+        })
+    }
+    fn list_snapshots<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, Vec<DatasetSnapshot>> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "snapshots are not implemented by this client".to_string(),
+            ))
+        })
+    }
+    fn get_snapshot_file<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _snapshot_id: &'a str,
+        _path: &'a str,
+    ) -> ApiFuture<'a, crate::SnapshotFile> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "snapshot downloads are not implemented by this client".to_string(),
+            ))
+        })
+    }
 }
 
 pub trait TaskApi {
@@ -49,6 +79,17 @@ pub trait TaskApi {
 }
 
 pub trait ImageApi {
+    fn list_images<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _query: ImageExplorerQuery,
+    ) -> ApiFuture<'a, ImageExplorerPage> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "image explorer is not implemented by this client".to_string(),
+            ))
+        })
+    }
     fn assign_next_image<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -249,6 +290,28 @@ pub trait PrelabelApi {
 pub trait AuthApi {
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String>;
     fn github_callback<'a>(&'a self, request: OAuthCallbackRequest) -> ApiFuture<'a, UserAccount>;
+    fn me<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "current session lookup is not implemented by this client".to_string(),
+            ))
+        })
+    }
+    fn logout<'a>(&'a self) -> ApiFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub trait UserApi {
+    fn list_dataset_users<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> ApiFuture<'a, Vec<DatasetUser>>;
+    fn set_dataset_roles<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: SetDatasetRolesRequest,
+    ) -> ApiFuture<'a, DatasetUser>;
 }
 
 pub trait LabelloApi:
@@ -263,6 +326,7 @@ pub trait LabelloApi:
     + KeybindingApi
     + PrelabelApi
     + AuthApi
+    + UserApi
 {
 }
 
@@ -278,5 +342,6 @@ impl<T> LabelloApi for T where
         + KeybindingApi
         + PrelabelApi
         + AuthApi
+        + UserApi
 {
 }

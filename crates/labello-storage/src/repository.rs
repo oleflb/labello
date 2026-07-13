@@ -5,8 +5,9 @@ use std::{
 };
 
 use labello_domain::{
-    Actor, DatasetConfig, DatasetMetadata, EventLogEntry, EventPayload, ImageId, ImageRecord,
-    ImageState, ImagesIndex, SCHEMA_VERSION, labello_schema_bundle, now, rebuild_state,
+    Actor, DatasetConfig, DatasetMetadata, DatasetSnapshot, EventLogEntry, EventPayload, ImageId,
+    ImageRecord, ImageState, ImagesIndex, SCHEMA_VERSION, SnapshotFileEntry, labello_schema_bundle,
+    now, rebuild_state,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -19,12 +20,14 @@ use crate::{
     fsjson::{read_json, write_json_atomic},
     fstoml::{read_toml, write_toml_atomic},
     paths,
+    stats::StatsCache,
 };
 
 #[derive(Clone, Debug)]
 pub struct DatasetRepository {
     root: Arc<PathBuf>,
     locks: Arc<Mutex<BTreeMap<ImageId, Arc<AsyncMutex<()>>>>>,
+    pub(crate) stats_cache: Arc<StatsCache>,
 }
 
 impl DatasetRepository {
@@ -32,6 +35,7 @@ impl DatasetRepository {
         Self {
             root: Arc::new(root.into()),
             locks: Arc::new(Mutex::new(BTreeMap::new())),
+            stats_cache: Arc::new(StatsCache::default()),
         }
     }
 
@@ -63,6 +67,173 @@ impl DatasetRepository {
 
     pub fn events_path(&self, image_id: &ImageId) -> PathBuf {
         self.annotations_dir(image_id).join(paths::EVENTS_FILE)
+    }
+
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.root.join(paths::SNAPSHOTS_DIR)
+    }
+
+    pub async fn create_snapshot(&self) -> StorageResult<DatasetSnapshot> {
+        let config = self.load_dataset_config().await?;
+        let index = self.load_images_index().await?;
+        let snapshot_id = format!(
+            "{}-{}",
+            now().format("%Y%m%dT%H%M%S%.3fZ"),
+            uuid::Uuid::new_v4().simple()
+        );
+        let snapshots_dir = self.snapshots_dir();
+        let temporary = snapshots_dir.join(format!(".{snapshot_id}.tmp"));
+        let destination = snapshots_dir.join(&snapshot_id);
+        tokio::fs::create_dir_all(&temporary)
+            .await
+            .with_path(&temporary)?;
+
+        let result = async {
+            let mut files = Vec::new();
+            self.snapshot_copy_file(paths::DATASET_FILE, &temporary, &mut files)
+                .await?;
+            self.snapshot_copy_file(paths::IMAGES_INDEX_FILE, &temporary, &mut files)
+                .await?;
+            if tokio::fs::try_exists(self.schema_path())
+                .await
+                .with_path(self.schema_path())?
+            {
+                self.snapshot_copy_file(paths::SCHEMA_FILE, &temporary, &mut files)
+                    .await?;
+            }
+            for image in index.images_by_hash.values() {
+                let events = self.load_events(&image.image_id).await?;
+                let events_text = events
+                    .iter()
+                    .map(serde_json::to_string)
+                    .collect::<Result<Vec<_>, _>>()
+                    .with_json_path(self.events_path(&image.image_id))?
+                    .join("\n");
+                let events_text = if events_text.is_empty() {
+                    String::new()
+                } else {
+                    format!("{events_text}\n")
+                };
+                let relative = format!(
+                    "{}/{}/{}",
+                    paths::ANNOTATIONS_DIR,
+                    image.image_id,
+                    paths::EVENTS_FILE
+                );
+                write_snapshot_bytes(&temporary, &relative, events_text.as_bytes(), &mut files)
+                    .await?;
+
+                let state = rebuild_state(image.image_id.clone(), &events)?;
+                let state_bytes = serde_json::to_vec_pretty(&state)
+                    .with_json_path(self.state_path(&image.image_id))?;
+                let relative = format!(
+                    "{}/{}/{}",
+                    paths::ANNOTATIONS_DIR,
+                    image.image_id,
+                    paths::STATE_FILE
+                );
+                write_snapshot_bytes(&temporary, &relative, &state_bytes, &mut files).await?;
+            }
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+            let manifest = DatasetSnapshot {
+                schema_version: SCHEMA_VERSION,
+                snapshot_id: snapshot_id.clone(),
+                dataset_id: config.dataset_id,
+                created_at: now(),
+                includes_image_bytes: false,
+                total_bytes: files.iter().map(|file| file.byte_size).sum(),
+                files,
+            };
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .with_json_path(temporary.join(paths::SNAPSHOT_MANIFEST_FILE))?;
+            write_snapshot_bytes(
+                &temporary,
+                paths::SNAPSHOT_MANIFEST_FILE,
+                &manifest_bytes,
+                &mut Vec::new(),
+            )
+            .await?;
+            tokio::fs::rename(&temporary, &destination)
+                .await
+                .with_path(&destination)?;
+            Ok(manifest)
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_dir_all(&temporary).await;
+        }
+        result
+    }
+
+    pub async fn list_snapshots(&self) -> StorageResult<Vec<DatasetSnapshot>> {
+        let directory = self.snapshots_dir();
+        if !tokio::fs::try_exists(&directory)
+            .await
+            .with_path(&directory)?
+        {
+            return Ok(Vec::new());
+        }
+        let mut entries = tokio::fs::read_dir(&directory)
+            .await
+            .with_path(&directory)?;
+        let mut snapshots: Vec<DatasetSnapshot> = Vec::new();
+        while let Some(entry) = entries.next_entry().await.with_path(&directory)? {
+            if !entry.file_type().await.with_path(entry.path())?.is_dir()
+                || entry.file_name().to_string_lossy().starts_with('.')
+            {
+                continue;
+            }
+            let manifest_path = entry.path().join(paths::SNAPSHOT_MANIFEST_FILE);
+            if tokio::fs::try_exists(&manifest_path)
+                .await
+                .with_path(&manifest_path)?
+            {
+                snapshots.push(read_json(&manifest_path).await?);
+            }
+        }
+        snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.created_at));
+        Ok(snapshots)
+    }
+
+    pub async fn snapshot_file(
+        &self,
+        snapshot_id: &str,
+        relative_path: &str,
+    ) -> StorageResult<Vec<u8>> {
+        validate_snapshot_segment(snapshot_id)?;
+        let relative = Path::new(relative_path);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(StorageError::OutsideDatasetRoot(relative.to_path_buf()));
+        }
+        let snapshot = self.snapshots_dir().join(snapshot_id);
+        let manifest: DatasetSnapshot =
+            read_json(&snapshot.join(paths::SNAPSHOT_MANIFEST_FILE)).await?;
+        if relative_path != paths::SNAPSHOT_MANIFEST_FILE
+            && !manifest.files.iter().any(|file| file.path == relative_path)
+        {
+            return Err(StorageError::NotFound(snapshot.join(relative)));
+        }
+        let path = snapshot.join(relative);
+        tokio::fs::read(&path).await.with_path(path)
+    }
+
+    async fn snapshot_copy_file(
+        &self,
+        relative_path: &str,
+        destination: &Path,
+        files: &mut Vec<SnapshotFileEntry>,
+    ) -> StorageResult<()> {
+        let source = self.root.join(relative_path);
+        let bytes = tokio::fs::read(&source).await.with_path(&source)?;
+        write_snapshot_bytes(destination, relative_path, &bytes, files).await
     }
 
     pub fn image_path(&self, relative_path: &str) -> StorageResult<PathBuf> {
@@ -156,7 +327,9 @@ impl DatasetRepository {
             &self.dataset_path(),
             &DatasetConfig::from_metadata(metadata),
         )
-        .await
+        .await?;
+        self.stats_cache.invalidate();
+        Ok(())
     }
 
     pub async fn load_images_index(&self) -> StorageResult<ImagesIndex> {
@@ -197,7 +370,9 @@ impl DatasetRepository {
         labello_domain::validate_schema_version(index.schema_version)?;
         let mut index = index.clone();
         index.image_count = index.images_by_hash.len();
-        write_json_atomic(&self.images_index_path(), &index).await
+        write_json_atomic(&self.images_index_path(), &index).await?;
+        self.stats_cache.invalidate();
+        Ok(())
     }
 
     async fn read_image_count_hint(&self) -> StorageResult<Option<usize>> {
@@ -225,6 +400,7 @@ impl DatasetRepository {
         let events = self.load_events(image_id).await?;
         let state = rebuild_state(image_id.clone(), &events)?;
         write_json_atomic(&self.state_path(image_id), &state).await?;
+        self.stats_cache.invalidate();
         Ok(state)
     }
 
@@ -279,6 +455,7 @@ impl DatasetRepository {
             self.append_event_line(event).await?;
         }
         write_json_atomic(&self.state_path(image_id), &next_state).await?;
+        self.stats_cache.invalidate();
         Ok(events)
     }
 
@@ -302,6 +479,7 @@ impl DatasetRepository {
         }
         *state = next_state;
         write_json_atomic(&self.state_path(image_id), state).await?;
+        self.stats_cache.invalidate();
         Ok(events.len())
     }
 
@@ -328,6 +506,38 @@ impl DatasetRepository {
         file.write_all(line.as_bytes()).await.with_path(&path)?;
         file.write_all(b"\n").await.with_path(&path)?;
         file.flush().await.with_path(&path)?;
+        Ok(())
+    }
+}
+
+async fn write_snapshot_bytes(
+    root: &Path,
+    relative_path: &str,
+    bytes: &[u8],
+    files: &mut Vec<SnapshotFileEntry>,
+) -> StorageResult<()> {
+    let path = root.join(relative_path);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.with_path(parent)?;
+    }
+    tokio::fs::write(&path, bytes).await.with_path(&path)?;
+    files.push(SnapshotFileEntry {
+        path: relative_path.to_string(),
+        byte_size: bytes.len() as u64,
+        blake3: blake3::hash(bytes).to_hex().to_string(),
+    });
+    Ok(())
+}
+
+fn validate_snapshot_segment(value: &str) -> StorageResult<()> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+    {
+        Err(StorageError::OutsideDatasetRoot(PathBuf::from(value)))
+    } else {
         Ok(())
     }
 }

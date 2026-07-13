@@ -54,6 +54,9 @@ pub enum StorageError {
 
     #[error("assignment conflict: {0}")]
     AssignmentConflict(String),
+
+    #[error("background storage task failed: {0}")]
+    BackgroundTask(String),
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;

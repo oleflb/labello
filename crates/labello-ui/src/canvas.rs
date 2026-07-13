@@ -15,9 +15,11 @@ const ZOOM_STEP: f32 = 1.25;
 const MIN_BOX_SIZE: f32 = 0.001;
 const HANDLE_HIT_RADIUS: f32 = 12.0;
 const HANDLE_SIZE: f32 = 8.0;
-const CONTROL_BAR_HEIGHT: f32 = 52.0;
-const CONTROL_HEIGHT: f32 = 30.0;
+const CONTROL_BAR_HEIGHT: f32 = 40.0;
+const CONTROL_HEIGHT: f32 = 28.0;
 const CONTROL_GAP: f32 = 4.0;
+const FOCUS_MARGIN: f32 = 1.35;
+const MIN_FOCUS_SPAN: f32 = 0.04;
 const DOUBLE_CLICK_DELAY: f64 = 0.3;
 const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 
@@ -49,6 +51,8 @@ pub struct CanvasState {
     pan: Vec2,
     space_pan: bool,
     last_canvas_click: Option<(f64, Pos2)>,
+    review_target: ReviewViewTarget,
+    pending_review_view: Option<Option<Rect>>,
 }
 
 impl Default for CanvasState {
@@ -60,8 +64,18 @@ impl Default for CanvasState {
             pan: Vec2::ZERO,
             space_pan: false,
             last_canvas_click: None,
+            review_target: ReviewViewTarget::Disabled,
+            pending_review_view: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum ReviewViewTarget {
+    #[default]
+    Disabled,
+    FullImage,
+    Annotation(AnnotationId),
 }
 
 impl CanvasState {
@@ -93,6 +107,25 @@ impl CanvasState {
         self.pan = Vec2::ZERO;
     }
 
+    /// Focus a review object once when it becomes active, or fit the full image
+    /// when object-by-object review is complete.
+    pub fn set_review_focus(&mut self, annotation: Option<&AnnotationVersion>) {
+        let target = annotation.map_or(ReviewViewTarget::FullImage, |annotation| {
+            ReviewViewTarget::Annotation(annotation.annotation_id.clone())
+        });
+        if self.review_target == target {
+            return;
+        }
+        self.review_target = target;
+        self.pending_review_view = Some(annotation.and_then(annotation_focus_rect));
+    }
+
+    /// Stop tracking review targets without changing the current view.
+    pub fn clear_review_focus(&mut self) {
+        self.review_target = ReviewViewTarget::Disabled;
+        self.pending_review_view = None;
+    }
+
     /// Backward-compatible alias for [`Self::current_zoom`].
     pub fn zoom(&self) -> f32 {
         self.current_zoom()
@@ -100,7 +133,21 @@ impl CanvasState {
 
     fn clamp_to_viewport(&mut self, viewport: Rect, fitted_image: Rect) {
         self.zoom = finite_or(self.zoom, MIN_ZOOM).clamp(MIN_ZOOM, MAX_ZOOM);
+        if self.zoom == MIN_ZOOM {
+            self.pan = Vec2::ZERO;
+        }
         self.pan = clamp_pan(viewport, fitted_image, self.zoom, self.pan);
+    }
+
+    fn apply_pending_review_view(&mut self, viewport: Rect, fitted_image: Rect) {
+        let Some(target) = self.pending_review_view.take() else {
+            return;
+        };
+        if let Some(target) = target {
+            fit_normalized_rect(self, viewport, fitted_image, target);
+        } else {
+            self.fit_view();
+        }
     }
 }
 
@@ -200,6 +247,7 @@ pub fn show_canvas_interactive(
     );
     let fitted_image = fitted_image_rect(interaction_rect, image_size);
     state.clamp_to_viewport(interaction_rect, fitted_image);
+    state.apply_pending_review_view(interaction_rect, fitted_image);
     let response = ui.interact(
         interaction_rect,
         ui.id().with("annotation_canvas"),
@@ -555,11 +603,14 @@ fn handle_view_gestures(
     let pointer = response.hover_pos();
     let multi_touch = ui.input(|input| input.multi_touch());
     if let Some(touch) = multi_touch.filter(|touch| interaction_rect.contains(touch.center_pos)) {
+        // Scale around the previous touch center, then apply this frame's translation.
+        // Using the new center for both operations applies translation twice as visible drift.
+        let previous_center = touch.center_pos - touch.translation_delta;
         set_zoom_around(
             state,
             viewport,
             fitted_image,
-            touch.center_pos,
+            previous_center,
             state.zoom * touch.zoom_delta,
         );
         state.pan += touch.translation_delta;
@@ -854,6 +905,52 @@ fn bbox_to_screen_rect(image_rect: Rect, bbox: BoundingBox) -> Rect {
     )
 }
 
+fn annotation_focus_rect(annotation: &AnnotationVersion) -> Option<Rect> {
+    match &annotation.geometry {
+        AnnotationGeometry::BoundingBox(bbox) => {
+            let bbox = clamp_bbox(*bbox);
+            Some(Rect::from_min_max(
+                pos2(bbox.x, bbox.y),
+                pos2(bbox.x + bbox.width, bbox.y + bbox.height),
+            ))
+        }
+        AnnotationGeometry::Skeleton(skeleton) => {
+            let mut points = skeleton
+                .keypoints
+                .iter()
+                .filter_map(|keypoint| keypoint.point)
+                .map(|point| pos2(point.x, point.y));
+            let first = points.next()?;
+            Some(
+                points.fold(Rect::from_min_max(first, first), |rect, point| {
+                    rect.union(Rect::from_min_max(point, point))
+                }),
+            )
+        }
+    }
+}
+
+fn fit_normalized_rect(state: &mut CanvasState, viewport: Rect, fitted_image: Rect, target: Rect) {
+    let target_size = target
+        .size()
+        .max(Vec2::splat(MIN_FOCUS_SPAN))
+        .min(Vec2::splat(1.0));
+    let zoom = (viewport.width() / (fitted_image.width() * target_size.x * FOCUS_MARGIN))
+        .min(viewport.height() / (fitted_image.height() * target_size.y * FOCUS_MARGIN))
+        .clamp(MIN_ZOOM, MAX_ZOOM);
+    let target_center = pos2(
+        finite_or(target.center().x, 0.5).clamp(0.0, 1.0),
+        finite_or(target.center().y, 0.5).clamp(0.0, 1.0),
+    );
+    state.zoom = zoom;
+    state.pan = viewport.center()
+        - normalized_to_screen(
+            Rect::from_center_size(fitted_image.center(), fitted_image.size() * zoom),
+            target_center,
+        );
+    state.clamp_to_viewport(viewport, fitted_image);
+}
+
 fn set_zoom_around(
     state: &mut CanvasState,
     viewport: Rect,
@@ -861,14 +958,15 @@ fn set_zoom_around(
     focus: Pos2,
     requested_zoom: f32,
 ) {
-    let old_rect = transformed_image_rect(fitted_image, state.zoom, state.pan);
-    let anchor = screen_to_normalized(old_rect, focus);
+    state.clamp_to_viewport(viewport, fitted_image);
+    let old_zoom = state.zoom;
+    let old_center = fitted_image.center() + state.pan;
     let zoom = finite_or(requested_zoom, state.zoom).clamp(MIN_ZOOM, MAX_ZOOM);
-    let scaled_size = fitted_image.size() * zoom;
-    let centered = Rect::from_center_size(fitted_image.center(), scaled_size);
-    let desired_min = focus - (scaled_size * anchor.to_vec2());
+    if zoom == old_zoom {
+        return;
+    }
     state.zoom = zoom;
-    state.pan = desired_min - centered.min;
+    state.pan = focus - fitted_image.center() - (focus - old_center) * (zoom / old_zoom);
     state.pan = clamp_pan(viewport, fitted_image, state.zoom, state.pan);
 }
 
@@ -1318,6 +1416,88 @@ mod tests {
 
         state.fit_view();
         assert_eq!(state.zoom(), 1.0);
+        assert_eq!(state.pan, Vec2::ZERO);
+    }
+
+    #[test]
+    fn first_centered_zoom_discards_stale_default_pan_without_drift() {
+        let viewport = Rect::from_min_size(pos2(100.0, 200.0), vec2(400.0, 200.0));
+        let fitted = fitted_image_rect(viewport, [400, 200]);
+        let mut state = CanvasState {
+            pan: vec2(80.0, -40.0),
+            ..Default::default()
+        };
+
+        set_zoom_around(&mut state, viewport, fitted, viewport.center(), 2.0);
+
+        assert_eq!(state.zoom, 2.0);
+        assert_eq!(state.pan, Vec2::ZERO);
+        assert_eq!(
+            transformed_image_rect(fitted, state.zoom, state.pan).center(),
+            viewport.center()
+        );
+    }
+
+    #[test]
+    fn pinch_zoom_uses_previous_center_before_translation() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+        let fitted = fitted_image_rect(viewport, [400, 200]);
+        let previous_center = pos2(160.0, 90.0);
+        let translation = vec2(25.0, 10.0);
+        let anchor = screen_to_normalized(fitted, previous_center);
+        let mut state = CanvasState::default();
+
+        set_zoom_around(&mut state, viewport, fitted, previous_center, 2.0);
+        state.pan += translation;
+        state.clamp_to_viewport(viewport, fitted);
+
+        let moved_anchor = normalized_to_screen(
+            transformed_image_rect(fitted, state.zoom, state.pan),
+            anchor,
+        );
+        assert!(moved_anchor.distance(previous_center + translation) < 0.000_01);
+    }
+
+    #[test]
+    fn review_object_focus_is_centered_with_margin_and_applied_once() {
+        let viewport = Rect::from_min_size(pos2(20.0, 30.0), vec2(600.0, 400.0));
+        let fitted = fitted_image_rect(viewport, [1200, 800]);
+        let target = Rect::from_min_max(pos2(0.4, 0.35), pos2(0.6, 0.65));
+        let mut state = CanvasState {
+            pending_review_view: Some(Some(target)),
+            ..Default::default()
+        };
+
+        state.apply_pending_review_view(viewport, fitted);
+        let image = transformed_image_rect(fitted, state.zoom, state.pan);
+        let focused = Rect::from_min_max(
+            normalized_to_screen(image, target.min),
+            normalized_to_screen(image, target.max),
+        );
+        assert!(focused.center().distance(viewport.center()) < 0.001);
+        assert!(focused.width() <= viewport.width() / FOCUS_MARGIN + 0.000_1);
+        assert!(focused.height() <= viewport.height() / FOCUS_MARGIN + 0.000_1);
+        assert!(state.zoom > MIN_ZOOM);
+
+        state.pan += vec2(5.0, 0.0);
+        state.apply_pending_review_view(viewport, fitted);
+        assert_eq!(state.pan.x, 5.0);
+    }
+
+    #[test]
+    fn full_image_review_target_restores_fit_view() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0));
+        let fitted = fitted_image_rect(viewport, [1200, 800]);
+        let mut state = CanvasState {
+            zoom: 4.0,
+            pan: vec2(75.0, -20.0),
+            pending_review_view: Some(None),
+            ..Default::default()
+        };
+
+        state.apply_pending_review_view(viewport, fitted);
+
+        assert_eq!(state.zoom, MIN_ZOOM);
         assert_eq!(state.pan, Vec2::ZERO);
     }
 

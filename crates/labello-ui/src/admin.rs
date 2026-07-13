@@ -5,7 +5,8 @@ use labello_domain::{
     AgreementMetric, AgreementThreshold, AnnotationType, BrowserAcceleration, ClassId,
     DatasetMetadata, DatasetRole, DatasetRoleAssignment, ImbalanceConfig, KeypointSpec, LabelClass,
     ModelSpec, OutputProcessing, PrelabelConfig, PrelabelConfigId, PrelabelExecution, ReviewConfig,
-    ReviewWorkflow, SkeletonEdge, SkeletonSpec, TaskDefinition, TaskId, TutorialContent, UserId,
+    ReviewWorkflow, SkeletonEdge, SkeletonSpec, TaskDefinition, TaskId, TaskStatus,
+    TutorialContent, UserId,
 };
 
 use crate::{app::LabelloApp, theme};
@@ -38,6 +39,9 @@ impl LabelloApp {
             self.datasets.admin_config = self.datasets.admin_baseline.clone();
             self.runtime.notice = Some("Staged admin changes discarded".to_string());
         }
+        self.people_section(ui);
+        self.images_section(ui);
+        self.snapshots_section(ui);
         let current_user = self.config.user_id.clone();
         let ingesting_now = self.loading.ingesting;
         let uploading_now = self.loading.uploading;
@@ -53,7 +57,7 @@ impl LabelloApp {
         let mut save = false;
         let mut ingest = false;
         let mut upload_folder = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.vertical(|ui| {
             ui.label(
                 RichText::new(
                     "Edits are staged here. Review the validation summary before saving them.",
@@ -112,8 +116,6 @@ impl LabelloApp {
             );
             edit_prelabels(ui, &mut config.prelabel_configs, &mut config.tasks);
             edit_imbalance(ui, &mut config.imbalance);
-            edit_roles(ui, &mut config.role_assignments, &config.dataset_id, &current_user);
-
             let issues = config_issues(config, &current_user);
             theme::card_frame().show(ui, |ui| {
                 ui.heading("Validation Summary");
@@ -172,6 +174,366 @@ impl LabelloApp {
         if upload_folder {
             self.request_folder_upload();
         }
+    }
+
+    fn people_section(&mut self, ui: &mut egui::Ui) {
+        theme::card_frame().show(ui, |ui| {
+            ui.heading("People");
+            ui.label(
+                RichText::new("Dataset access for users who have signed in to this server.")
+                    .color(theme::MUTED),
+            );
+            if self.loading.admin && self.datasets.users.is_empty() {
+                ui.spinner();
+                return;
+            }
+            let current_user = self.config.user_id.clone();
+            let baseline = self.datasets.users_baseline.clone();
+            let admin_count = self
+                .datasets
+                .users
+                .iter()
+                .filter(|user| user.roles.contains(&DatasetRole::DataAdmin))
+                .count();
+            let saving = self.loading.roles_user.clone();
+            let mut save_user = None;
+            for user in &mut self.datasets.users {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&user.account.display_name).strong());
+                        if let Some(login) = &user.account.github_login {
+                            ui.small(format!("@{login}"));
+                        }
+                        ui.small(format!("ID: {}", user.account.user_id));
+                    });
+                    for (role, label) in [
+                        (DatasetRole::Annotator, "Annotator"),
+                        (DatasetRole::Reviewer, "Reviewer"),
+                        (DatasetRole::Adjudicator, "Adjudicator"),
+                        (DatasetRole::DataAdmin, "Data admin"),
+                    ] {
+                        let is_admin_role = role == DatasetRole::DataAdmin;
+                        let role_enabled = !(is_admin_role
+                            && user.roles.contains(&role)
+                            && (user.account.user_id == current_user || admin_count == 1));
+                        let mut enabled = user.roles.contains(&role);
+                        if ui
+                            .add_enabled(role_enabled, egui::Checkbox::new(&mut enabled, label))
+                            .on_disabled_hover_text(if user.account.user_id == current_user {
+                                "You cannot remove your own data admin role."
+                            } else {
+                                "At least one data admin must remain."
+                            })
+                            .changed()
+                        {
+                            if enabled {
+                                user.roles.push(role);
+                                user.roles.sort();
+                                user.roles.dedup();
+                            } else {
+                                user.roles.retain(|existing| existing != &role);
+                            }
+                        }
+                    }
+                    let dirty = baseline
+                        .iter()
+                        .find(|existing| existing.account.user_id == user.account.user_id)
+                        .is_none_or(|existing| existing.roles != user.roles);
+                    let this_saving = saving.as_ref() == Some(&user.account.user_id);
+                    if ui
+                        .add_enabled(
+                            dirty && saving.is_none(),
+                            egui::Button::new(if this_saving {
+                                "Saving..."
+                            } else {
+                                "Save permissions"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        save_user = Some(user.account.user_id.clone());
+                    }
+                });
+            }
+            if self.datasets.users.is_empty() && !self.loading.admin {
+                ui.label(
+                    RichText::new("No users are in the server directory yet.").color(theme::MUTED),
+                );
+            }
+            if let Some(user_id) = save_user {
+                self.request_role_save(user_id);
+            }
+        });
+    }
+
+    fn images_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Images")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Search the indexed images and inspect workflow state.")
+                        .color(theme::MUTED),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Search");
+                    let search = ui.text_edit_singleline(&mut self.admin_tools.image_search);
+                    if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        self.admin_tools.image_query.page = 1;
+                        self.request_images();
+                    }
+
+                    egui::ComboBox::from_id_salt("image-explorer-status")
+                        .selected_text(
+                            self.admin_tools
+                                .image_status
+                                .as_ref()
+                                .map(task_status_label)
+                                .unwrap_or("Any status"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.admin_tools.image_status,
+                                None,
+                                "Any status",
+                            );
+                            for status in task_statuses() {
+                                let label = task_status_label(&status);
+                                ui.selectable_value(
+                                    &mut self.admin_tools.image_status,
+                                    Some(status),
+                                    label,
+                                );
+                            }
+                        });
+
+                    let tasks = self
+                        .datasets
+                        .admin_config
+                        .as_ref()
+                        .map(|config| config.tasks.clone())
+                        .unwrap_or_default();
+                    egui::ComboBox::from_id_salt("image-explorer-task")
+                        .selected_text(
+                            self.admin_tools
+                                .image_task
+                                .as_ref()
+                                .and_then(|task_id| {
+                                    tasks
+                                        .iter()
+                                        .find(|task| &task.task_id == task_id)
+                                        .map(|task| task.name.as_str())
+                                })
+                                .unwrap_or("Any task"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.admin_tools.image_task, None, "Any task");
+                            for task in &tasks {
+                                ui.selectable_value(
+                                    &mut self.admin_tools.image_task,
+                                    Some(task.task_id.clone()),
+                                    &task.name,
+                                );
+                            }
+                        });
+
+                    let classes = self
+                        .datasets
+                        .admin_config
+                        .as_ref()
+                        .map(|config| config.label_classes.clone())
+                        .unwrap_or_default();
+                    egui::ComboBox::from_id_salt("image-explorer-class")
+                        .selected_text(
+                            self.admin_tools
+                                .image_class
+                                .as_ref()
+                                .and_then(|class_id| {
+                                    classes
+                                        .iter()
+                                        .find(|class| &class.class_id == class_id)
+                                        .map(|class| class.name.as_str())
+                                })
+                                .unwrap_or("Any class"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.admin_tools.image_class,
+                                None,
+                                "Any class",
+                            );
+                            for class in &classes {
+                                ui.selectable_value(
+                                    &mut self.admin_tools.image_class,
+                                    Some(class.class_id.clone()),
+                                    &class.name,
+                                );
+                            }
+                        });
+                    if ui
+                        .add_enabled(!self.loading.images, egui::Button::new("Apply filters"))
+                        .clicked()
+                    {
+                        self.admin_tools.image_query.page = 1;
+                        self.request_images();
+                    }
+                    if ui
+                        .add_enabled(!self.loading.images, egui::Button::new("Refresh images"))
+                        .clicked()
+                    {
+                        self.request_images();
+                    }
+                    if self.loading.images {
+                        ui.spinner();
+                    }
+                });
+                if let Some(error) = &self.admin_tools.images_error {
+                    ui.colored_label(theme::RED, error);
+                }
+                if let Some(page) = &self.admin_tools.images {
+                    ui.small(format!(
+                        "{} image(s), page {} of {}",
+                        page.total_items,
+                        page.page,
+                        page.total_pages.max(1)
+                    ));
+                    for item in &page.items {
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&item.image.file_name).strong());
+                            ui.small(&item.image.canonical_path);
+                            ui.small(format!(
+                                "{} x {} | {}",
+                                item.image.width,
+                                item.image.height,
+                                human_bytes(item.image.byte_size)
+                            ));
+                        });
+                        let statuses = item
+                            .task_statuses
+                            .iter()
+                            .map(|(task, status)| format!("{task}: {}", task_status_label(status)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let classes = item
+                            .class_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.small(format!(
+                            "Status: {} | Classes: {}",
+                            if statuses.is_empty() {
+                                "none"
+                            } else {
+                                &statuses
+                            },
+                            if classes.is_empty() { "none" } else { &classes }
+                        ));
+                    }
+                    let previous = page.page > 1;
+                    let next = page.page < page.total_pages;
+                    let current_page = page.page;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                previous && !self.loading.images,
+                                egui::Button::new("Previous images"),
+                            )
+                            .clicked()
+                        {
+                            self.admin_tools.image_query.page = current_page.saturating_sub(1);
+                            self.request_images();
+                        }
+                        if ui
+                            .add_enabled(
+                                next && !self.loading.images,
+                                egui::Button::new("Next images"),
+                            )
+                            .clicked()
+                        {
+                            self.admin_tools.image_query.page = current_page + 1;
+                            self.request_images();
+                        }
+                    });
+                } else if !self.loading.images && self.admin_tools.images_error.is_none() {
+                    ui.label(RichText::new("No image results loaded.").color(theme::MUTED));
+                }
+            });
+    }
+
+    fn snapshots_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Backups / Snapshots")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Create and download native dataset snapshots. Image bytes are not included.")
+                        .color(theme::MUTED),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.loading.creating_snapshot,
+                            egui::Button::new("Create snapshot"),
+                        )
+                        .clicked()
+                    {
+                        self.request_snapshot_create();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.loading.snapshots,
+                            egui::Button::new("Refresh snapshots"),
+                        )
+                        .clicked()
+                    {
+                        self.request_snapshots();
+                    }
+                    if self.loading.creating_snapshot || self.loading.snapshots {
+                        ui.spinner();
+                    }
+                });
+                if let Some(error) = &self.admin_tools.snapshots_error {
+                    ui.colored_label(theme::RED, error);
+                }
+                if self.admin_tools.snapshots.is_empty()
+                    && self.admin_tools.snapshots_loaded
+                    && !self.loading.snapshots
+                {
+                    ui.label(RichText::new("No snapshots have been created.").color(theme::MUTED));
+                }
+                let snapshots = self.admin_tools.snapshots.clone();
+                for snapshot in snapshots {
+                    ui.separator();
+                    ui.label(RichText::new(&snapshot.snapshot_id).strong());
+                    ui.small(format!(
+                        "{} | {} files | {} total",
+                        snapshot.created_at.format("%Y-%m-%d %H:%M UTC"),
+                        snapshot.files.len(),
+                        human_bytes(snapshot.total_bytes)
+                    ));
+                    for file in snapshot.files {
+                        let downloading = self.loading.snapshot_file.as_ref()
+                            == Some(&(snapshot.snapshot_id.clone(), file.path.clone()));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small(format!("{} ({})", file.path, human_bytes(file.byte_size)));
+                            if ui
+                                .add_enabled(
+                                    self.loading.snapshot_file.is_none(),
+                                    egui::Button::new(if downloading { "Downloading..." } else { "Download" }),
+                                )
+                                .clicked()
+                            {
+                                self.request_snapshot_download(
+                                    snapshot.snapshot_id.clone(),
+                                    file.path.clone(),
+                                );
+                            }
+                        });
+                    }
+                }
+            });
     }
 
     pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
@@ -242,6 +604,77 @@ impl LabelloApp {
             }
         });
     }
+}
+
+fn task_statuses() -> [TaskStatus; 6] {
+    [
+        TaskStatus::Pending,
+        TaskStatus::InProgress,
+        TaskStatus::Submitted,
+        TaskStatus::Completed,
+        TaskStatus::NeedsCorrection,
+        TaskStatus::AdjudicationRequired,
+    ]
+}
+
+fn task_status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "Pending",
+        TaskStatus::InProgress => "In progress",
+        TaskStatus::Submitted => "Submitted",
+        TaskStatus::Completed => "Completed",
+        TaskStatus::NeedsCorrection => "Needs correction",
+        TaskStatus::AdjudicationRequired => "Adjudication required",
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn download_snapshot_file(_file: labello_client::SnapshotFile) -> Result<(), String> {
+    Err("Snapshot downloads are available in the browser build.".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn download_snapshot_file(file: labello_client::SnapshotFile) -> Result<(), String> {
+    use wasm_bindgen::JsCast;
+
+    let bytes = js_sys::Uint8Array::from(file.bytes.as_slice());
+    let parts = js_sys::Array::new();
+    parts.push(&bytes);
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).map_err(js_error)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js_error)?;
+    let result = (|| {
+        let document = web_sys::window()
+            .and_then(|window| window.document())
+            .ok_or_else(|| "missing browser document".to_string())?;
+        let anchor = document
+            .create_element("a")
+            .map_err(js_error)?
+            .dyn_into::<web_sys::HtmlAnchorElement>()
+            .map_err(|_| "failed to create download link".to_string())?;
+        anchor.set_href(&url);
+        anchor.set_download(file.file_name.rsplit('/').next().unwrap_or("snapshot-file"));
+        anchor.click();
+        Ok(())
+    })();
+    let _ = web_sys::Url::revoke_object_url(&url);
+    result
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_error(error: wasm_bindgen::JsValue) -> String {
+    error.as_string().unwrap_or_else(|| format!("{error:?}"))
 }
 
 fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
@@ -1047,89 +1480,6 @@ fn edit_imbalance(ui: &mut egui::Ui, imbalance: &mut Option<ImbalanceConfig>) {
     });
 }
 
-fn edit_roles(
-    ui: &mut egui::Ui,
-    assignments: &mut Vec<DatasetRoleAssignment>,
-    dataset_id: &labello_domain::DatasetId,
-    current_user: &UserId,
-) {
-    theme::card_frame().show(ui, |ui| {
-        ui.heading("Access Roles");
-        ui.label(
-            RichText::new("At least one user, including you, must remain a data admin.")
-                .color(theme::MUTED),
-        );
-        let mut remove = None;
-        for (index, assignment) in assignments.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label("User ID");
-                let mut user_id = assignment.user_id.to_string();
-                if ui
-                    .text_edit_singleline(&mut user_id)
-                    .on_hover_text("User id receiving these dataset roles.")
-                    .changed()
-                {
-                    assignment.user_id = UserId::from(user_id);
-                }
-                role_checkbox(
-                    ui,
-                    &mut assignment.roles,
-                    DatasetRole::Annotator,
-                    "annotator",
-                );
-                role_checkbox(ui, &mut assignment.roles, DatasetRole::Reviewer, "reviewer");
-                role_checkbox(
-                    ui,
-                    &mut assignment.roles,
-                    DatasetRole::Adjudicator,
-                    "adjudicator",
-                );
-                role_checkbox(
-                    ui,
-                    &mut assignment.roles,
-                    DatasetRole::DataAdmin,
-                    "data_admin",
-                );
-                if assignment.user_id != *current_user
-                    && destructive_button(ui, "Remove assignment")
-                {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            assignments.remove(index);
-        }
-        if ui.button("Add role assignment").clicked() {
-            assignments.push(DatasetRoleAssignment {
-                dataset_id: dataset_id.clone(),
-                user_id: UserId::from(next_user_id(assignments)),
-                roles: BTreeSet::from([DatasetRole::Annotator]),
-                assigned_at: labello_domain::now(),
-                assigned_by: Some(current_user.clone()),
-            });
-        }
-        show_issues(ui, &role_issues(assignments, dataset_id, current_user));
-    });
-}
-
-fn next_user_id(assignments: &[DatasetRoleAssignment]) -> String {
-    for index in 1.. {
-        let candidate = if index == 1 {
-            "new_user".to_string()
-        } else {
-            format!("new_user_{index}")
-        };
-        if assignments
-            .iter()
-            .all(|assignment| assignment.user_id.as_str() != candidate)
-        {
-            return candidate;
-        }
-    }
-    unreachable!()
-}
-
 fn next_numbered_id<'a>(prefix: &str, values: impl Iterator<Item = &'a str>) -> String {
     let values: BTreeSet<_> = values.collect();
     for index in 1.. {
@@ -1139,22 +1489,6 @@ fn next_numbered_id<'a>(prefix: &str, values: impl Iterator<Item = &'a str>) -> 
         }
     }
     unreachable!()
-}
-
-fn role_checkbox(
-    ui: &mut egui::Ui,
-    roles: &mut BTreeSet<DatasetRole>,
-    role: DatasetRole,
-    label: &str,
-) {
-    let mut enabled = roles.contains(&role);
-    if ui.checkbox(&mut enabled, label).changed() {
-        if enabled {
-            roles.insert(role);
-        } else {
-            roles.remove(&role);
-        }
-    }
 }
 
 fn config_issues(config: &DatasetMetadata, current_user: &UserId) -> Vec<String> {

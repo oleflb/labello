@@ -859,6 +859,140 @@ async fn task_review_rejection_immediately_needs_correction() {
 }
 
 #[tokio::test]
+async fn annotation_completion_without_review_completes_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task_review(&app, 0, "none").await;
+    let png = png_bytes(2, 4);
+    let image_id = ImageId::from_blake3_hex(blake3::hash(&png).to_hex().as_ref());
+    upload_test_image(&app, "no-review.png", &png).await;
+
+    submit_test_task(&app, &image_id).await;
+
+    assert_eq!(
+        load_test_image_state(&app, &image_id).await["taskStates"]["bounding_box:pixel"]["status"],
+        "completed"
+    );
+    assert!(claim_assignment(&app, "admin", "review").await.is_null());
+}
+
+#[tokio::test]
+async fn correction_starts_a_new_review_round() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task_review(&app, 2, "approval").await;
+    let png = png_bytes(4, 2);
+    let image_id = ImageId::from_blake3_hex(blake3::hash(&png).to_hex().as_ref());
+    upload_test_image(&app, "review-round.png", &png).await;
+    submit_test_task(&app, &image_id).await;
+
+    let first_approval = post_test_review(
+        &app,
+        &image_id,
+        "admin",
+        "round_1_approval",
+        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
+        "approved",
+    )
+    .await;
+    assert_eq!(first_approval.status(), StatusCode::OK);
+    let rejection = post_test_review(
+        &app,
+        &image_id,
+        "reviewer_2",
+        "round_1_rejection",
+        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
+        "rejected",
+    )
+    .await;
+    assert_eq!(rejection.status(), StatusCode::OK);
+
+    submit_test_task(&app, &image_id).await;
+    let new_round_approval = post_test_review(
+        &app,
+        &image_id,
+        "admin",
+        "round_2_approval",
+        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
+        "approved",
+    )
+    .await;
+    assert_eq!(new_round_approval.status(), StatusCode::OK);
+    assert_eq!(
+        load_test_image_state(&app, &image_id).await["taskStates"]["bounding_box:pixel"]["status"],
+        "submitted"
+    );
+    let final_approval = post_test_review(
+        &app,
+        &image_id,
+        "reviewer_2",
+        "round_2_approval_2",
+        json!({ "targetType": "task", "task_id": "bounding_box:pixel" }),
+        "approved",
+    )
+    .await;
+    assert_eq!(final_approval.status(), StatusCode::OK);
+    assert_eq!(
+        load_test_image_state(&app, &image_id).await["taskStates"]["bounding_box:pixel"]["status"],
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn config_rejects_enabling_independent_agreement() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    let admin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/admin")
+                .header("x-user-id", "admin")
+                .header("x-user-role", "data_admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(admin.into_body(), usize::MAX).await.unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    metadata["tasks"][0]["review"]["workflow"] = json!("independent_agreement");
+
+    let update = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/datasets/ds/admin")
+                .header("x-user-id", "admin")
+                .header("x-user-role", "data_admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": metadata["name"],
+                        "imageRoots": metadata["imageRoots"],
+                        "labelClasses": metadata["labelClasses"],
+                        "tasks": metadata["tasks"],
+                        "roleAssignments": metadata["roleAssignments"],
+                        "imbalance": metadata["imbalance"],
+                        "prelabelConfigs": metadata["prelabelConfigs"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(update.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("not implemented"));
+}
+
+#[tokio::test]
 async fn assign_next_uses_camel_case_query() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));
@@ -902,6 +1036,7 @@ async fn assign_next_uses_camel_case_query() {
     let body = to_bytes(assignment.into_body(), usize::MAX).await.unwrap();
     let assignment: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(assignment["taskId"], "bounding_box:pixel");
+    assert!(assignment["expiresAt"].is_string());
 
     let stale_snake_case = app
         .oneshot(
@@ -1087,6 +1222,380 @@ async fn upload_requires_admin_and_rejects_unsafe_paths() {
         .await
         .unwrap();
     assert_eq!(unsafe_file_name.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn session_survives_state_recreation_and_logout_invalidates_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ApiState::new(temp.path()).with_session_cookie_secure(false);
+    let timestamp = labello_domain::now();
+    state
+        .server_store
+        .upsert_user(labello_domain::UserAccount {
+            user_id: labello_domain::UserId::from("session_user"),
+            display_name: "Session User".to_string(),
+            github_user_id: Some("42".to_string()),
+            github_login: Some("session-user".to_string()),
+            created_at: timestamp,
+            updated_at: timestamp,
+        })
+        .unwrap();
+    let token = state
+        .create_session(labello_domain::UserId::from("session_user"))
+        .unwrap();
+
+    let app = router(
+        ApiState::new(temp.path())
+            .with_dev_auth_token(None)
+            .with_session_cookie_secure(false),
+    );
+    let me = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/me")
+                .header(header::COOKIE, format!("labello_session={token}"))
+                .header("x-user-id", "spoofed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(me.status(), StatusCode::OK);
+    let body = to_bytes(me.into_body(), usize::MAX).await.unwrap();
+    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(account["userId"], "session_user");
+
+    let logout = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header(header::COOKIE, format!("labello_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    let cleared = logout.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(cleared.contains("HttpOnly"));
+    assert!(cleared.contains("Max-Age=0"));
+
+    let expired = app
+        .oneshot(
+            Request::builder()
+                .uri("/me")
+                .header(header::COOKIE, format!("labello_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn oauth_login_issues_one_time_server_verified_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ApiState::new(temp.path()).with_github_oauth(crate::GithubOAuthConfig {
+        client_id: "client".to_string(),
+        client_secret: "secret".to_string(),
+        redirect_uri: "http://localhost/callback".to_string(),
+    });
+    let app = router(state.clone());
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/github/login?state=attacker-chosen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::TEMPORARY_REDIRECT);
+    let location = login.headers()[header::LOCATION].to_str().unwrap();
+    let url = url::Url::parse(location).unwrap();
+    let generated = url
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .unwrap();
+    assert_ne!(generated, "attacker-chosen");
+    let rejected = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/github/callback?code=unused&state=attacker-chosen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert!(state.server_store.consume_oauth_state(&generated).unwrap());
+    assert!(!state.server_store.consume_oauth_state(&generated).unwrap());
+}
+
+#[tokio::test]
+async fn data_admin_lists_discovered_users_and_assigns_roles() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    let discover = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/me")
+                .header("x-user-id", "worker")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(discover.status(), StatusCode::OK);
+
+    let assigned = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/datasets/ds/roles")
+                .header("x-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "userId": "worker", "roles": ["annotator", "reviewer"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(assigned.status(), StatusCode::OK);
+
+    let users = app
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/users")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(users.status(), StatusCode::OK);
+    let body = to_bytes(users.into_body(), usize::MAX).await.unwrap();
+    let users: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let worker = users
+        .iter()
+        .find(|user| user["account"]["userId"] == "worker")
+        .unwrap();
+    assert_eq!(worker["roles"], json!(["annotator", "reviewer"]));
+}
+
+#[tokio::test]
+async fn credentialed_cors_only_allows_configured_origins() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(
+        ApiState::new(temp.path()).with_allowed_origins(vec!["http://localhost:8081".to_string()]),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/me")
+                .header(header::ORIGIN, "http://localhost:8081")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://localhost:8081"
+    );
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
+        "true"
+    );
+}
+
+#[tokio::test]
+async fn data_admin_explores_images_with_bounded_pagination_and_filters() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "alpha.png", &png_bytes(2, 2)).await;
+    upload_test_image(&app, "beta.png", &png_bytes(3, 2)).await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/images")
+                .header("x-user-id", "intruder")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let first_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/images?page=1&pageSize=1&status=pending&taskId=bounding_box%3Apixel")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_page.status(), StatusCode::OK);
+    let body = to_bytes(first_page.into_body(), usize::MAX).await.unwrap();
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["totalItems"], 2);
+    assert_eq!(page["totalPages"], 2);
+    assert_eq!(
+        page["items"][0]["taskStatuses"]["bounding_box:pixel"],
+        "pending"
+    );
+
+    let searched = app
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/images?pageSize=500&search=BETA")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(searched.status(), StatusCode::OK);
+    let body = to_bytes(searched.into_body(), usize::MAX).await.unwrap();
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page["pageSize"], 100);
+    assert_eq!(page["totalItems"], 1);
+    assert_eq!(page["items"][0]["image"]["fileName"], "beta.png");
+}
+
+#[tokio::test]
+async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    upload_test_image(&app, "snapshot.png", &png_bytes(2, 3)).await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/datasets/ds/snapshots")
+                .header("x-user-id", "intruder")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/datasets/ds/snapshots")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot["includesImageBytes"], false);
+    let snapshot_id = snapshot["snapshotId"].as_str().unwrap();
+    let files = snapshot["files"].as_array().unwrap();
+    assert!(
+        files
+            .iter()
+            .any(|file| file["path"] == "labello.dataset.toml")
+    );
+    assert!(files.iter().any(|file| file["path"] == "images-index.json"));
+    assert!(
+        files
+            .iter()
+            .any(|file| file["path"].as_str().unwrap().ends_with("/events.jsonl"))
+    );
+    assert!(
+        files
+            .iter()
+            .any(|file| file["path"].as_str().unwrap().ends_with("/state.json"))
+    );
+
+    let manifest = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/datasets/ds/snapshots/{snapshot_id}/files/manifest.json"
+                ))
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest.status(), StatusCode::OK);
+    let manifest_body = to_bytes(manifest.into_body(), usize::MAX).await.unwrap();
+    let downloaded_manifest: serde_json::Value = serde_json::from_slice(&manifest_body).unwrap();
+    assert_eq!(downloaded_manifest["snapshotId"], snapshot_id);
+
+    let index_entry = files
+        .iter()
+        .find(|file| file["path"] == "images-index.json")
+        .unwrap();
+    let index = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/datasets/ds/snapshots/{snapshot_id}/files/images-index.json"
+                ))
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    let index_body = to_bytes(index.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        blake3::hash(&index_body).to_hex().as_str(),
+        index_entry["blake3"].as_str().unwrap()
+    );
+
+    let listed = app
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/snapshots")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+    let snapshots: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0]["snapshotId"], snapshot_id);
 }
 
 const TEST_BOUNDARY: &str = "LABELLOBOUNDARY";

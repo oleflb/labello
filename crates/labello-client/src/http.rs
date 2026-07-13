@@ -1,8 +1,8 @@
 use labello_domain::{
-    AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle, OfflineSyncRequest,
-    OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord, TaskDefinition,
-    UserAccount, UserId,
+    AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetSnapshot, DatasetStats,
+    EventLogEntry, ImageExplorerPage, ImageId, ImageRecord, ImageState, KeybindingSet,
+    OfflineBundle, OfflineSyncRequest, OfflineSyncResult, PrelabelConfig, PrelabelSuggestion,
+    ReviewRecord, TaskDefinition, UserAccount, UserId,
 };
 use reqwest::{Method, RequestBuilder, Response, header::CONTENT_TYPE};
 use serde::{Serialize, de::DeserializeOwned};
@@ -11,9 +11,10 @@ use url::Url;
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
     AuthApi, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi,
-    DatasetSummary, ImageApi, ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi,
-    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
-    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob,
+    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
+    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi,
+    SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -50,6 +51,10 @@ impl HttpLabelloApi {
 
     fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
         let mut request = self.client.request(method, self.endpoint(path)?);
+        #[cfg(target_arch = "wasm32")]
+        {
+            request = request.fetch_credentials_include();
+        }
         if let Some(user_id) = &self.auth.user_id {
             request = request.header("x-user-id", user_id.as_str());
         }
@@ -186,6 +191,74 @@ impl DatasetApi for HttpLabelloApi {
             .await
         })
     }
+
+    fn create_snapshot<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, DatasetSnapshot> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::POST, &format!("/datasets/{dataset_id}/snapshots"))?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
+    fn list_snapshots<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, Vec<DatasetSnapshot>> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::GET, &format!("/datasets/{dataset_id}/snapshots"))?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
+    fn get_snapshot_file<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        snapshot_id: &'a str,
+        path: &'a str,
+    ) -> crate::ApiFuture<'a, crate::SnapshotFile> {
+        Box::pin(async move {
+            let encoded_path = path
+                .split('/')
+                .map(|part| urlencoding::encode(part))
+                .collect::<Vec<_>>()
+                .join("/");
+            let response = self
+                .request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/snapshots/{snapshot_id}/files/{encoded_path}"),
+                )?
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(ClientError::Api {
+                    status: status.as_u16(),
+                    message: response.text().await.unwrap_or_else(|_| status.to_string()),
+                });
+            }
+            let media_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            Ok(crate::SnapshotFile {
+                file_name: path.to_string(),
+                media_type,
+                bytes: response.bytes().await?.to_vec(),
+            })
+        })
+    }
 }
 
 impl TaskApi for HttpLabelloApi {
@@ -219,6 +292,21 @@ impl TaskApi for HttpLabelloApi {
 }
 
 impl ImageApi for HttpLabelloApi {
+    fn list_images<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        query: ImageExplorerQuery,
+    ) -> crate::ApiFuture<'a, ImageExplorerPage> {
+        Box::pin(async move {
+            let response = self
+                .request(Method::GET, &format!("/datasets/{dataset_id}/images"))?
+                .query(&query)
+                .send()
+                .await?;
+            Self::json(response).await
+        })
+    }
+
     fn assign_next_image<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
@@ -701,15 +789,11 @@ impl PrelabelApi for HttpLabelloApi {
 impl AuthApi for HttpLabelloApi {
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> crate::ApiFuture<'a, String> {
         Box::pin(async move {
-            let state = request.state.unwrap_or_else(|| "labello".to_string());
-            let response = self
-                .request(
-                    Method::GET,
-                    &format!("/auth/github/login?state={}", urlencoding::encode(&state)),
-                )?
-                .send()
-                .await?;
-            Ok(response.url().to_string())
+            let mut url = self.endpoint("/auth/github/login")?;
+            if let Some(return_to) = request.return_to {
+                url.query_pairs_mut().append_pair("returnTo", &return_to);
+            }
+            Ok(url.to_string())
         })
     }
 
@@ -722,12 +806,62 @@ impl AuthApi for HttpLabelloApi {
                 self.request(
                     Method::GET,
                     &format!(
-                        "/auth/github/callback?code={}",
-                        urlencoding::encode(&request.code)
+                        "/auth/github/callback?code={}&state={}",
+                        urlencoding::encode(&request.code),
+                        urlencoding::encode(&request.state)
                     ),
                 )?
                 .send()
                 .await?,
+            )
+            .await
+        })
+    }
+
+    fn me<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+        Box::pin(async move { Self::json(self.request(Method::GET, "/me")?.send().await?).await })
+    }
+
+    fn logout<'a>(&'a self) -> crate::ApiFuture<'a, ()> {
+        Box::pin(async move {
+            let response = self.request(Method::POST, "/logout")?.send().await?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                let status = response.status();
+                Err(ClientError::Api {
+                    status: status.as_u16(),
+                    message: response.text().await.unwrap_or_else(|_| status.to_string()),
+                })
+            }
+        })
+    }
+}
+
+impl UserApi for HttpLabelloApi {
+    fn list_dataset_users<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, Vec<DatasetUser>> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::GET, &format!("/datasets/{dataset_id}/users"))?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
+    fn set_dataset_roles<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: SetDatasetRolesRequest,
+    ) -> crate::ApiFuture<'a, DatasetUser> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(Method::PUT, &format!("/datasets/{dataset_id}/roles"))?,
+                &request,
             )
             .await
         })

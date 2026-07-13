@@ -1,7 +1,8 @@
 use labello_domain::{
     AnnotationVersion, AssignmentId, AssignmentKind, ClassId, DatasetId, DatasetRole,
     DatasetRoleAssignment, EventPayload, ImageId, ImageRecord, ImbalanceConfig, LabelClass,
-    OfflineSyncRequest, PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, UserId,
+    OfflineSyncRequest, PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, TaskStatus,
+    UserAccount, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,13 +118,28 @@ pub struct PrelabelSuggestionRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthLoginRequest {
-    pub state: Option<String>,
+    pub return_to: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthCallbackRequest {
     pub code: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetUser {
+    pub account: UserAccount,
+    pub roles: Vec<DatasetRole>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDatasetRolesRequest {
+    pub user_id: UserId,
+    pub roles: Vec<DatasetRole>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +209,35 @@ pub struct ChangedPath {
 pub struct ImageSummary {
     pub image: ImageRecord,
     pub event_sequence: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageExplorerQuery {
+    #[serde(default = "default_page")]
+    pub page: usize,
+    #[serde(default = "default_page_size")]
+    pub page_size: usize,
+    pub search: Option<String>,
+    pub status: Option<TaskStatus>,
+    pub task_id: Option<TaskId>,
+    pub class_id: Option<ClassId>,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+fn default_page_size() -> usize {
+    25
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotFile {
+    pub file_name: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -10,9 +10,10 @@ use labello_domain::{
 use crate::{
     AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
     AuthApi, ClientError, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary,
-    ImageApi, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
-    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
-    PrelabelSuggestionRequest, ReviewApi, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    DatasetUser, ImageApi, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
+    KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
+    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi,
+    UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Default)]
@@ -490,6 +491,83 @@ impl AuthApi for DemoLabelloApi {
                 github_login: None,
                 created_at: timestamp,
                 updated_at: timestamp,
+            })
+        })
+    }
+
+    fn me<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+        self.github_callback(OAuthCallbackRequest {
+            code: String::new(),
+            state: String::new(),
+        })
+    }
+
+    fn logout<'a>(&'a self) -> crate::ApiFuture<'a, ()> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+impl UserApi for DemoLabelloApi {
+    fn list_dataset_users<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+    ) -> crate::ApiFuture<'a, Vec<DatasetUser>> {
+        Box::pin(async move {
+            let metadata = self.dataset(dataset_id)?;
+            Ok(metadata
+                .role_assignments
+                .into_iter()
+                .map(|assignment| DatasetUser {
+                    account: UserAccount {
+                        user_id: assignment.user_id.clone(),
+                        display_name: assignment.user_id.to_string(),
+                        github_user_id: None,
+                        github_login: None,
+                        created_at: assignment.assigned_at,
+                        updated_at: assignment.assigned_at,
+                    },
+                    roles: assignment.roles.into_iter().collect(),
+                })
+                .collect())
+        })
+    }
+
+    fn set_dataset_roles<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: SetDatasetRolesRequest,
+    ) -> crate::ApiFuture<'a, DatasetUser> {
+        Box::pin(async move {
+            let mut state = self.state.borrow_mut();
+            let metadata = state
+                .datasets
+                .get_mut(dataset_id)
+                .ok_or_else(|| ClientError::Demo(format!("dataset {dataset_id} does not exist")))?;
+            metadata
+                .role_assignments
+                .retain(|assignment| assignment.user_id != request.user_id);
+            if !request.roles.is_empty() {
+                metadata
+                    .role_assignments
+                    .push(labello_domain::DatasetRoleAssignment {
+                        dataset_id: dataset_id.clone(),
+                        user_id: request.user_id.clone(),
+                        roles: request.roles.iter().cloned().collect(),
+                        assigned_at: labello_domain::now(),
+                        assigned_by: Some(UserId::from("demo_user")),
+                    });
+            }
+            let timestamp = labello_domain::now();
+            Ok(DatasetUser {
+                account: UserAccount {
+                    user_id: request.user_id.clone(),
+                    display_name: request.user_id.to_string(),
+                    github_user_id: None,
+                    github_login: None,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                },
+                roles: request.roles,
             })
         })
     }

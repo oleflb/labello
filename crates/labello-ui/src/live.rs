@@ -6,20 +6,21 @@ use std::{
 
 use eframe::egui;
 use labello_client::{
-    AuthHeaders, HttpLabelloApi, IngestJob, IngestJobStatus, UpdateDatasetConfigRequest,
+    AuthHeaders, HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest,
+    SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
 use crate::app::{
-    AppView, LabelloApp, LoadedDataset, LoadedImage, SaveStatus, UiCommand, UiMessage,
+    AppView, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage, SaveStatus, UiCommand, UiMessage,
 };
 
 impl LabelloApp {
     pub(crate) fn rebuild_http_api(&mut self) {
         match HttpLabelloApi::new(&self.config.api_base_url).map(|api| {
             api.with_auth(AuthHeaders {
-                user_id: Some(self.config.user_id.clone()),
+                user_id: self.setup.dev_auth.then(|| self.config.user_id.clone()),
                 role: None,
-                dev_token: if self.config.dev_token.is_empty() {
+                dev_token: if !self.setup.dev_auth || self.config.dev_token.is_empty() {
                     None
                 } else {
                     Some(self.config.dev_token.clone())
@@ -43,6 +44,54 @@ impl LabelloApp {
                 break;
             };
             match message {
+                UiMessage::SessionLoaded(result) => {
+                    self.loading.session = false;
+                    self.auth.checked = true;
+                    match result {
+                        Ok(account) => {
+                            self.config.user_id = account.user_id.clone();
+                            self.work.keybindings = labello_domain::KeybindingSet::defaults_for(
+                                account.user_id.clone(),
+                            );
+                            self.auth.account = Some(account);
+                            self.runtime.error = None;
+                            self.request_dataset_list();
+                        }
+                        Err(error) => {
+                            self.auth.account = None;
+                            self.datasets.summaries.clear();
+                            if self.setup.dev_auth {
+                                self.runtime.error = Some(error);
+                            } else {
+                                self.runtime.error = None;
+                            }
+                        }
+                    }
+                }
+                UiMessage::LogoutFinished(result) => {
+                    self.loading.logout = false;
+                    match result {
+                        Ok(()) => {
+                            self.auth.account = None;
+                            self.datasets.summaries.clear();
+                            self.datasets.metadata = None;
+                            self.datasets.admin_config = None;
+                            self.datasets.admin_baseline = None;
+                            self.datasets.users.clear();
+                            self.datasets.users_baseline.clear();
+                            self.admin_tools = Default::default();
+                            self.clear_current_image();
+                            self.view = AppView::Setup;
+                            self.runtime.notice = Some("Signed out".to_string());
+                            self.runtime.error = None;
+                        }
+                        Err(error) => self.runtime.error = Some(error),
+                    }
+                }
+                UiMessage::GithubLoginUrl(result) => match result {
+                    Ok(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+                    Err(error) => self.runtime.error = Some(error),
+                },
                 UiMessage::DatasetList(result) => {
                     self.loading.datasets = false;
                     match result {
@@ -82,13 +131,26 @@ impl LabelloApp {
                 UiMessage::AdminLoaded(result) => {
                     self.loading.admin = false;
                     match result {
-                        Ok(metadata) => {
-                            self.sync_work_config(metadata.clone());
-                            self.upsert_dataset_summary(&metadata);
-                            self.datasets.admin_baseline = Some(metadata.clone());
-                            self.datasets.admin_config = Some(metadata);
+                        Ok(loaded) => {
+                            self.sync_work_config(loaded.metadata.clone());
+                            self.upsert_dataset_summary(&loaded.metadata);
+                            self.datasets.admin_baseline = Some(loaded.metadata.clone());
+                            self.datasets.admin_config = Some(loaded.metadata);
+                            self.datasets.users_baseline = loaded.users.clone();
+                            self.datasets.users = loaded.users;
+                            if self.admin_tools.dataset_id.as_ref() != Some(&self.config.dataset_id)
+                            {
+                                self.admin_tools = Default::default();
+                                self.admin_tools.dataset_id = Some(self.config.dataset_id.clone());
+                            }
                             self.view = AppView::Admin;
                             self.runtime.error = None;
+                            if self.admin_tools.images.is_none() {
+                                self.request_images();
+                            }
+                            if !self.admin_tools.snapshots_loaded {
+                                self.request_snapshots();
+                            }
                         }
                         Err(error) => self.runtime.error = Some(error),
                     }
@@ -108,6 +170,68 @@ impl LabelloApp {
                         self.runtime.error = Some(error);
                     }
                 },
+                UiMessage::DatasetRolesSaved(result) => {
+                    self.loading.roles_user = None;
+                    match result {
+                        Ok(user) => {
+                            replace_dataset_user(&mut self.datasets.users, user.clone());
+                            replace_dataset_user(&mut self.datasets.users_baseline, user.clone());
+                            self.sync_role_assignment(&user);
+                            self.runtime.notice = Some(format!(
+                                "Permissions saved for {}",
+                                user.account.display_name
+                            ));
+                            self.runtime.error = None;
+                        }
+                        Err(error) => self.runtime.error = Some(error),
+                    }
+                }
+                UiMessage::ImagesLoaded(result) => {
+                    self.loading.images = false;
+                    match result {
+                        Ok(page) => {
+                            self.admin_tools.image_query.page = page.page;
+                            self.admin_tools.images = Some(page);
+                            self.admin_tools.images_error = None;
+                        }
+                        Err(error) => self.admin_tools.images_error = Some(error),
+                    }
+                }
+                UiMessage::SnapshotsLoaded(result) => {
+                    self.loading.snapshots = false;
+                    self.admin_tools.snapshots_loaded = true;
+                    match result {
+                        Ok(snapshots) => {
+                            self.admin_tools.snapshots = snapshots;
+                            self.admin_tools.snapshots_error = None;
+                        }
+                        Err(error) => self.admin_tools.snapshots_error = Some(error),
+                    }
+                }
+                UiMessage::SnapshotCreated(result) => {
+                    self.loading.creating_snapshot = false;
+                    match result {
+                        Ok(snapshot) => {
+                            self.admin_tools
+                                .snapshots
+                                .retain(|existing| existing.snapshot_id != snapshot.snapshot_id);
+                            self.admin_tools.snapshots.insert(0, snapshot);
+                            self.admin_tools.snapshots_loaded = true;
+                            self.admin_tools.snapshots_error = None;
+                        }
+                        Err(error) => self.admin_tools.snapshots_error = Some(error),
+                    }
+                }
+                UiMessage::SnapshotDownloaded(result) => {
+                    self.loading.snapshot_file = None;
+                    match result {
+                        Ok(file) => match crate::admin::download_snapshot_file(file) {
+                            Ok(()) => self.admin_tools.snapshots_error = None,
+                            Err(error) => self.admin_tools.snapshots_error = Some(error),
+                        },
+                        Err(error) => self.admin_tools.snapshots_error = Some(error),
+                    }
+                }
                 UiMessage::ImageLoaded {
                     operation_id,
                     assignment,
@@ -161,6 +285,12 @@ impl LabelloApp {
                     self.loading.saving = false;
                     match result {
                         Ok(state) => {
+                            if let Some(assignment) = self.assignment.as_ref() {
+                                crate::persistence::clear_draft(
+                                    &self.config.dataset_id,
+                                    assignment,
+                                );
+                            }
                             self.apply_state(state);
                             self.save_status = SaveStatus::Saved;
                             self.runtime.error = None;
@@ -173,7 +303,7 @@ impl LabelloApp {
                             }
                         }
                         Err(error) => {
-                            self.save_status = SaveStatus::Dirty;
+                            self.save_status = SaveStatus::Retry;
                             if completed {
                                 self.pending_transition = None;
                             }
@@ -322,6 +452,19 @@ impl LabelloApp {
             return;
         };
         match command {
+            UiCommand::Session => self.spawn_message(async move {
+                UiMessage::SessionLoaded(api.me().await.map_err(|error| error.to_string()))
+            }),
+            UiCommand::Logout => self.spawn_message(async move {
+                UiMessage::LogoutFinished(api.logout().await.map_err(|error| error.to_string()))
+            }),
+            UiCommand::GithubLogin => self.spawn_message(async move {
+                UiMessage::GithubLoginUrl(
+                    api.github_login_url(OAuthLoginRequest { return_to: None })
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
             UiCommand::DatasetList => self.spawn_message(async move {
                 UiMessage::DatasetList(api.list_datasets().await.map_err(|error| error.to_string()))
             }),
@@ -357,11 +500,14 @@ impl LabelloApp {
                 UiMessage::DatasetLoaded(result)
             }),
             UiCommand::LoadAdmin { dataset_id } => self.spawn_message(async move {
-                UiMessage::AdminLoaded(
-                    api.get_admin_dataset(&dataset_id)
-                        .await
-                        .map_err(|error| error.to_string()),
-                )
+                let result = async {
+                    let metadata = api.get_admin_dataset(&dataset_id).await?;
+                    let users = api.list_dataset_users(&dataset_id).await?;
+                    Ok::<_, labello_client::ClientError>(LoadedAdmin { metadata, users })
+                }
+                .await
+                .map_err(|error| error.to_string());
+                UiMessage::AdminLoaded(result)
             }),
             UiCommand::SaveAdmin { metadata } => {
                 let dataset_id = metadata.dataset_id.clone();
@@ -374,6 +520,49 @@ impl LabelloApp {
                     )
                 });
             }
+            UiCommand::SaveDatasetRoles {
+                dataset_id,
+                user_id,
+                roles,
+            } => self.spawn_message(async move {
+                UiMessage::DatasetRolesSaved(
+                    api.set_dataset_roles(&dataset_id, SetDatasetRolesRequest { user_id, roles })
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::LoadImages { dataset_id, query } => self.spawn_message(async move {
+                UiMessage::ImagesLoaded(
+                    api.list_images(&dataset_id, query)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::LoadSnapshots { dataset_id } => self.spawn_message(async move {
+                UiMessage::SnapshotsLoaded(
+                    api.list_snapshots(&dataset_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::CreateSnapshot { dataset_id } => self.spawn_message(async move {
+                UiMessage::SnapshotCreated(
+                    api.create_snapshot(&dataset_id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+            UiCommand::DownloadSnapshot {
+                dataset_id,
+                snapshot_id,
+                path,
+            } => self.spawn_message(async move {
+                UiMessage::SnapshotDownloaded(
+                    api.get_snapshot_file(&dataset_id, &snapshot_id, &path)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }),
             UiCommand::Ingest { dataset_id } => self.spawn_message(async move {
                 UiMessage::IngestJobLoaded(
                     api.start_ingest_job(&dataset_id)
@@ -410,10 +599,33 @@ impl LabelloApp {
     }
 
     pub(crate) fn start_setup_load(&mut self) {
-        if self.runtime.api.is_some() && !self.setup.started {
-            self.setup.started = true;
-            self.request_dataset_list();
+        if self.runtime.api.is_some() && !self.auth.checked && !self.loading.session {
+            self.loading.session = true;
+            self.queue_command(UiCommand::Session);
         }
+    }
+
+    pub(crate) fn request_logout(&mut self) {
+        if self.loading.logout || self.runtime.api.is_none() {
+            return;
+        }
+        self.loading.logout = true;
+        self.queue_command(UiCommand::Logout);
+    }
+
+    pub(crate) fn request_github_login(&mut self) {
+        if self.runtime.api.is_some() {
+            self.queue_command(UiCommand::GithubLogin);
+        }
+    }
+
+    pub(crate) fn request_session(&mut self) {
+        if self.loading.session || self.runtime.api.is_none() {
+            return;
+        }
+        self.auth.checked = false;
+        self.loading.session = true;
+        self.queue_command(UiCommand::Session);
     }
 
     pub(crate) fn refresh_stats_if_due(&mut self) {
@@ -511,6 +723,57 @@ impl LabelloApp {
         });
     }
 
+    pub(crate) fn request_images(&mut self) {
+        if self.loading.images || self.runtime.api.is_none() {
+            return;
+        }
+        self.admin_tools.image_query.search = non_empty(&self.admin_tools.image_search);
+        self.admin_tools.image_query.task_id = self.admin_tools.image_task.clone();
+        self.admin_tools.image_query.class_id = self.admin_tools.image_class.clone();
+        self.admin_tools.image_query.status = self.admin_tools.image_status.clone();
+        self.loading.images = true;
+        self.admin_tools.images_error = None;
+        self.queue_command(UiCommand::LoadImages {
+            dataset_id: self.config.dataset_id.clone(),
+            query: self.admin_tools.image_query.clone(),
+        });
+    }
+
+    pub(crate) fn request_snapshots(&mut self) {
+        if self.loading.snapshots || self.runtime.api.is_none() {
+            return;
+        }
+        self.loading.snapshots = true;
+        self.admin_tools.snapshots_error = None;
+        self.queue_command(UiCommand::LoadSnapshots {
+            dataset_id: self.config.dataset_id.clone(),
+        });
+    }
+
+    pub(crate) fn request_snapshot_create(&mut self) {
+        if self.loading.creating_snapshot || self.runtime.api.is_none() {
+            return;
+        }
+        self.loading.creating_snapshot = true;
+        self.admin_tools.snapshots_error = None;
+        self.queue_command(UiCommand::CreateSnapshot {
+            dataset_id: self.config.dataset_id.clone(),
+        });
+    }
+
+    pub(crate) fn request_snapshot_download(&mut self, snapshot_id: String, path: String) {
+        if self.loading.snapshot_file.is_some() || self.runtime.api.is_none() {
+            return;
+        }
+        self.loading.snapshot_file = Some((snapshot_id.clone(), path.clone()));
+        self.admin_tools.snapshots_error = None;
+        self.queue_command(UiCommand::DownloadSnapshot {
+            dataset_id: self.config.dataset_id.clone(),
+            snapshot_id,
+            path,
+        });
+    }
+
     pub(crate) fn request_admin_save(&mut self) {
         let Some(metadata) = self.datasets.admin_config.clone() else {
             return;
@@ -520,6 +783,83 @@ impl LabelloApp {
         }
         self.loading.admin = true;
         self.queue_command(UiCommand::SaveAdmin { metadata });
+    }
+
+    pub(crate) fn request_role_save(&mut self, user_id: labello_domain::UserId) {
+        if self.loading.roles_user.is_some() || self.runtime.api.is_none() {
+            return;
+        }
+        let Some(user) = self
+            .datasets
+            .users
+            .iter()
+            .find(|user| user.account.user_id == user_id)
+        else {
+            return;
+        };
+        let removes_admin = !user.roles.contains(&labello_domain::DatasetRole::DataAdmin);
+        if user_id == self.config.user_id && removes_admin {
+            self.runtime.error = Some("You cannot remove your own data admin role.".to_string());
+            return;
+        }
+        let admin_count = self
+            .datasets
+            .users
+            .iter()
+            .filter(|user| user.roles.contains(&labello_domain::DatasetRole::DataAdmin))
+            .count();
+        let was_admin = self
+            .datasets
+            .users_baseline
+            .iter()
+            .find(|user| user.account.user_id == user_id)
+            .is_some_and(|user| user.roles.contains(&labello_domain::DatasetRole::DataAdmin));
+        if was_admin && removes_admin && admin_count == 0 {
+            self.runtime.error = Some("At least one data admin must remain.".to_string());
+            return;
+        }
+        let roles = user.roles.clone();
+        self.loading.roles_user = Some(user_id.clone());
+        self.queue_command(UiCommand::SaveDatasetRoles {
+            dataset_id: self.config.dataset_id.clone(),
+            user_id,
+            roles,
+        });
+    }
+
+    fn sync_role_assignment(&mut self, user: &labello_client::DatasetUser) {
+        for metadata in [
+            self.datasets.metadata.as_mut(),
+            self.datasets.admin_config.as_mut(),
+            self.datasets.admin_baseline.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            metadata
+                .role_assignments
+                .retain(|assignment| assignment.user_id != user.account.user_id);
+            if !user.roles.is_empty() {
+                metadata
+                    .role_assignments
+                    .push(labello_domain::DatasetRoleAssignment {
+                        dataset_id: metadata.dataset_id.clone(),
+                        user_id: user.account.user_id.clone(),
+                        roles: user.roles.iter().cloned().collect(),
+                        assigned_at: labello_domain::now(),
+                        assigned_by: Some(self.config.user_id.clone()),
+                    });
+            }
+        }
+        if user.account.user_id == self.config.user_id
+            && let Some(summary) = self
+                .datasets
+                .summaries
+                .iter_mut()
+                .find(|summary| summary.dataset_id == self.config.dataset_id)
+        {
+            summary.roles = user.roles.clone();
+        }
     }
 
     pub(crate) fn request_ingest(&mut self) {
@@ -720,6 +1060,9 @@ impl LabelloApp {
         self.review_index = 0;
         self.review_rejected = false;
         self.save_status = SaveStatus::Idle;
+        self.last_edit_at = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.current_texture = loaded.color_image.map(|image| {
             ctx.load_texture(
                 format!("image-{image_id}"),
@@ -728,6 +1071,14 @@ impl LabelloApp {
             )
         });
         self.sync_review_selection();
+        self.restore_current_draft();
+        if let Some(task_id) = self.selected_task_id.as_ref() {
+            crate::persistence::save_last_work(
+                &self.config.user_id,
+                &self.config.dataset_id,
+                task_id,
+            );
+        }
     }
 
     fn apply_state(&mut self, state: labello_domain::ImageState) {
@@ -788,6 +1139,25 @@ impl LabelloApp {
                 "live HTTP UI is available in the WASM build".to_string(),
             )));
         }
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn replace_dataset_user(
+    users: &mut Vec<labello_client::DatasetUser>,
+    updated: labello_client::DatasetUser,
+) {
+    if let Some(user) = users
+        .iter_mut()
+        .find(|user| user.account.user_id == updated.account.user_id)
+    {
+        *user = updated;
+    } else {
+        users.push(updated);
     }
 }
 

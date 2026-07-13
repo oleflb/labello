@@ -5,6 +5,7 @@ pub mod folder_upload;
 pub mod live;
 pub mod live_workflow;
 pub mod panels;
+mod persistence;
 pub mod queue;
 pub mod setup;
 pub mod theme;

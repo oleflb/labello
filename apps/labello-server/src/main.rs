@@ -10,6 +10,10 @@ struct ServerConfig {
     bind: String,
     datasets_root: String,
     bootstrap_admins: Vec<String>,
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+    #[serde(default = "default_cookie_secure")]
+    session_cookie_secure: bool,
     dev_auth: DevAuthConfig,
     github_oauth: Option<GithubOAuthFileConfig>,
 }
@@ -36,12 +40,21 @@ fn default_dev_token() -> String {
     "dev-local-token".to_string()
 }
 
+fn default_cookie_secure() -> bool {
+    true
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:8080".to_string(),
             datasets_root: "datasets".to_string(),
             bootstrap_admins: vec!["admin".to_string()],
+            allowed_origins: vec![
+                "http://127.0.0.1:8081".to_string(),
+                "http://localhost:8081".to_string(),
+            ],
+            session_cookie_secure: false,
             dev_auth: DevAuthConfig {
                 enabled: true,
                 token: "dev-local-token".to_string(),
@@ -87,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
         .filter(|token| !token.is_empty());
     let mut state = ApiState::new(datasets_root)
         .with_dev_auth_token(dev_auth_token)
+        .with_allowed_origins(config.allowed_origins.clone())
+        .with_session_cookie_secure(config.session_cookie_secure)
         .with_bootstrap_admins(config.bootstrap_admins.iter().cloned().map(UserId::from));
     if let Some(github) = config.github_oauth {
         state = state.with_github_oauth(GithubOAuthConfig {

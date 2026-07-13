@@ -275,7 +275,7 @@ impl LabelloApp {
             return;
         }
         let operation_id = self.begin_operation();
-        self.save_status = SaveStatus::Syncing;
+        self.save_status = SaveStatus::Saving;
         self.queue_command(UiCommand::SaveAnnotations {
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
@@ -500,14 +500,13 @@ async fn save_annotations(
             )
             .await?;
     }
-    let state = job
-        .api
-        .rebuild_image(&job.dataset_id, &job.assignment.image_id)
-        .await?;
     if job.submit {
         job.api.complete_assignment(&job.dataset_id, action).await?;
+        return Ok(server_state);
     }
-    Ok(state)
+    job.api
+        .rebuild_image(&job.dataset_id, &job.assignment.image_id)
+        .await
 }
 
 async fn load_image(

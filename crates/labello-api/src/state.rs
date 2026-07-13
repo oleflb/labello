@@ -9,13 +9,17 @@ use labello_domain::{DatasetId, IdValidationError, UserId};
 use labello_storage::DatasetRepository;
 use tokio::sync::RwLock;
 
-use crate::GithubOAuthConfig;
+use crate::{GithubOAuthConfig, error::ApiResult, session::ServerStore};
 
 #[derive(Clone)]
 pub struct ApiState {
     datasets_root: Arc<PathBuf>,
     bootstrap_admins: Arc<BTreeSet<UserId>>,
     dev_auth_token: Option<Arc<String>>,
+    dev_auth_enabled: bool,
+    allowed_origins: Arc<Vec<String>>,
+    session_cookie_secure: bool,
+    pub(crate) server_store: ServerStore,
     ingest_jobs: Arc<RwLock<BTreeMap<String, IngestJob>>>,
     repositories: Arc<Mutex<BTreeMap<DatasetId, Arc<DatasetRepository>>>>,
     pub github_oauth: Option<GithubOAuthConfig>,
@@ -24,10 +28,15 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(datasets_root: impl Into<PathBuf>) -> Self {
+        let datasets_root = datasets_root.into();
         Self {
-            datasets_root: Arc::new(datasets_root.into()),
+            server_store: ServerStore::new(&datasets_root),
+            datasets_root: Arc::new(datasets_root),
             bootstrap_admins: Arc::new(BTreeSet::from([UserId::from("admin")])),
             dev_auth_token: None,
+            dev_auth_enabled: cfg!(test),
+            allowed_origins: Arc::new(Vec::new()),
+            session_cookie_secure: true,
             ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
             repositories: Arc::new(Mutex::new(BTreeMap::new())),
             github_oauth: None,
@@ -45,8 +54,13 @@ impl ApiState {
     }
 
     pub fn with_dev_auth_token(mut self, token: Option<String>) -> Self {
+        self.dev_auth_enabled = token.is_some();
         self.dev_auth_token = token.filter(|token| !token.is_empty()).map(Arc::new);
         self
+    }
+
+    pub fn dev_auth_enabled(&self) -> bool {
+        self.dev_auth_enabled
     }
 
     pub fn dev_auth_token(&self) -> Option<&str> {
@@ -55,6 +69,28 @@ impl ApiState {
 
     pub fn is_bootstrap_admin(&self, user_id: &UserId) -> bool {
         self.bootstrap_admins.contains(user_id)
+    }
+
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::new(origins);
+        self
+    }
+
+    pub fn allowed_origins(&self) -> &[String] {
+        &self.allowed_origins
+    }
+
+    pub fn with_session_cookie_secure(mut self, secure: bool) -> Self {
+        self.session_cookie_secure = secure;
+        self
+    }
+
+    pub fn session_cookie_secure(&self) -> bool {
+        self.session_cookie_secure
+    }
+
+    pub(crate) fn create_session(&self, user_id: UserId) -> ApiResult<String> {
+        self.server_store.create_session(user_id)
     }
 
     pub fn with_github_oauth(mut self, config: GithubOAuthConfig) -> Self {

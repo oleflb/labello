@@ -7,3 +7,5 @@ pub const STATE_FILE: &str = "state.json";
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const USERS_DIR: &str = "users";
 pub const KEYBINDINGS_FILE: &str = "keybindings.toml";
+pub const SNAPSHOTS_DIR: &str = ".labello/snapshots";
+pub const SNAPSHOT_MANIFEST_FILE: &str = "manifest.json";

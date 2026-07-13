@@ -2,24 +2,28 @@ use std::collections::BTreeSet;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::HeaderMap,
-    routing::{get, post},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    response::IntoResponse,
+    routing::{get, post, put},
 };
 use labello_client::{
-    CreateDatasetRequest, DatasetSummary, IngestJob, IngestJobStatus, UpdateDatasetConfigRequest,
+    CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
+    IngestJobStatus, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
     Actor, AnnotationSource, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment,
-    EventPayload, ImageId, PrelabelConfig, TaskDefinition,
+    EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, PrelabelConfig, ReviewWorkflow,
+    TaskDefinition, TaskStatus,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
     ApiState,
     auth::{
-        actor_from_headers, ensure_any_dataset_role, ensure_bootstrap_admin, ensure_dataset_role,
-        has_dataset_role,
+        actor_from_headers, current_account, ensure_any_dataset_role, ensure_bootstrap_admin,
+        ensure_dataset_role, has_dataset_role, session_token,
     },
     error::{ApiError, ApiResult},
 };
@@ -30,12 +34,17 @@ mod workflow;
 const MAX_INGEST_REPORT_DETAILS: usize = 100;
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    let allowed_origins = state.allowed_origins().to_vec();
+    let app = Router::new()
         .route("/health", get(health))
+        .route("/me", get(me))
+        .route("/logout", post(logout))
         .route("/auth/github/login", get(oauth_routes::github_login))
         .route("/auth/github/callback", get(oauth_routes::github_callback))
         .route("/datasets", get(list_datasets).post(create_dataset))
         .route("/datasets/{dataset_id}", get(get_dataset))
+        .route("/datasets/{dataset_id}/users", get(list_dataset_users))
+        .route("/datasets/{dataset_id}/roles", put(set_dataset_roles))
         .route(
             "/datasets/{dataset_id}/admin",
             get(get_admin_dataset).put(update_dataset_config),
@@ -48,6 +57,14 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/datasets/{dataset_id}/uploads", post(upload_images))
         .route(
+            "/datasets/{dataset_id}/snapshots",
+            get(list_snapshots).post(create_snapshot),
+        )
+        .route(
+            "/datasets/{dataset_id}/snapshots/{snapshot_id}/files/{*file_path}",
+            get(download_snapshot_file),
+        )
+        .route(
             "/datasets/{dataset_id}/tasks",
             get(list_tasks).post(add_task),
         )
@@ -59,6 +76,7 @@ pub fn router(state: ApiState) -> Router {
             "/datasets/{dataset_id}/images/next",
             post(workflow::assign_next),
         )
+        .route("/datasets/{dataset_id}/images", get(list_images))
         .route(
             "/datasets/{dataset_id}/assignments/release",
             post(workflow::release_assignment),
@@ -125,13 +143,168 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::prelabel_suggestions),
         )
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    if allowed_origins.is_empty() {
+        app
+    } else {
+        let origins = allowed_origins
+            .iter()
+            .filter_map(|origin| HeaderValue::from_str(origin).ok())
+            .collect::<Vec<_>>();
+        app.layer(
+            CorsLayer::new()
+                .allow_credentials(true)
+                .allow_origin(origins)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::HeaderName::from_static("x-dev-token"),
+                    header::HeaderName::from_static("x-user-id"),
+                    header::HeaderName::from_static("x-user-role"),
+                ]),
+        )
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "service": "labello" }))
+}
+
+async fn me(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<labello_domain::UserAccount>> {
+    Ok(Json(current_account(&state, &headers)?))
+}
+
+async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {
+    if let Some(token) = session_token(&headers) {
+        state.server_store.delete_session(&token)?;
+    }
+    let cookie = crate::session::expired_session_cookie(state.session_cookie_secure());
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie)
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+        )],
+        StatusCode::NO_CONTENT,
+    ))
+}
+
+async fn list_dataset_users(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<DatasetUser>>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let metadata = state.repo(&dataset_id)?.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let mut users = state
+        .server_store
+        .users()?
+        .into_iter()
+        .map(|account| (account.user_id.clone(), account))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for assignment in &metadata.role_assignments {
+        users
+            .entry(assignment.user_id.clone())
+            .or_insert_with(|| labello_domain::UserAccount {
+                user_id: assignment.user_id.clone(),
+                display_name: assignment.user_id.to_string(),
+                github_user_id: None,
+                github_login: None,
+                created_at: assignment.assigned_at,
+                updated_at: assignment.assigned_at,
+            });
+    }
+    Ok(Json(
+        users
+            .into_values()
+            .map(|account| {
+                let roles = metadata
+                    .role_assignments
+                    .iter()
+                    .find(|assignment| assignment.user_id == account.user_id)
+                    .map(|assignment| assignment.roles.iter().cloned().collect())
+                    .unwrap_or_default();
+                DatasetUser { account, roles }
+            })
+            .collect(),
+    ))
+}
+
+async fn set_dataset_roles(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+    Json(request): Json<SetDatasetRolesRequest>,
+) -> ApiResult<Json<DatasetUser>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    request.user_id.validate_path_segment()?;
+    let repo = state.repo(&dataset_id)?;
+    let mut metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let account = state
+        .server_store
+        .user(&request.user_id)?
+        .or_else(|| {
+            metadata
+                .role_assignments
+                .iter()
+                .find(|assignment| assignment.user_id == request.user_id)
+                .map(|assignment| labello_domain::UserAccount {
+                    user_id: assignment.user_id.clone(),
+                    display_name: assignment.user_id.to_string(),
+                    github_user_id: None,
+                    github_login: None,
+                    created_at: assignment.assigned_at,
+                    updated_at: assignment.assigned_at,
+                })
+        })
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "user {} has not logged in and is not in the user directory",
+                request.user_id
+            ))
+        })?;
+    let roles: BTreeSet<_> = request.roles.iter().cloned().collect();
+    if roles.len() != request.roles.len() {
+        return Err(ApiError::BadRequest("duplicate dataset roles".to_string()));
+    }
+    if request.user_id == actor.user_id && !roles.contains(&DatasetRole::DataAdmin) {
+        return Err(ApiError::BadRequest(
+            "cannot remove your own data_admin role through the API".to_string(),
+        ));
+    }
+    metadata
+        .role_assignments
+        .retain(|assignment| assignment.user_id != request.user_id);
+    if !roles.is_empty() {
+        metadata.role_assignments.push(DatasetRoleAssignment {
+            dataset_id: dataset_id.clone(),
+            user_id: request.user_id.clone(),
+            roles: roles.clone(),
+            assigned_at: labello_domain::now(),
+            assigned_by: Some(actor.user_id.clone()),
+        });
+    }
+    if !metadata
+        .role_assignments
+        .iter()
+        .any(|assignment| assignment.roles.contains(&DatasetRole::DataAdmin))
+    {
+        return Err(ApiError::BadRequest(
+            "at least one data_admin role assignment is required".to_string(),
+        ));
+    }
+    metadata.updated_at = labello_domain::now();
+    repo.save_dataset(&metadata).await?;
+    Ok(Json(DatasetUser {
+        account,
+        roles: roles.into_iter().collect(),
+    }))
 }
 
 async fn create_dataset(
@@ -416,6 +589,158 @@ async fn upload_images(
         labello_storage::IngestReport::default()
     };
     Ok(Json(storage_ingest_to_client(report)))
+}
+
+async fn create_snapshot(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+) -> ApiResult<Json<labello_domain::DatasetSnapshot>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    Ok(Json(repo.create_snapshot().await?))
+}
+
+async fn list_snapshots(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<labello_domain::DatasetSnapshot>>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    Ok(Json(repo.list_snapshots().await?))
+}
+
+async fn download_snapshot_file(
+    State(state): State<ApiState>,
+    Path((dataset_id, snapshot_id, file_path)): Path<(DatasetId, String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let bytes = repo.snapshot_file(&snapshot_id, &file_path).await?;
+    let media_type = mime_guess::from_path(&file_path).first_or_octet_stream();
+    let file_name = file_path.rsplit('/').next().unwrap_or("snapshot-file");
+    let disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(media_type.as_ref())
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&disposition)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+            ),
+        ],
+        Body::from(bytes),
+    ))
+}
+
+async fn list_images(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    Query(query): Query<ImageExplorerQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ImageExplorerPage>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
+    let index = repo.load_images_index().await?;
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let mut items = Vec::new();
+    for image in index.images_by_hash.into_values() {
+        if search.as_ref().is_some_and(|search| {
+            !image.file_name.to_lowercase().contains(search)
+                && !image.canonical_path.to_lowercase().contains(search)
+        }) {
+            continue;
+        }
+        let state = repo.load_image_state(&image.image_id).await?;
+        let mut task_statuses = metadata
+            .tasks
+            .iter()
+            .map(|task| (task.task_id.clone(), TaskStatus::Pending))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        task_statuses.extend(
+            state
+                .task_states
+                .iter()
+                .map(|(task_id, task_state)| (task_id.clone(), task_state.status.clone())),
+        );
+        let class_ids = state
+            .active_annotations()
+            .map(|annotation| annotation.class_id.clone())
+            .collect();
+        let item = ImageExplorerItem {
+            image,
+            task_statuses,
+            class_ids,
+        };
+        if query.status.as_ref().is_some_and(|status| {
+            if let Some(task_id) = query.task_id.as_ref() {
+                item.task_statuses.get(task_id) != Some(status)
+            } else {
+                !item
+                    .task_statuses
+                    .values()
+                    .any(|candidate| candidate == status)
+            }
+        }) {
+            continue;
+        }
+        if query
+            .task_id
+            .as_ref()
+            .is_some_and(|task_id| !item.task_statuses.contains_key(task_id))
+        {
+            continue;
+        }
+        if query
+            .class_id
+            .as_ref()
+            .is_some_and(|class_id| !item.class_ids.contains(class_id))
+        {
+            continue;
+        }
+        items.push(item);
+    }
+    items.sort_by(|left, right| {
+        left.image
+            .canonical_path
+            .cmp(&right.image.canonical_path)
+            .then_with(|| left.image.image_id.cmp(&right.image.image_id))
+    });
+    let total_items = items.len();
+    let page = query.page.max(1);
+    let page_size = query.page_size.clamp(1, 100);
+    let total_pages = total_items.div_ceil(page_size);
+    let start = page
+        .saturating_sub(1)
+        .saturating_mul(page_size)
+        .min(total_items);
+    let end = start.saturating_add(page_size).min(total_items);
+    Ok(Json(ImageExplorerPage {
+        items: items[start..end].to_vec(),
+        page,
+        page_size,
+        total_items,
+        total_pages,
+    }))
 }
 
 fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_client::IngestReport {
@@ -764,6 +1089,12 @@ fn validate_config_update(
 }
 
 fn validate_enabled_task(task: &TaskDefinition) -> ApiResult<()> {
+    if task.enabled && task.review.workflow == ReviewWorkflow::IndependentAgreement {
+        return Err(ApiError::BadRequest(format!(
+            "independent agreement workflow is not implemented for task {}",
+            task.task_id
+        )));
+    }
     if task.enabled && task.class_ids.len() != 1 {
         return Err(ApiError::BadRequest(format!(
             "enabled task {} must have exactly one class",
@@ -815,6 +1146,10 @@ mod report_tests {
         ];
         assert!(validate_enabled_task(&task).is_err());
         task.class_ids.truncate(1);
+        assert!(validate_enabled_task(&task).is_ok());
+        task.review.workflow = ReviewWorkflow::IndependentAgreement;
+        assert!(validate_enabled_task(&task).is_err());
+        task.enabled = false;
         assert!(validate_enabled_task(&task).is_ok());
     }
 

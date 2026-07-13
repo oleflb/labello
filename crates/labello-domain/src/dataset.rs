@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DatasetId, DatasetRoleAssignment, ImageDimensions, ImageId, LabelClass, MigrationRecord,
-    PrelabelConfig, SCHEMA_VERSION, TaskDefinition, Timestamp,
+    ClassId, DatasetId, DatasetRoleAssignment, ImageDimensions, ImageId, LabelClass,
+    MigrationRecord, PrelabelConfig, SCHEMA_VERSION, TaskDefinition, TaskId, TaskStatus, Timestamp,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -165,6 +165,44 @@ impl Default for ImagesIndex {
 pub struct ImbalanceConfig {
     pub max_ratio: f32,
     pub enforce: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotFileEntry {
+    pub path: String,
+    pub byte_size: u64,
+    pub blake3: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetSnapshot {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub dataset_id: DatasetId,
+    pub created_at: Timestamp,
+    pub includes_image_bytes: bool,
+    pub total_bytes: u64,
+    pub files: Vec<SnapshotFileEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageExplorerItem {
+    pub image: ImageRecord,
+    pub task_statuses: BTreeMap<TaskId, TaskStatus>,
+    pub class_ids: BTreeSet<ClassId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageExplorerPage {
+    pub items: Vec<ImageExplorerItem>,
+    pub page: usize,
+    pub page_size: usize,
+    pub total_items: usize,
+    pub total_pages: usize,
 }
 
 impl Default for ImbalanceConfig {

@@ -6,6 +6,11 @@ use labello_domain::{
 
 use crate::{DatasetRepository, StorageError, StorageResult};
 
+/// Assignments are renewed by claim retries and successful assignment-backed
+/// writes, so a separate heartbeat endpoint is not required.
+pub const DEFAULT_ASSIGNMENT_LEASE_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
 pub struct AssignmentContext<'a> {
     pub assignment_id: &'a AssignmentId,
     pub image_id: &'a ImageId,
@@ -38,6 +43,11 @@ impl DatasetRepository {
         if !task.enabled {
             return Ok(None);
         }
+        if task.review.workflow == ReviewWorkflow::IndependentAgreement {
+            return Err(StorageError::InvalidAssignment(format!(
+                "independent agreement workflow is not implemented for task {task_id}"
+            )));
+        }
         if task.class_ids.len() != 1 {
             return Err(StorageError::InvalidAssignment(format!(
                 "enabled task {task_id} must have exactly one class"
@@ -59,29 +69,78 @@ impl DatasetRepository {
             let lock = self.image_lock(image_id);
             let _guard = lock.lock().await;
             let state = self.load_image_state(image_id).await?;
-            if kind == AssignmentKind::Review
-                && (has_task_review_by_user(&state.reviews, task_id, user_id)
-                    || task_approval_count(&state.reviews, task_id) >= task.review.required_reviews)
-            {
-                continue;
-            }
-            if let Some(assignment) =
-                active_assignment_for_user(&state.assignments, task_id, user_id, &kind)
-            {
-                return Ok(Some(assignment.clone()));
-            }
-            if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind) {
-                continue;
-            }
-            let status = state
+            let now = labello_domain::now();
+            let actor = Actor {
+                user_id: user_id.clone(),
+                role: required_role.clone(),
+            };
+            let mut payloads = expired_assignment_payloads(&state.assignments, task_id, &kind, now);
+            let mut status = state
                 .task_states
                 .get(task_id)
-                .map(|state| &state.status)
-                .unwrap_or(&TaskStatus::Pending);
-            if !status_matches_kind(status, &kind) {
+                .map(|state| state.status.clone())
+                .unwrap_or(TaskStatus::Pending);
+            if kind == AssignmentKind::Annotation
+                && status == TaskStatus::InProgress
+                && payloads.iter().any(|payload| {
+                    matches!(
+                        payload,
+                        EventPayload::AssignmentUpdated { assignment }
+                            if assignment.kind == AssignmentKind::Annotation
+                    )
+                })
+                && !has_active_unexpired_assignment(&state.assignments, task_id, &kind, now)
+            {
+                status = TaskStatus::Pending;
+                payloads.push(EventPayload::TaskStateChanged {
+                    task_state: TaskState {
+                        task_id: task_id.clone(),
+                        status: TaskStatus::Pending,
+                        assigned_to: None,
+                        completed_by: None,
+                        completed_at: None,
+                        updated_at: now,
+                    },
+                });
+            }
+            if kind == AssignmentKind::Review {
+                let reviews = self.current_task_reviews(image_id, task_id).await?;
+                if has_task_review_by_user(&reviews, task_id, user_id)
+                    || task_approval_count(&reviews, task_id) >= task.review.required_reviews
+                {
+                    if !payloads.is_empty() {
+                        self.append_payloads_unlocked(image_id, &actor, payloads)
+                            .await?;
+                    }
+                    continue;
+                }
+            }
+            if let Some(assignment) =
+                active_assignment_for_user(&state.assignments, task_id, user_id, &kind, now)
+            {
+                let mut assignment = assignment.clone();
+                renew_assignment(&mut assignment, now);
+                payloads.push(EventPayload::AssignmentUpdated {
+                    assignment: assignment.clone(),
+                });
+                self.append_payloads_unlocked(image_id, &actor, payloads)
+                    .await?;
+                return Ok(Some(assignment));
+            }
+            if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind, now) {
+                if !payloads.is_empty() {
+                    self.append_payloads_unlocked(image_id, &actor, payloads)
+                        .await?;
+                }
                 continue;
             }
-            let now = labello_domain::now();
+            if !status_matches_kind(&status, &kind) {
+                if !payloads.is_empty() {
+                    self.append_payloads_unlocked(image_id, &actor, payloads)
+                        .await?;
+                }
+                continue;
+            }
             let assignment = Assignment {
                 assignment_id: AssignmentId::generate(),
                 image_id: image_id.clone(),
@@ -89,17 +148,14 @@ impl DatasetRepository {
                 assigned_to: user_id.clone(),
                 kind: kind.clone(),
                 status: AssignmentStatus::Active,
+                expires_at: Some(lease_expiration(now)),
                 created_at: now,
                 updated_at: now,
             };
-            let actor = Actor {
-                user_id: user_id.clone(),
-                role: required_role,
-            };
-            let mut payloads = vec![EventPayload::AssignmentUpdated {
+            payloads.push(EventPayload::AssignmentUpdated {
                 assignment: assignment.clone(),
-            }];
-            if kind == AssignmentKind::Annotation && status == &TaskStatus::Pending {
+            });
+            if kind == AssignmentKind::Annotation && status == TaskStatus::Pending {
                 let task_state = TaskState {
                     task_id: task_id.clone(),
                     status: TaskStatus::InProgress,
@@ -138,6 +194,7 @@ impl DatasetRepository {
         let lock = self.image_lock(image_id);
         let _guard = lock.lock().await;
         let state = self.load_image_state(image_id).await?;
+        let now = labello_domain::now();
         let mut assignment = exact_active_assignment(
             &state.assignments,
             assignment_id,
@@ -145,9 +202,9 @@ impl DatasetRepository {
             task_id,
             user_id,
             &kind,
+            now,
         )?
         .clone();
-        let now = labello_domain::now();
         assignment.status = AssignmentStatus::Cancelled;
         assignment.updated_at = now;
         let mut payloads = vec![EventPayload::AssignmentUpdated {
@@ -195,10 +252,23 @@ impl DatasetRepository {
                 "review and adjudication assignments complete with their records".to_string(),
             ));
         }
+        let metadata = self.load_dataset().await?;
+        let task = metadata.task(task_id).ok_or_else(|| {
+            StorageError::InvalidAssignment(format!("task {task_id} does not exist"))
+        })?;
+        let status = match task.review.workflow {
+            ReviewWorkflow::None => TaskStatus::Completed,
+            ReviewWorkflow::Approval => TaskStatus::Submitted,
+            ReviewWorkflow::IndependentAgreement => {
+                return Err(StorageError::InvalidAssignment(format!(
+                    "independent agreement workflow is not implemented for task {task_id}"
+                )));
+            }
+        };
         let now = labello_domain::now();
         let task_state = TaskState {
             task_id: task_id.clone(),
-            status: TaskStatus::Submitted,
+            status,
             assigned_to: Some(user_id.clone()),
             completed_by: Some(user_id.clone()),
             completed_at: Some(now),
@@ -218,6 +288,39 @@ impl DatasetRepository {
             )
             .await?;
         Ok(assignment)
+    }
+
+    pub async fn current_task_reviews(
+        &self,
+        image_id: &ImageId,
+        task_id: &TaskId,
+    ) -> StorageResult<Vec<ReviewRecord>> {
+        let events = self.load_events(image_id).await?;
+        let Some(round_start) = events.iter().rposition(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::TaskStateChanged { task_state }
+                    if task_state.task_id == *task_id
+                        && task_state.status == TaskStatus::Submitted
+            )
+        }) else {
+            return Ok(Vec::new());
+        };
+        Ok(events
+            .into_iter()
+            .skip(round_start + 1)
+            .filter_map(|event| match event.payload {
+                EventPayload::ReviewRecorded { review }
+                    if matches!(
+                        &review.target,
+                        ReviewTarget::Task { task_id: reviewed } if reviewed == task_id
+                    ) =>
+                {
+                    Some(review)
+                }
+                _ => None,
+            })
+            .collect())
     }
 
     pub async fn append_for_assignment(
@@ -257,6 +360,7 @@ impl DatasetRepository {
         let lock = self.image_lock(image_id);
         let _guard = lock.lock().await;
         let state = self.load_image_state(image_id).await?;
+        let now = labello_domain::now();
         let mut assignment = exact_active_assignment(
             &state.assignments,
             assignment_id,
@@ -264,6 +368,7 @@ impl DatasetRepository {
             task_id,
             user_id,
             &kind,
+            now,
         )?
         .clone();
         let task_status = state
@@ -288,11 +393,13 @@ impl DatasetRepository {
         }
         if complete {
             assignment.status = AssignmentStatus::Completed;
-            assignment.updated_at = labello_domain::now();
-            payloads.push(EventPayload::AssignmentUpdated {
-                assignment: assignment.clone(),
-            });
+            assignment.updated_at = now;
+        } else {
+            renew_assignment(&mut assignment, now);
         }
+        payloads.push(EventPayload::AssignmentUpdated {
+            assignment: assignment.clone(),
+        });
         let events = self
             .append_payloads_unlocked(
                 image_id,
@@ -373,6 +480,7 @@ fn exact_active_assignment<'a>(
     task_id: &TaskId,
     user_id: &UserId,
     kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
 ) -> StorageResult<&'a Assignment> {
     let assignment = assignments
         .iter()
@@ -398,6 +506,11 @@ fn exact_active_assignment<'a>(
             "assignment {assignment_id} is not active"
         )));
     }
+    if assignment_is_expired(assignment, now) {
+        return Err(StorageError::AssignmentConflict(format!(
+            "assignment {assignment_id} lease has expired"
+        )));
+    }
     Ok(assignment)
 }
 
@@ -406,12 +519,14 @@ fn active_assignment_for_user<'a>(
     task_id: &TaskId,
     user_id: &UserId,
     kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
 ) -> Option<&'a Assignment> {
     assignments.iter().find(|assignment| {
         &assignment.task_id == task_id
             && &assignment.kind == kind
             && assignment.status == AssignmentStatus::Active
             && &assignment.assigned_to == user_id
+            && !assignment_is_expired(assignment, now)
     })
 }
 
@@ -430,6 +545,7 @@ fn has_conflicting_assignment(
     task_id: &TaskId,
     user_id: &UserId,
     kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
 ) -> bool {
     if *kind == AssignmentKind::Review {
         return false;
@@ -439,7 +555,61 @@ fn has_conflicting_assignment(
             && &assignment.kind == kind
             && assignment.status == AssignmentStatus::Active
             && &assignment.assigned_to != user_id
+            && !assignment_is_expired(assignment, now)
     })
+}
+
+fn lease_expiration(now: labello_domain::Timestamp) -> labello_domain::Timestamp {
+    now + DEFAULT_ASSIGNMENT_LEASE_DURATION
+}
+
+fn assignment_is_expired(assignment: &Assignment, now: labello_domain::Timestamp) -> bool {
+    assignment
+        .expires_at
+        .unwrap_or_else(|| lease_expiration(assignment.updated_at))
+        <= now
+}
+
+fn renew_assignment(assignment: &mut Assignment, now: labello_domain::Timestamp) {
+    assignment.updated_at = now;
+    assignment.expires_at = Some(lease_expiration(now));
+}
+
+fn has_active_unexpired_assignment(
+    assignments: &[Assignment],
+    task_id: &TaskId,
+    kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
+) -> bool {
+    assignments.iter().any(|assignment| {
+        assignment.task_id == *task_id
+            && assignment.kind == *kind
+            && assignment.status == AssignmentStatus::Active
+            && !assignment_is_expired(assignment, now)
+    })
+}
+
+fn expired_assignment_payloads(
+    assignments: &[Assignment],
+    task_id: &TaskId,
+    kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
+) -> Vec<EventPayload> {
+    assignments
+        .iter()
+        .filter(|assignment| {
+            assignment.task_id == *task_id
+                && assignment.kind == *kind
+                && assignment.status == AssignmentStatus::Active
+                && assignment_is_expired(assignment, now)
+        })
+        .map(|assignment| {
+            let mut assignment = assignment.clone();
+            assignment.status = AssignmentStatus::Cancelled;
+            assignment.updated_at = now;
+            EventPayload::AssignmentUpdated { assignment }
+        })
+        .collect()
 }
 
 fn has_task_review_by_user(reviews: &[ReviewRecord], task_id: &TaskId, user_id: &UserId) -> bool {
@@ -629,6 +799,7 @@ mod tests {
                 assigned_to: user_id.clone(),
                 kind: kind.clone(),
                 status: AssignmentStatus::Active,
+                expires_at: Some(lease_expiration(now())),
                 created_at: now(),
                 updated_at: now(),
             };
@@ -922,6 +1093,212 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_retry_renews_the_same_assignment() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let first = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        let retry = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(retry.assignment_id, first.assignment_id);
+        assert!(retry.updated_at >= first.updated_at);
+        assert!(retry.expires_at.unwrap() >= first.expires_at.unwrap());
+        let (_, refreshed) = repo
+            .append_for_assignment(
+                &users[0],
+                AssignmentContext {
+                    assignment_id: &retry.assignment_id,
+                    image_id: &retry.image_id,
+                    task_id: &task_id,
+                    kind: AssignmentKind::Annotation,
+                },
+                Vec::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.assignment_id, first.assignment_id);
+        assert!(refreshed.expires_at.unwrap() >= retry.expires_at.unwrap());
+        let persisted = repo.load_image_state(&first.image_id).await.unwrap();
+        assert_eq!(persisted.assignments[0].expires_at, refreshed.expires_at);
+    }
+
+    #[tokio::test]
+    async fn expired_annotation_is_cancelled_and_atomically_reclaimed() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["owner", "next", "other"]).await;
+        let first = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        expire_assignment(&repo, &first, &users[0]).await;
+
+        let next_repo = repo.clone();
+        let other_repo = repo.clone();
+        let next_task = task_id.clone();
+        let other_task = task_id.clone();
+        let next_user = users[1].clone();
+        let other_user = users[2].clone();
+        let (next, other) = tokio::join!(
+            async move {
+                next_repo
+                    .assign_next_image(&next_user, &next_task, AssignmentKind::Annotation)
+                    .await
+                    .unwrap()
+            },
+            async move {
+                other_repo
+                    .assign_next_image(&other_user, &other_task, AssignmentKind::Annotation)
+                    .await
+                    .unwrap()
+            }
+        );
+        assert_eq!(
+            usize::from(next.is_some()) + usize::from(other.is_some()),
+            1
+        );
+        let reclaimed = next.or(other).unwrap();
+
+        assert_ne!(reclaimed.assignment_id, first.assignment_id);
+        assert!(reclaimed.assigned_to == users[1] || reclaimed.assigned_to == users[2]);
+        let state = repo.load_image_state(&first.image_id).await.unwrap();
+        assert_eq!(state.task_states[&task_id].status, TaskStatus::InProgress);
+        assert_eq!(
+            state
+                .assignments
+                .iter()
+                .find(|assignment| assignment.assignment_id == first.assignment_id)
+                .unwrap()
+                .status,
+            AssignmentStatus::Cancelled
+        );
+        let events = repo.load_events(&first.image_id).await.unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayload::TaskStateChanged { task_state }
+                if task_state.task_id == task_id && task_state.status == TaskStatus::Pending
+        )));
+    }
+
+    #[tokio::test]
+    async fn expired_correction_assignment_preserves_needs_correction() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["owner", "next"]).await;
+        let image_id = ImageId::from("img_0");
+        let timestamp = now();
+        repo.append_payload(
+            &image_id,
+            &Actor {
+                user_id: users[0].clone(),
+                role: DatasetRole::Annotator,
+            },
+            EventPayload::TaskStateChanged {
+                task_state: TaskState {
+                    task_id: task_id.clone(),
+                    status: TaskStatus::NeedsCorrection,
+                    assigned_to: None,
+                    completed_by: None,
+                    completed_at: None,
+                    updated_at: timestamp,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let first = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        expire_assignment(&repo, &first, &users[0]).await;
+
+        let reclaimed = repo
+            .assign_next_image(&users[1], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(reclaimed.assignment_id, first.assignment_id);
+        assert_eq!(
+            repo.load_image_state(&image_id).await.unwrap().task_states[&task_id].status,
+            TaskStatus::NeedsCorrection
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_owner_cannot_complete_assignment() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["owner"]).await;
+        let assignment = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        expire_assignment(&repo, &assignment, &users[0]).await;
+
+        let error = repo
+            .complete_assignment(
+                &users[0],
+                &assignment.assignment_id,
+                &assignment.image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::AssignmentConflict(_)));
+        assert!(error.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn completing_annotation_without_review_completes_task() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let mut metadata = repo.load_dataset_config().await.unwrap();
+        metadata.tasks[0].review.workflow = ReviewWorkflow::None;
+        metadata.tasks[0].review.required_reviews = 0;
+        repo.save_dataset(&metadata).await.unwrap();
+        let assignment = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        repo.complete_assignment(
+            &users[0],
+            &assignment.assignment_id,
+            &assignment.image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+
+        let state = repo.load_image_state(&assignment.image_id).await.unwrap();
+        assert_eq!(state.task_states[&task_id].status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn independent_agreement_claim_is_rejected() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let mut metadata = repo.load_dataset_config().await.unwrap();
+        metadata.tasks[0].review.workflow = ReviewWorkflow::IndependentAgreement;
+        repo.save_dataset(&metadata).await.unwrap();
+
+        let error = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::InvalidAssignment(_)));
+        assert!(error.to_string().contains("not implemented"));
+    }
+
+    #[tokio::test]
     async fn release_preserves_needs_correction() {
         let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
         let image_id = ImageId::from("img_0");
@@ -1113,5 +1490,26 @@ mod tests {
         .await
         .unwrap();
         (temp, repo, task_id, users)
+    }
+
+    async fn expire_assignment(
+        repo: &DatasetRepository,
+        assignment: &Assignment,
+        user_id: &UserId,
+    ) {
+        let mut expired = assignment.clone();
+        expired.expires_at = Some(now() - std::time::Duration::from_secs(1));
+        repo.append_payload(
+            &assignment.image_id,
+            &Actor {
+                user_id: user_id.clone(),
+                role: role_for_kind(&assignment.kind),
+            },
+            EventPayload::AssignmentUpdated {
+                assignment: expired,
+            },
+        )
+        .await
+        .unwrap();
     }
 }

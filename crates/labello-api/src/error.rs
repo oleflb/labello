@@ -25,6 +25,12 @@ pub enum ApiError {
 
     #[error("http client error: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Serialize)]
@@ -56,7 +62,10 @@ impl IntoResponse for ApiError {
             ApiError::Storage(labello_storage::StorageError::AssignmentConflict(_)) => {
                 StatusCode::CONFLICT
             }
-            ApiError::Storage(_) | ApiError::Http(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Storage(_)
+            | ApiError::Http(_)
+            | ApiError::Internal(_)
+            | ApiError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,

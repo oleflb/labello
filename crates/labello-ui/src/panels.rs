@@ -62,6 +62,16 @@ impl LabelloApp {
             if layout == LayoutMode::Desktop {
                 self.workspace_actions(ui);
             }
+            if let Some(account) = &self.auth.account {
+                ui.separator();
+                ui.label(&account.display_name);
+                if ui
+                    .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
+                    .clicked()
+                {
+                    self.request_logout();
+                }
+            }
         });
         if layout == LayoutMode::Tablet {
             ui.add_space(4.0);
@@ -80,7 +90,27 @@ impl LabelloApp {
         if self.view == AppView::Annotate {
             if ui
                 .add_enabled(
-                    ready && self.save_status == SaveStatus::Dirty,
+                    ready && !self.undo_stack.is_empty(),
+                    egui::Button::new("Undo"),
+                )
+                .on_hover_text("Undo the last annotation edit (Ctrl/Cmd+Z).")
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(
+                    ready && !self.redo_stack.is_empty(),
+                    egui::Button::new("Redo"),
+                )
+                .on_hover_text("Redo the last undone edit (Ctrl/Cmd+Shift+Z or Ctrl+Y).")
+                .clicked()
+            {
+                self.redo();
+            }
+            if ui
+                .add_enabled(
+                    ready && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry),
                     egui::Button::new("Save"),
                 )
                 .on_hover_text("Save edits and keep this assignment active.")
@@ -261,7 +291,7 @@ impl LabelloApp {
                 return;
             }
             AppView::Admin => {
-                self.admin_view(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| self.admin_view(ui));
                 return;
             }
             AppView::Stats => {
@@ -293,7 +323,7 @@ impl LabelloApp {
                     badge(ui, &workflow.label(), theme::TEAL);
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(2.0);
             let texture = self.current_texture.clone();
             let annotations = self
                 .annotations
@@ -318,6 +348,16 @@ impl LabelloApp {
                 && self.pending_transition.is_none();
             let bounding_box_tool = self.tool == Tool::BoundingBox;
             let selected_annotation = self.selected_annotation.clone();
+            if self.view == AppView::Review {
+                let review_annotation = selected_annotation.as_ref().and_then(|id| {
+                    annotations
+                        .iter()
+                        .find(|annotation| !annotation.deleted && &annotation.annotation_id == id)
+                });
+                self.canvas.set_review_focus(review_annotation);
+            } else {
+                self.canvas.clear_review_focus();
+            }
             let action = show_canvas_interactive(
                 ui,
                 &mut self.canvas,
@@ -650,7 +690,8 @@ fn status_text(status: SaveStatus) -> &'static str {
         SaveStatus::Idle => "Idle",
         SaveStatus::Dirty => "Unsaved",
         SaveStatus::Saved => "Saved",
-        SaveStatus::Syncing => "Syncing",
+        SaveStatus::Saving => "Saving",
+        SaveStatus::Retry => "Retry",
     }
 }
 
@@ -659,6 +700,7 @@ fn status_color(status: SaveStatus) -> Color32 {
         SaveStatus::Idle => theme::MUTED,
         SaveStatus::Dirty => theme::AMBER,
         SaveStatus::Saved => theme::TEAL,
-        SaveStatus::Syncing => theme::BLUE,
+        SaveStatus::Saving => theme::BLUE,
+        SaveStatus::Retry => theme::RED,
     }
 }
