@@ -22,6 +22,7 @@ axum = { version = "0.8", features = ["json", "macros", "multipart"] }
 base64 = "0.22"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde", "clock", "wasmbind"] }
+console_error_panic_hook = "0.1"
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.35"
 egui_kittest = "0.35"

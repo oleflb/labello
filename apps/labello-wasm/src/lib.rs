@@ -5,7 +5,18 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
-pub async fn start() -> Result<(), JsValue> {
+pub fn start() {
+    console_error_panic_hook::set_once();
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = run().await {
+            web_sys::console::error_1(&error);
+            show_startup_error(&error);
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run() -> Result<(), JsValue> {
     let canvas = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id("labello-canvas"))
@@ -21,7 +32,34 @@ pub async fn start() -> Result<(), JsValue> {
                 Ok(Box::new(labello_ui::LabelloApp::live_http(config.clone())))
             }),
         )
-        .await
+        .await?;
+    remove_startup_status();
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_startup_error(error: &JsValue) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(status) = document.get_element_by_id("startup-status") else {
+        return;
+    };
+    let message = error.as_string().unwrap_or_else(|| format!("{error:?}"));
+    let _ = status.set_attribute("data-error", "true");
+    status.set_text_content(Some(&format!(
+        "Labello could not start. Reload after rebuilding the WASM application. Details: {message}"
+    )));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn remove_startup_status() {
+    if let Some(status) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("startup-status"))
+    {
+        status.remove();
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
