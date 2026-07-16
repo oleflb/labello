@@ -1,7 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{AdjudicationId, AnnotationId, ImageId, ReviewId, TaskId, Timestamp, UserId};
+use crate::{
+    AdjudicationId, AnnotationId, AssignmentId, CorrectionId, ImageId, ReviewId, TaskId, Timestamp,
+    UserId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +37,20 @@ pub struct ReviewRecord {
     pub decision: ReviewDecision,
     pub timestamp: Timestamp,
     pub comment: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewerCorrectionRecord {
+    pub correction_id: CorrectionId,
+    pub assignment_id: AssignmentId,
+    pub annotation_id: AnnotationId,
+    pub previous_version: u32,
+    pub corrected_version: u32,
+    pub task_id: TaskId,
+    pub reviewer_user_id: UserId,
+    pub timestamp: Timestamp,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

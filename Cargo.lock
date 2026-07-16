@@ -2082,6 +2082,7 @@ dependencies = [
 name = "labello-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eframe",
  "egui",
  "egui_kittest",
@@ -2090,6 +2091,7 @@ dependencies = [
  "labello-domain",
  "serde",
  "serde_json",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

@@ -106,6 +106,10 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::append_event),
         )
         .route(
+            "/datasets/{dataset_id}/images/{image_id}/annotation-batch",
+            post(workflow::apply_annotation_batch),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}/admin/events",
             post(workflow::append_admin_repair_event),
         )
@@ -886,6 +890,15 @@ pub(crate) fn validate_payload(
 ) -> ApiResult<()> {
     match payload {
         EventPayload::AnnotationVersionCreated { annotation, .. } => {
+            if matches!(
+                annotation.source,
+                AnnotationSource::ReviewerCorrection { .. }
+            ) {
+                return Err(ApiError::BadRequest(
+                    "reviewer correction provenance is created by the correction endpoint only"
+                        .to_string(),
+                ));
+            }
             let record = metadata
                 .images
                 .get(image_id)
@@ -919,6 +932,7 @@ pub(crate) fn validate_payload(
         }
         EventPayload::AnnotationDeleted { .. }
         | EventPayload::ReviewRecorded { .. }
+        | EventPayload::ReviewerCorrectionRecorded { .. }
         | EventPayload::AdjudicationRecorded { .. }
         | EventPayload::AssignmentUpdated { .. } => {}
     }
@@ -963,6 +977,9 @@ pub(crate) fn required_role_for_payload(
             }
             Ok(DatasetRole::Reviewer)
         }
+        EventPayload::ReviewerCorrectionRecorded { .. } => Err(ApiError::BadRequest(
+            "reviewer correction events are created by the correction endpoint only".to_string(),
+        )),
         EventPayload::AdjudicationRecorded { adjudication } => {
             if adjudication.adjudicator_user_id != actor.user_id {
                 return Err(ApiError::Unauthorized(

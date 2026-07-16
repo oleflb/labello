@@ -31,6 +31,30 @@ struct UploadRequestPolicy<'a> {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+#[derive(Default)]
+struct OneShotCompletion {
+    completed: bool,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl OneShotCompletion {
+    fn begin(&mut self) -> bool {
+        if self.completed {
+            false
+        } else {
+            self.completed = true;
+            true
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn notify_and_wake<T>(message: T, send: impl FnOnce(T), wake: impl FnOnce()) {
+    send(message);
+    wake();
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 impl UploadAuthMode {
     fn request_policy(&self) -> UploadRequestPolicy<'_> {
         match self {
@@ -58,6 +82,8 @@ impl LabelloApp {
         if self.loading.uploading {
             return;
         }
+        self.loading.uploading = true;
+        self.loading.upload_progress = None;
         let root = upload_root();
         match open_folder_picker(self, root.clone()) {
             Ok(()) => {}
@@ -94,6 +120,11 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
     let document = window
         .document()
         .ok_or_else(|| "missing document".to_string())?;
+    let repaint = app
+        .runtime
+        .repaint_ctx
+        .clone()
+        .ok_or_else(|| "folder picker opened before egui was ready".to_string())?;
     let input = document
         .create_element("input")
         .map_err(js_error)?
@@ -130,20 +161,57 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
         },
         root,
     };
+    type PickerCallback = Closure<dyn FnMut(web_sys::Event)>;
+    let callback_holder = std::rc::Rc::new(std::cell::RefCell::new(None::<PickerCallback>));
+    let completion = std::rc::Rc::new(std::cell::RefCell::new(OneShotCompletion::default()));
     let input_for_callback = input.clone();
-    let callback = Closure::<dyn FnMut(_)>::wrap(Box::new(move |_event: web_sys::Event| {
-        let files = input_for_callback.files();
+    let holder_for_callback = callback_holder.clone();
+    let completion_for_callback = completion.clone();
+    let window_for_callback = window.clone();
+    let callback = Closure::<dyn FnMut(_)>::wrap(Box::new(move |event: web_sys::Event| {
+        if !completion_for_callback.borrow_mut().begin() {
+            return;
+        }
+        let files = (event.type_() == "change")
+            .then(|| input_for_callback.files())
+            .flatten();
+        input_for_callback.set_onchange(None);
+        input_for_callback
+            .unchecked_ref::<web_sys::HtmlElement>()
+            .set_oncancel(None);
         input_for_callback.remove();
+
         let tx = tx.clone();
-        let config = config.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = upload_files(files, config, tx.clone()).await;
-            let _ = tx.send(UiMessage::FolderUploadFinished(result));
+        let repaint = repaint.clone();
+        if event.type_() == "change" {
+            let config = config.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = upload_files(files, config, tx.clone(), repaint.clone()).await;
+                send_ui_message(&tx, &repaint, UiMessage::FolderUploadFinished(result));
+            });
+        } else {
+            send_ui_message(
+                &tx,
+                &repaint,
+                UiMessage::FolderUploadFinished(Err("folder selection cancelled".to_string())),
+            );
+        }
+
+        let holder = holder_for_callback.clone();
+        let drop_callback = Closure::once_into_js(move || {
+            holder.borrow_mut().take();
         });
+        window_for_callback.queue_microtask(drop_callback.unchecked_ref());
     }));
-    input.set_onchange(Some(callback.as_ref().unchecked_ref()));
+    *callback_holder.borrow_mut() = Some(callback);
+    let callback = callback_holder.borrow();
+    let callback = callback.as_ref().expect("folder picker callback installed");
+    let function = callback.as_ref().unchecked_ref();
+    input.set_onchange(Some(function));
+    input
+        .unchecked_ref::<web_sys::HtmlElement>()
+        .set_oncancel(Some(function));
     input.click();
-    callback.forget();
     Ok(())
 }
 
@@ -161,6 +229,7 @@ async fn upload_files(
     files: Option<web_sys::FileList>,
     config: UploadConfig,
     tx: std::sync::mpsc::Sender<UiMessage>,
+    repaint: egui::Context,
 ) -> Result<String, String> {
     use wasm_bindgen::JsCast;
 
@@ -172,6 +241,7 @@ async fn upload_files(
 
     send_progress(
         &tx,
+        &repaint,
         total_files,
         0,
         0,
@@ -203,6 +273,7 @@ async fn upload_files(
 
         send_progress(
             &tx,
+            &repaint,
             total_files,
             uploaded_files,
             current_batch,
@@ -214,6 +285,7 @@ async fn upload_files(
         uploaded_files += batch.file_count;
         send_progress(
             &tx,
+            &repaint,
             total_files,
             uploaded_files,
             current_batch,
@@ -224,13 +296,22 @@ async fn upload_files(
 
     send_progress(
         &tx,
+        &repaint,
         total_files,
         uploaded_files,
         current_batch,
         "Running ingest".to_string(),
     );
     yield_to_browser().await?;
-    run_ingest_job(&config, &tx, total_files, uploaded_files, current_batch).await?;
+    run_ingest_job(
+        &config,
+        &tx,
+        &repaint,
+        total_files,
+        uploaded_files,
+        current_batch,
+    )
+    .await?;
 
     Ok(format!(
         "Uploaded {total_files} files into {} and completed ingest",
@@ -271,12 +352,7 @@ impl UploadBatch {
 
 #[cfg(target_arch = "wasm32")]
 async fn upload_batch(config: &UploadConfig, form: &web_sys::FormData) -> Result<(), String> {
-    let url = format!(
-        "{}/datasets/{}/uploads?root={}&ingest=false",
-        config.api_base_url.trim_end_matches('/'),
-        encode_component(&config.dataset_id),
-        encode_component(&config.root),
-    );
+    let url = upload_batch_url(&config.api_base_url, &config.dataset_id, &config.root);
     let init = request_init("POST");
     init.set_body(form);
     fetch(config, &url, &init).await.map(|_| ())
@@ -302,6 +378,7 @@ async fn start_ingest_job(config: &UploadConfig) -> Result<String, String> {
 async fn run_ingest_job(
     config: &UploadConfig,
     tx: &std::sync::mpsc::Sender<UiMessage>,
+    repaint: &egui::Context,
     total_files: u32,
     uploaded_files: u32,
     current_batch: u32,
@@ -311,6 +388,7 @@ async fn run_ingest_job(
         browser_sleep(500).await?;
         send_progress(
             tx,
+            repaint,
             total_files,
             uploaded_files,
             current_batch,
@@ -373,7 +451,7 @@ async fn fetch(
         UploadCredentials::Include => web_sys::RequestCredentials::Include,
         UploadCredentials::Omit => web_sys::RequestCredentials::Omit,
     });
-    let request = web_sys::Request::new_with_str_and_init(&url, &init).map_err(js_error)?;
+    let request = web_sys::Request::new_with_str_and_init(url, init).map_err(js_error)?;
     if let Some(user_id) = policy.user_id {
         request
             .headers()
@@ -407,17 +485,37 @@ async fn fetch(
 #[cfg(target_arch = "wasm32")]
 fn send_progress(
     tx: &std::sync::mpsc::Sender<UiMessage>,
+    repaint: &egui::Context,
     total_files: u32,
     uploaded_files: u32,
     current_batch: u32,
     message: String,
 ) {
-    let _ = tx.send(UiMessage::FolderUploadProgress(FolderUploadProgress {
-        uploaded_files,
-        total_files,
-        current_batch,
+    send_ui_message(
+        tx,
+        repaint,
+        UiMessage::FolderUploadProgress(FolderUploadProgress {
+            uploaded_files,
+            total_files,
+            current_batch,
+            message,
+        }),
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn send_ui_message(
+    tx: &std::sync::mpsc::Sender<UiMessage>,
+    repaint: &egui::Context,
+    message: UiMessage,
+) {
+    notify_and_wake(
         message,
-    }));
+        |message| {
+            let _ = tx.send(message);
+        },
+        || repaint.request_repaint(),
+    );
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -486,11 +584,32 @@ fn relative_file_path(file: &web_sys::File) -> String {
     path.unwrap_or_else(|| file.name())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+fn upload_batch_url(api_base_url: &str, dataset_id: &str, root: &str) -> String {
+    format!(
+        "{}/datasets/{}/uploads?root={}&ingest=false",
+        api_base_url.trim_end_matches('/'),
+        encode_component(dataset_id),
+        encode_component(root),
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn encode_component(value: &str) -> String {
-    js_sys::encode_uri_component(value)
-        .as_string()
-        .unwrap_or_else(|| value.to_string())
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
+        {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -502,7 +621,10 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{UploadAuthMode, UploadCredentials, UploadRequestPolicy};
+    use super::{
+        OneShotCompletion, UploadAuthMode, UploadCredentials, UploadRequestPolicy, notify_and_wake,
+        upload_batch_url,
+    };
 
     #[test]
     fn session_requests_include_credentials_without_development_headers() {
@@ -543,5 +665,31 @@ mod tests {
                 dev_token: None,
             }
         );
+    }
+
+    #[test]
+    fn upload_request_encodes_dataset_and_root_without_changing_the_api_base() {
+        assert_eq!(
+            upload_batch_url(
+                "https://example.test/api/",
+                "data/set",
+                "uploads/My folder+#1"
+            ),
+            "https://example.test/api/datasets/data%2Fset/uploads?root=uploads%2FMy%20folder%2B%231&ingest=false"
+        );
+    }
+
+    #[test]
+    fn picker_cleanup_is_one_shot() {
+        let mut completion = OneShotCompletion::default();
+        assert!(completion.begin());
+        assert!(!completion.begin());
+    }
+
+    #[test]
+    fn message_delivery_wakes_the_ui_even_when_the_receiver_is_gone() {
+        let mut woke = false;
+        notify_and_wake((), |_| {}, || woke = true);
+        assert!(woke);
     }
 }

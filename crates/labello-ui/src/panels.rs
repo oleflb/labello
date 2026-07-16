@@ -1,28 +1,33 @@
 use eframe::egui::{self, Color32, RichText};
-use labello_domain::{AdjudicationDecision, ReviewDecision};
+use labello_domain::{AdjudicationDecision, AnnotationGeometry, KeypointState, ReviewDecision};
 
 use crate::{
     app::{
         AppView, Drawer, LabelloApp, LayoutMode, PendingTransition, SaveStatus, Tool,
         annotation_type_label,
     },
-    canvas::{CanvasAction, show_canvas_interactive},
+    canvas::{CanvasAction, CanvasInteraction, show_canvas_configured},
     theme,
 };
 
 impl LabelloApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new("Labello")
                     .size(22.0)
                     .strong()
                     .color(theme::TEXT),
             );
-            badge(
+            bounded_badge(
                 ui,
                 &format!("Dataset {}", self.config.dataset_id),
                 theme::BLUE,
+                if layout == LayoutMode::Compact {
+                    132.0
+                } else {
+                    220.0
+                },
             );
             if self.work_view() {
                 badge(
@@ -31,16 +36,47 @@ impl LabelloApp {
                     status_color(self.save_status),
                 );
             }
-            if let Some(error) = &self.runtime.error {
+            if let Some(error) = &self.runtime.storage_error {
+                ui.colored_label(theme::AMBER, bounded_message(error));
+            } else if let Some(error) = &self.runtime.error {
                 ui.colored_label(theme::AMBER, bounded_message(error));
             } else if let Some(notice) = &self.runtime.notice {
                 ui.colored_label(theme::TEAL, bounded_message(notice));
             }
         });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        if layout == LayoutMode::Compact {
+            ui.horizontal_wrapped(|ui| {
+                self.compact_navigation(ui);
+                if self.work_view() {
+                    ui.menu_button("Panels", |ui| {
+                        if ui.button("Workflow").clicked() {
+                            self.drawer = Some(Drawer::Workflow);
+                            ui.close();
+                        }
+                        if ui.button("Inspector").clicked() {
+                            self.drawer = Some(Drawer::Inspector);
+                            ui.close();
+                        }
+                        if ui.button("Settings").clicked() {
+                            self.show_settings = true;
+                            ui.close();
+                        }
+                    });
+                }
+                if self.auth.account.is_some()
+                    && ui
+                        .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
+                        .clicked()
+                {
+                    self.request_logout();
+                }
+            });
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
             self.mode_toolbar(ui);
-            if layout == LayoutMode::Tablet && self.work_view() {
+            if layout != LayoutMode::Wide && self.work_view() {
                 if ui.button("Workflow").clicked() {
                     self.drawer = if self.drawer == Some(Drawer::Workflow) {
                         None
@@ -59,12 +95,17 @@ impl LabelloApp {
             if self.work_view() && ui.button("Settings").clicked() {
                 self.show_settings = true;
             }
-            if layout == LayoutMode::Desktop {
+            if layout == LayoutMode::Wide {
                 self.workspace_actions(ui);
             }
             if let Some(account) = &self.auth.account {
                 ui.separator();
-                ui.label(&account.display_name);
+                if layout == LayoutMode::Wide || !self.work_view() {
+                    ui.add_sized(
+                        [180.0, 44.0],
+                        egui::Label::new(&account.display_name).truncate(),
+                    );
+                }
                 if ui
                     .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
                     .clicked()
@@ -73,13 +114,9 @@ impl LabelloApp {
                 }
             }
         });
-        if layout == LayoutMode::Tablet {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| self.workspace_actions(ui));
-        }
     }
 
-    fn workspace_actions(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn workspace_actions(&mut self, ui: &mut egui::Ui) {
         if !self.work_view() {
             return;
         }
@@ -134,6 +171,70 @@ impl LabelloApp {
             self.skip_assignment();
         }
         ui.toggle_value(&mut self.show_tutorial, "Tutorial");
+    }
+
+    pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
+        let ready = self.assignment.is_some()
+            && !self.loading.saving
+            && !self.loading.image
+            && self.pending_transition.is_none();
+        ui.horizontal_wrapped(|ui| {
+            if self.view == AppView::Annotate
+                && ui
+                    .add_enabled(ready, egui::Button::new("Submit & next"))
+                    .clicked()
+            {
+                self.submit_and_advance();
+            }
+            ui.menu_button("More actions", |ui| {
+                if self.view == AppView::Annotate {
+                    if ui
+                        .add_enabled(
+                            ready && !self.undo_stack.is_empty(),
+                            egui::Button::new("Undo"),
+                        )
+                        .clicked()
+                    {
+                        self.undo();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            ready && !self.redo_stack.is_empty(),
+                            egui::Button::new("Redo"),
+                        )
+                        .clicked()
+                    {
+                        self.redo();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            ready
+                                && matches!(
+                                    self.save_status,
+                                    SaveStatus::Dirty | SaveStatus::Retry
+                                ),
+                            egui::Button::new("Save"),
+                        )
+                        .clicked()
+                    {
+                        self.autosave();
+                        ui.close();
+                    }
+                }
+                if ui.add_enabled(ready, egui::Button::new("Skip")).clicked() {
+                    self.skip_assignment();
+                    ui.close();
+                }
+                if ui
+                    .toggle_value(&mut self.show_tutorial, "Tutorial")
+                    .clicked()
+                {
+                    ui.close();
+                }
+            });
+        });
     }
 
     pub(crate) fn task_panel(&mut self, ui: &mut egui::Ui) {
@@ -233,6 +334,11 @@ impl LabelloApp {
     }
 
     fn review_actions(&mut self, ui: &mut egui::Ui) {
+        let ready = self.assignment.is_some() && !self.loading.saving;
+        if self.correction_draft.is_some() {
+            self.correction_actions(ui, ready);
+            return;
+        }
         let total = self
             .annotations
             .iter()
@@ -251,8 +357,17 @@ impl LabelloApp {
             metric(ui, "Final check", "Full image".to_string());
             ui.label("Check for missed objects before completing this review.");
         }
-        let ready = self.assignment.is_some() && !self.loading.saving;
-        ui.horizontal(|ui| {
+        if self.can_correct_review_object() {
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(ready, egui::Button::new("Correct object"))
+                .on_hover_text("Edit this existing object without returning it to the annotator.")
+                .clicked()
+            {
+                self.start_correction();
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(ready, egui::Button::new("Approve  Y"))
                 .clicked()
@@ -264,6 +379,147 @@ impl LabelloApp {
                 .clicked()
             {
                 self.request_review(ReviewDecision::Rejected);
+            }
+        });
+    }
+
+    fn correction_actions(&mut self, ui: &mut egui::Ui, ready: bool) {
+        ui.separator();
+        ui.heading("Correction mode");
+        ui.label("Only the highlighted existing object can be edited.");
+
+        let (can_undo, geometry_changed) = self
+            .correction_draft
+            .as_ref()
+            .map(|draft| (!draft.geometry_history.is_empty(), draft.geometry_changed()))
+            .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(ready && can_undo, egui::Button::new("Undo correction"))
+                .clicked()
+            {
+                self.undo_correction();
+            }
+            if ui
+                .add_enabled(ready, egui::Button::new("Discard correction"))
+                .clicked()
+            {
+                self.discard_correction();
+            }
+            if ui
+                .add_enabled(
+                    ready && geometry_changed,
+                    egui::Button::new("Correct & finalize"),
+                )
+                .on_disabled_hover_text("Move, resize, or change a keypoint before finalizing.")
+                .clicked()
+            {
+                self.request_correction();
+            }
+        });
+
+        let skeleton_keypoints = self.correction_draft.as_ref().and_then(|draft| {
+            let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
+                return None;
+            };
+            Some(
+                skeleton
+                    .keypoints
+                    .iter()
+                    .enumerate()
+                    .map(|(index, keypoint)| (index, keypoint.name.clone(), keypoint.state.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        });
+        if let Some(keypoints) = skeleton_keypoints {
+            ui.label("Select and drag an existing keypoint:");
+            for (index, name, state) in keypoints {
+                let selected = self
+                    .correction_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.selected_keypoint == Some(index));
+                if ui
+                    .selectable_label(
+                        selected,
+                        format!("{name} ({})", keypoint_state_label(&state)),
+                    )
+                    .clicked()
+                {
+                    self.select_correction_keypoint(index);
+                }
+            }
+            self.correction_keypoint_state(ui, ready);
+        } else {
+            ui.label("Drag inside the box to move it, or drag a handle to resize it.");
+        }
+
+        if let Some(draft) = self.correction_draft.as_mut() {
+            ui.label("Reason (optional)");
+            ui.add_enabled(
+                ready,
+                egui::TextEdit::multiline(&mut draft.reason)
+                    .desired_rows(2)
+                    .hint_text("What was corrected?"),
+            );
+        }
+    }
+
+    fn correction_keypoint_state(&mut self, ui: &mut egui::Ui, ready: bool) {
+        let Some((index, current, has_point, required)) =
+            self.correction_draft.as_ref().and_then(|draft| {
+                let index = draft.selected_keypoint?;
+                let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
+                    return None;
+                };
+                let keypoint = skeleton.keypoints.get(index)?;
+                let required = self
+                    .selected_task()
+                    .and_then(|task| task.skeleton.as_ref())
+                    .and_then(|spec| spec.keypoints.get(index))
+                    .is_some_and(|spec| spec.required);
+                Some((
+                    index,
+                    keypoint.state.clone(),
+                    keypoint.point.is_some(),
+                    required,
+                ))
+            })
+        else {
+            return;
+        };
+        let (allow_hidden, allow_absent) = self
+            .selected_task()
+            .and_then(|task| task.skeleton.as_ref())
+            .map(|spec| (spec.allow_hidden, spec.allow_absent))
+            .unwrap_or_default();
+        ui.label(format!("Keypoint {} visibility", index + 1));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    ready && has_point,
+                    egui::Button::selectable(current == KeypointState::Visible, "Visible"),
+                )
+                .clicked()
+            {
+                self.set_correction_keypoint_state(KeypointState::Visible);
+            }
+            if ui
+                .add_enabled(
+                    ready && allow_hidden && has_point,
+                    egui::Button::selectable(current == KeypointState::Hidden, "Hidden"),
+                )
+                .clicked()
+            {
+                self.set_correction_keypoint_state(KeypointState::Hidden);
+            }
+            if ui
+                .add_enabled(
+                    ready && allow_absent && !required,
+                    egui::Button::selectable(current == KeypointState::Absent, "Absent"),
+                )
+                .clicked()
+            {
+                self.set_correction_keypoint_state(KeypointState::Absent);
             }
         });
     }
@@ -287,15 +543,15 @@ impl LabelloApp {
     pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
         match self.view {
             AppView::Setup => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.setup_view(ui));
+                centered_scroll(ui, 760.0, |ui| self.setup_view(ui));
                 return;
             }
             AppView::Admin => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.admin_view(ui));
+                centered_scroll(ui, 1100.0, |ui| self.admin_view(ui));
                 return;
             }
             AppView::Stats => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.stats_view(ui));
+                centered_scroll(ui, 1100.0, |ui| self.stats_view(ui));
                 return;
             }
             AppView::Annotate | AppView::Review | AppView::Adjudicate => {}
@@ -310,8 +566,10 @@ impl LabelloApp {
             ui.add_space(8.0);
         }
         if let Some(current) = self.current.clone() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&current.image.file_name).strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(&current.image.file_name).strong()).truncate(),
+                );
                 ui.label(
                     RichText::new(format!(
                         "{} x {}",
@@ -325,12 +583,19 @@ impl LabelloApp {
             });
             ui.add_space(2.0);
             let texture = self.current_texture.clone();
-            let annotations = self
+            let mut annotations = self
                 .annotations
                 .iter()
                 .filter(|annotation| self.annotation_matches_selected_workflow(annotation))
                 .cloned()
                 .collect::<Vec<_>>();
+            if let Some(draft) = self.correction_draft.as_ref()
+                && let Some(annotation) = annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == draft.annotation_id)
+            {
+                annotation.geometry = draft.edited_geometry.clone();
+            }
             let skeleton_edges = self
                 .selected_task()
                 .and_then(|task| task.skeleton.as_ref())
@@ -343,9 +608,15 @@ impl LabelloApp {
                 })
                 .unwrap_or_default();
             let prelabels = self.visible_prelabels();
-            let editable = self.view == AppView::Annotate
-                && !self.loading.saving
-                && self.pending_transition.is_none();
+            let annotator_editable =
+                self.view == AppView::Annotate && self.pending_transition.is_none();
+            let correction_interaction = self.correction_draft.as_ref().map(|draft| {
+                let mut interaction = CanvasInteraction::correction(draft.selected_keypoint);
+                interaction.editable = !self.loading.saving;
+                interaction
+            });
+            let interaction = correction_interaction
+                .unwrap_or_else(|| CanvasInteraction::annotations(annotator_editable));
             let bounding_box_tool = self.tool == Tool::BoundingBox;
             let selected_annotation = self.selected_annotation.clone();
             if self.view == AppView::Review {
@@ -358,7 +629,7 @@ impl LabelloApp {
             } else {
                 self.canvas.clear_review_focus();
             }
-            let action = show_canvas_interactive(
+            let action = show_canvas_configured(
                 ui,
                 &mut self.canvas,
                 texture.as_ref(),
@@ -366,17 +637,37 @@ impl LabelloApp {
                 [current.image.width, current.image.height],
                 bounding_box_tool,
                 selected_annotation.as_ref(),
-                editable,
+                interaction,
                 &skeleton_edges,
                 &prelabels,
             );
-            if editable {
+            if annotator_editable {
                 match action {
                     Some(CanvasAction::CreateBoundingBox(bbox)) => self.create_bbox(bbox),
                     Some(CanvasAction::PlaceKeypoint(point)) => self.place_keypoint(point),
                     Some(CanvasAction::Select(id)) => self.selected_annotation = Some(id),
                     Some(CanvasAction::EditBoundingBox(edit)) => self.edit_bbox(edit),
+                    Some(CanvasAction::SelectKeypoint(_)) | Some(CanvasAction::EditKeypoint(_)) => {
+                    }
                     None => {}
+                }
+            } else if self.correction_draft.is_some() {
+                match action {
+                    Some(CanvasAction::EditBoundingBox(edit)) => self.edit_correction_bbox(edit),
+                    Some(CanvasAction::SelectKeypoint(selection)) => {
+                        if self
+                            .correction_draft
+                            .as_ref()
+                            .is_some_and(|draft| draft.annotation_id == selection.annotation_id)
+                        {
+                            self.select_correction_keypoint(selection.keypoint_index);
+                        }
+                    }
+                    Some(CanvasAction::EditKeypoint(edit)) => self.edit_correction_keypoint(edit),
+                    Some(CanvasAction::CreateBoundingBox(_))
+                    | Some(CanvasAction::PlaceKeypoint(_))
+                    | Some(CanvasAction::Select(_))
+                    | None => {}
                 }
             }
         } else {
@@ -408,16 +699,44 @@ impl LabelloApp {
     }
 
     pub(crate) fn overlays(&mut self, ctx: &egui::Context, layout: LayoutMode) {
-        if layout == LayoutMode::Tablet {
+        if layout != LayoutMode::Wide {
+            let screen = ctx.content_rect();
+            let compact = layout == LayoutMode::Compact;
+            let width = if compact {
+                (screen.width() - 16.0).max(240.0)
+            } else {
+                340.0_f32.min(screen.width() - 24.0)
+            };
+            let max_height = if compact {
+                (screen.height() * 0.58).max(240.0)
+            } else {
+                (screen.height() - 24.0).max(240.0)
+            };
             match self.drawer {
                 Some(Drawer::Workflow) => {
                     let mut open = true;
                     egui::Window::new("Workflow drawer")
                         .open(&mut open)
-                        .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 118.0))
-                        .default_width(320.0)
+                        .anchor(
+                            if compact {
+                                egui::Align2::CENTER_BOTTOM
+                            } else {
+                                egui::Align2::LEFT_CENTER
+                            },
+                            if compact {
+                                egui::vec2(0.0, -8.0)
+                            } else {
+                                egui::vec2(12.0, 0.0)
+                            },
+                        )
+                        .default_width(width)
+                        .max_width(width)
+                        .max_height(max_height)
+                        .constrain_to(screen)
                         .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
+                            egui::ScrollArea::vertical()
+                                .max_height(max_height - 48.0)
+                                .show(ui, |ui| self.task_panel(ui));
                         });
                     if !open {
                         self.drawer = None;
@@ -427,10 +746,26 @@ impl LabelloApp {
                     let mut open = true;
                     egui::Window::new("Inspector drawer")
                         .open(&mut open)
-                        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 118.0))
-                        .default_width(340.0)
+                        .anchor(
+                            if compact {
+                                egui::Align2::CENTER_BOTTOM
+                            } else {
+                                egui::Align2::RIGHT_CENTER
+                            },
+                            if compact {
+                                egui::vec2(0.0, -8.0)
+                            } else {
+                                egui::vec2(-12.0, 0.0)
+                            },
+                        )
+                        .default_width(width)
+                        .max_width(width)
+                        .max_height(max_height)
+                        .constrain_to(screen)
                         .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui));
+                            egui::ScrollArea::vertical()
+                                .max_height(max_height - 48.0)
+                                .show(ui, |ui| self.right_panel(ui));
                         });
                     if !open {
                         self.drawer = None;
@@ -439,8 +774,67 @@ impl LabelloApp {
                 None => {}
             }
         }
+        self.draft_recovery_modal(ctx);
         self.transition_modal(ctx);
         self.settings_modal(ctx);
+    }
+
+    fn draft_recovery_modal(&mut self, ctx: &egui::Context) {
+        let Some(recovery) = self.runtime.persistence.recovery.clone() else {
+            return;
+        };
+        let (title, timestamp, validation) = match recovery {
+            crate::persistence::DraftRecovery::Work(draft, validation) => {
+                ("Unsaved assignment draft", draft.updated_at, validation)
+            }
+            crate::persistence::DraftRecovery::Admin(draft, validation) => {
+                ("Unsaved admin draft", draft.updated_at, validation)
+            }
+        };
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .max_width((ctx.content_rect().width() - 24.0).max(240.0))
+            .max_height((ctx.content_rect().height() - 24.0).max(240.0))
+            .constrain_to(ctx.content_rect())
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Saved {}",
+                    timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
+                match validation {
+                    crate::persistence::DraftValidation::Valid => {
+                        ui.label(
+                            "The server assignment and base event sequence match exactly. Recover or discard this draft.",
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Recover draft").clicked() {
+                                self.recover_browser_draft();
+                            }
+                            if ui.button("Discard draft").clicked() {
+                                self.discard_browser_draft();
+                            }
+                        });
+                    }
+                    crate::persistence::DraftValidation::Expired(message)
+                    | crate::persistence::DraftValidation::Conflict(message) => {
+                        ui.colored_label(theme::AMBER, message);
+                        ui.label(
+                            "Recovery is disabled so this draft cannot overwrite newer server state.",
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_enabled(false, egui::Button::new("Recover draft"));
+                            if ui.button("Discard status").clicked() {
+                                self.discard_browser_draft();
+                            }
+                            if ui.button("Keep status").clicked() {
+                                self.runtime.persistence.recovery = None;
+                            }
+                        });
+                    }
+                }
+            });
     }
 
     fn transition_modal(&mut self, ctx: &egui::Context) {
@@ -456,11 +850,14 @@ impl LabelloApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .max_width((ctx.content_rect().width() - 24.0).max(240.0))
+            .max_height((ctx.content_rect().height() - 24.0).max(240.0))
+            .constrain_to(ctx.content_rect())
             .show(ctx, |ui| {
                 ui.label(format!("Current workflow: {current}"));
                 ui.label(format!("Pending destination: {destination}"));
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if self.view == AppView::Annotate
                         && ui
                             .add_enabled(
@@ -508,13 +905,18 @@ impl LabelloApp {
             return;
         }
         let mut open = self.show_settings;
+        let screen = ctx.content_rect();
+        let width = 560.0_f32.min((screen.width() - 24.0).max(240.0));
         egui::Window::new("Settings")
             .open(&mut open)
-            .default_width(560.0)
+            .default_width(width)
+            .max_width(width)
+            .max_height((screen.height() - 24.0).max(240.0))
+            .constrain_to(screen)
             .show(ctx, |ui| {
                 ui.heading("Keyboard shortcuts");
                 egui::ScrollArea::vertical()
-                    .max_height(360.0)
+                    .max_height((screen.height() - 190.0).clamp(160.0, 360.0))
                     .show(ui, |ui| {
                         for (action, chord) in &mut self.keybindings.bindings {
                             if matches!(
@@ -540,7 +942,7 @@ impl LabelloApp {
                 if let Some(error) = conflicts.as_ref() {
                     ui.colored_label(theme::RED, error.to_string());
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             conflicts.is_none() && !self.loading.keybindings,
@@ -622,6 +1024,20 @@ impl LabelloApp {
     }
 }
 
+fn centered_scroll(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let width = ui.available_width().min(max_width);
+        let inset = ((ui.available_width() - width) * 0.5).max(0.0);
+        ui.horizontal(|ui| {
+            ui.add_space(inset);
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                add_contents(ui);
+            });
+        });
+    });
+}
+
 fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
         .fill(Color32::from_rgba_unmultiplied(
@@ -635,6 +1051,25 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .inner_margin(egui::Margin::symmetric(9, 4))
         .show(ui, |ui| {
             ui.label(RichText::new(text).color(color).strong());
+        });
+}
+
+fn bounded_badge(ui: &mut egui::Ui, text: &str, color: Color32, width: f32) {
+    egui::Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            36,
+        ))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.55)))
+        .corner_radius(egui::CornerRadius::same(18))
+        .inner_margin(egui::Margin::symmetric(9, 4))
+        .show(ui, |ui| {
+            ui.add_sized(
+                [width, 24.0],
+                egui::Label::new(RichText::new(text).color(color).strong()).truncate(),
+            );
         });
 }
 
@@ -702,5 +1137,13 @@ fn status_color(status: SaveStatus) -> Color32 {
         SaveStatus::Saved => theme::TEAL,
         SaveStatus::Saving => theme::BLUE,
         SaveStatus::Retry => theme::RED,
+    }
+}
+
+fn keypoint_state_label(state: &KeypointState) -> &'static str {
+    match state {
+        KeypointState::Visible => "visible",
+        KeypointState::Hidden => "hidden",
+        KeypointState::Absent => "absent",
     }
 }

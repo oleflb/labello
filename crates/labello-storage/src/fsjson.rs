@@ -27,5 +27,13 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> StorageR
     file.sync_all().await.with_path(&tmp_path)?;
     drop(file);
     tokio::fs::rename(&tmp_path, path).await.with_path(path)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::File::open(parent)
+            .await
+            .with_path(parent)?
+            .sync_all()
+            .await
+            .with_path(parent)?;
+    }
     Ok(())
 }

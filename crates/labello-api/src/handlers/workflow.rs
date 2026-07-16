@@ -12,8 +12,7 @@ use labello_client::{
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType,
     AssignmentKind, DatasetId, DatasetRole, EventPayload, ImageId, KeybindingSet,
-    OfflineSyncRequest, PrelabelSuggestion, ReviewDecision, ReviewTarget, ReviewWorkflow,
-    TaskState, TaskStatus,
+    OfflineSyncRequest, PrelabelSuggestion, TaskOutcome, TaskState, TaskStatus,
 };
 use labello_storage::assignment::AssignmentContext;
 
@@ -43,15 +42,19 @@ pub(crate) async fn assign_next(
 ) -> ApiResult<Json<Option<labello_domain::Assignment>>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
+    let kind = query
+        .kind
+        .unwrap_or(labello_domain::AssignmentKind::Annotation);
+    if let Some(assignment_id) = query.assignment_id
+        && let Some(assignment) = repo
+            .reclaim_assignment(&actor.user_id, &assignment_id, &query.task_id, kind.clone())
+            .await?
+    {
+        return Ok(Json(Some(assignment)));
+    }
     Ok(Json(
-        repo.assign_next_image(
-            &actor.user_id,
-            &query.task_id,
-            query
-                .kind
-                .unwrap_or(labello_domain::AssignmentKind::Annotation),
-        )
-        .await?,
+        repo.assign_next_image(&actor.user_id, &query.task_id, kind)
+            .await?,
     ))
 }
 
@@ -242,6 +245,50 @@ pub(crate) async fn append_event(
     ))
 }
 
+pub(crate) async fn apply_annotation_batch(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    Query(assignment): Query<AssignmentActionRequest>,
+    headers: HeaderMap,
+    Json(request): Json<labello_client::AnnotationBatchRequest>,
+) -> ApiResult<Json<labello_domain::ImageState>> {
+    const MAX_BATCH_SIZE: usize = 10_000;
+
+    image_id.validate_path_segment()?;
+    if request.payloads.len() > MAX_BATCH_SIZE {
+        return Err(ApiError::BadRequest(format!(
+            "annotation batch exceeds {MAX_BATCH_SIZE} mutations"
+        )));
+    }
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let metadata = repo.load_dataset().await?;
+    ensure_dataset_role(&metadata, &actor, DatasetRole::Annotator)?;
+    validate_assignment_request(&assignment, &image_id, AssignmentKind::Annotation)?;
+    for payload in &request.payloads {
+        if required_role_for_payload(&actor, payload)? != DatasetRole::Annotator {
+            return Err(ApiError::BadRequest(
+                "annotation batches only accept annotation mutations".to_string(),
+            ));
+        }
+        validate_payload(&metadata, &image_id, payload)?;
+    }
+    Ok(Json(
+        repo.apply_annotation_batch(
+            &actor.user_id,
+            AssignmentContext {
+                assignment_id: &assignment.assignment_id,
+                image_id: &image_id,
+                task_id: &assignment.task_id,
+                kind: AssignmentKind::Annotation,
+            },
+            request.payloads,
+            request.complete,
+        )
+        .await?,
+    ))
+}
+
 pub(crate) async fn append_admin_repair_event(
     State(state): State<ApiState>,
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
@@ -253,9 +300,12 @@ pub(crate) async fn append_admin_repair_event(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    if matches!(request.payload, EventPayload::AssignmentUpdated { .. }) {
+    if matches!(
+        request.payload,
+        EventPayload::AssignmentUpdated { .. } | EventPayload::ReviewerCorrectionRecorded { .. }
+    ) {
         return Err(ApiError::BadRequest(
-            "assignment state is managed by assignment endpoints".to_string(),
+            "assignment and reviewer correction state is managed by workflow endpoints".to_string(),
         ));
     }
     validate_payload(&metadata, &image_id, &request.payload)?;
@@ -343,130 +393,13 @@ pub(crate) async fn record_review(
     Query(assignment): Query<AssignmentActionRequest>,
     headers: HeaderMap,
     Json(review): Json<labello_domain::ReviewRecord>,
-) -> ApiResult<Json<labello_domain::EventLogEntry>> {
+) -> ApiResult<Json<labello_domain::ImageState>> {
     image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
-    if review.reviewer_user_id != actor.user_id {
-        return Err(ApiError::Unauthorized(
-            "cannot record reviews for another user".to_string(),
-        ));
-    }
     let repo = state.repo(&dataset_id)?;
-    let metadata = repo.load_dataset().await?;
-    ensure_dataset_role(&metadata, &actor, DatasetRole::Reviewer)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Review)?;
-    if !metadata.images.contains_key(&image_id) {
-        return Err(ApiError::NotFound(format!("image {image_id}")));
-    }
-    let image_state = repo.load_image_state(&image_id).await?;
-    let assignment_task = metadata
-        .task(&assignment.task_id)
-        .ok_or_else(|| ApiError::BadRequest(format!("unknown task {}", assignment.task_id)))?;
-    match assignment_task.review.workflow {
-        ReviewWorkflow::None => {
-            return Err(ApiError::BadRequest(
-                "reviews are disabled for this task".to_string(),
-            ));
-        }
-        ReviewWorkflow::IndependentAgreement => {
-            return Err(ApiError::BadRequest(
-                "independent agreement workflow is not implemented".to_string(),
-            ));
-        }
-        ReviewWorkflow::Approval => {}
-    }
-    let reviewed_task = match &review.target {
-        ReviewTarget::Image {
-            image_id: target_image_id,
-        } => {
-            if target_image_id != &image_id {
-                return Err(ApiError::BadRequest(
-                    "review target image does not match path image".to_string(),
-                ));
-            }
-            None
-        }
-        ReviewTarget::Task { task_id } => Some(
-            metadata
-                .task(task_id)
-                .ok_or_else(|| ApiError::BadRequest(format!("unknown task {task_id}")))?,
-        ),
-        ReviewTarget::AnnotationVersion {
-            annotation_id,
-            version,
-        } => {
-            let annotation = image_state
-                .annotations
-                .get(annotation_id)
-                .and_then(|versions| {
-                    versions
-                        .iter()
-                        .find(|candidate| candidate.version == *version)
-                })
-                .ok_or_else(|| {
-                    ApiError::BadRequest(format!(
-                        "annotation {annotation_id} version {version} does not exist"
-                    ))
-                })?;
-            Some(metadata.task(&annotation.task_id).ok_or_else(|| {
-                ApiError::BadRequest(format!("unknown task {}", annotation.task_id))
-            })?)
-        }
-    };
-    if reviewed_task.is_some_and(|task| task.task_id != assignment.task_id) {
-        return Err(ApiError::BadRequest(
-            "review target task does not match assignment task".to_string(),
-        ));
-    }
-    let mut payloads = vec![EventPayload::ReviewRecorded {
-        review: review.clone(),
-    }];
-    let complete = matches!(review.target, ReviewTarget::Task { .. });
-    if let ReviewTarget::Task { task_id } = &review.target {
-        let task = metadata
-            .task(task_id)
-            .expect("task target was validated before recording the review");
-        let current_reviews = repo.current_task_reviews(&image_id, task_id).await?;
-        let prior_approvers = current_reviews
-            .iter()
-            .filter_map(|candidate| match (&candidate.target, &candidate.decision) {
-                (
-                    ReviewTarget::Task {
-                        task_id: candidate_task_id,
-                    },
-                    ReviewDecision::Approved,
-                ) if candidate_task_id == task_id => Some(&candidate.reviewer_user_id),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        let approval_count = prior_approvers.len() as u32
-            + u32::from(
-                review.decision == ReviewDecision::Approved
-                    && !prior_approvers.contains(&actor.user_id),
-            );
-        let status = match &review.decision {
-            ReviewDecision::Approved if approval_count >= task.review.required_reviews => {
-                TaskStatus::Completed
-            }
-            ReviewDecision::Approved => TaskStatus::Submitted,
-            ReviewDecision::Rejected => TaskStatus::NeedsCorrection,
-        };
-        if status != TaskStatus::Submitted {
-            let timestamp = labello_domain::now();
-            payloads.push(EventPayload::TaskStateChanged {
-                task_state: TaskState {
-                    task_id: task_id.clone(),
-                    status,
-                    assigned_to: None,
-                    completed_by: Some(actor.user_id.clone()),
-                    completed_at: Some(timestamp),
-                    updated_at: timestamp,
-                },
-            });
-        }
-    }
-    let (events, _) = repo
-        .append_for_assignment(
+    Ok(Json(
+        repo.record_review_for_assignment(
             &actor.user_id,
             AssignmentContext {
                 assignment_id: &assignment.assignment_id,
@@ -474,12 +407,9 @@ pub(crate) async fn record_review(
                 task_id: &assignment.task_id,
                 kind: AssignmentKind::Review,
             },
-            payloads,
-            complete,
+            review,
         )
-        .await?;
-    Ok(Json(
-        events.into_iter().next().expect("review was appended"),
+        .await?,
     ))
 }
 
@@ -491,32 +421,14 @@ pub(crate) async fn record_correction(
     Json(request): Json<CorrectionRequest>,
 ) -> ApiResult<Json<labello_domain::EventLogEntry>> {
     image_id.validate_path_segment()?;
+    request.correction_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
-    let metadata = repo.load_dataset().await?;
+    let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Reviewer)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Review)?;
-    let task = metadata
-        .task(&request.annotation.task_id)
-        .ok_or_else(|| ApiError::BadRequest("unknown task".to_string()))?;
-    if !task.review.allow_reviewer_corrections {
-        return Err(ApiError::Unauthorized(
-            "reviewer corrections are disabled for this task".to_string(),
-        ));
-    }
-    if request.annotation.task_id != assignment.task_id {
-        return Err(ApiError::BadRequest(
-            "correction task does not match assignment task".to_string(),
-        ));
-    }
-    let payload = EventPayload::AnnotationVersionCreated {
-        annotation: request.annotation.clone(),
-        previous_version: Some(request.previous_version),
-        reason: request.reason.clone(),
-    };
-    validate_payload(&metadata, &image_id, &payload)?;
-    let (events, _) = repo
-        .append_for_assignment(
+    Ok(Json(
+        repo.correct_review_annotation(
             &actor.user_id,
             AssignmentContext {
                 assignment_id: &assignment.assignment_id,
@@ -524,12 +436,13 @@ pub(crate) async fn record_correction(
                 task_id: &assignment.task_id,
                 kind: AssignmentKind::Review,
             },
-            vec![payload],
-            false,
+            &request.correction_id,
+            &request.annotation_id,
+            request.expected_version,
+            request.geometry,
+            request.reason,
         )
-        .await?;
-    Ok(Json(
-        events.into_iter().next().expect("correction was appended"),
+        .await?,
     ))
 }
 
@@ -579,6 +492,8 @@ pub(crate) async fn record_adjudication(
                 EventPayload::TaskStateChanged {
                     task_state: TaskState {
                         task_id: adjudication.task_id,
+                        outcome: (status == TaskStatus::Completed)
+                            .then_some(TaskOutcome::Adjudicated),
                         status,
                         assigned_to: None,
                         completed_by: Some(actor.user_id.clone()),

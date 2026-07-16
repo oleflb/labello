@@ -8,12 +8,12 @@ use labello_domain::{
 };
 
 use crate::{
-    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
-    AuthApi, ClientError, CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary,
-    DatasetUser, ImageApi, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
-    KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
-    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi,
-    UpdateDatasetConfigRequest, UserApi,
+    AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
+    AssignmentActionRequest, AuthApi, ClientError, CorrectionRequest, CreateDatasetRequest,
+    DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageFile, ImagePreview, IngestJob,
+    IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest,
+    OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi,
+    SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Default)]
@@ -309,6 +309,31 @@ impl AnnotationApi for DemoLabelloApi {
             ))
         })
     }
+
+    fn apply_annotation_batch<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AnnotationBatchRequest,
+    ) -> crate::ApiFuture<'a, ImageState> {
+        Box::pin(async move {
+            let mut state = ImageState::new(assignment.image_id.clone());
+            for payload in request.payloads {
+                let event = EventLogEntry::new(
+                    state.current_sequence + 1,
+                    assignment.image_id.clone(),
+                    UserId::from("demo_user"),
+                    labello_domain::DatasetRole::Annotator,
+                    labello_domain::now(),
+                    payload,
+                );
+                state
+                    .apply_event(&event)
+                    .map_err(|error| ClientError::Demo(error.to_string()))?;
+            }
+            Ok(state)
+        })
+    }
 }
 
 impl ReviewApi for DemoLabelloApi {
@@ -317,29 +342,36 @@ impl ReviewApi for DemoLabelloApi {
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
         review: ReviewRecord,
-    ) -> crate::ApiFuture<'a, EventLogEntry> {
-        self.append_payload(
-            dataset_id,
-            image_id,
-            EventPayload::ReviewRecorded { review },
-        )
+    ) -> crate::ApiFuture<'a, ImageState> {
+        let _ = dataset_id;
+        Box::pin(async move {
+            let mut state = ImageState::new(image_id.clone());
+            let event = EventLogEntry::new(
+                1,
+                image_id.clone(),
+                UserId::from("demo_user"),
+                labello_domain::DatasetRole::Reviewer,
+                labello_domain::now(),
+                EventPayload::ReviewRecorded { review },
+            );
+            state
+                .apply_event(&event)
+                .map_err(|error| ClientError::Demo(error.to_string()))?;
+            Ok(state)
+        })
     }
 
     fn record_correction<'a>(
         &'a self,
-        dataset_id: &'a DatasetId,
-        image_id: &'a ImageId,
-        request: CorrectionRequest,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: CorrectionRequest,
     ) -> crate::ApiFuture<'a, EventLogEntry> {
-        self.append_payload(
-            dataset_id,
-            image_id,
-            EventPayload::AnnotationVersionCreated {
-                annotation: request.annotation,
-                previous_version: Some(request.previous_version),
-                reason: request.reason,
-            },
-        )
+        Box::pin(async move {
+            Err(ClientError::Demo(
+                "the demo backend does not create review assignments".to_string(),
+            ))
+        })
     }
 }
 

@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn emits_schema_bundle() {
         let schema = labello_schema_bundle();
-        assert_eq!(schema["schemaVersion"], 1);
+        assert_eq!(schema["schemaVersion"], 2);
         assert!(schema.get("dataset").is_some());
         assert!(schema.get("eventLogEntry").is_some());
     }

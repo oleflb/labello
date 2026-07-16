@@ -42,7 +42,7 @@ pub use stats::*;
 pub use task::*;
 pub use user::*;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
 

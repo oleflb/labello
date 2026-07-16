@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AdjudicationRecord, AnnotationId, AnnotationVersion, Assignment, DatasetRole, EventId, ImageId,
-    ReviewRecord, SCHEMA_VERSION, TaskId, TaskState, Timestamp, UserId,
+    ReviewRecord, ReviewerCorrectionRecord, SCHEMA_VERSION, TaskId, TaskState, Timestamp, UserId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -13,6 +13,7 @@ pub enum EventType {
     AnnotationDeleted,
     TaskStateChanged,
     ReviewRecorded,
+    ReviewerCorrectionRecorded,
     AdjudicationRecorded,
     AssignmentUpdated,
 }
@@ -24,6 +25,7 @@ impl std::fmt::Display for EventType {
             Self::AnnotationDeleted => "annotation_deleted",
             Self::TaskStateChanged => "task_state_changed",
             Self::ReviewRecorded => "review_recorded",
+            Self::ReviewerCorrectionRecorded => "reviewer_correction_recorded",
             Self::AdjudicationRecorded => "adjudication_recorded",
             Self::AssignmentUpdated => "assignment_updated",
         })
@@ -49,6 +51,13 @@ pub enum EventPayload {
     ReviewRecorded {
         review: ReviewRecord,
     },
+    ReviewerCorrectionRecorded {
+        correction: ReviewerCorrectionRecord,
+        annotation: Box<AnnotationVersion>,
+        review: ReviewRecord,
+        task_state: TaskState,
+        assignments: Vec<Assignment>,
+    },
     AdjudicationRecorded {
         adjudication: AdjudicationRecord,
     },
@@ -64,6 +73,7 @@ impl EventPayload {
             Self::AnnotationDeleted { .. } => EventType::AnnotationDeleted,
             Self::TaskStateChanged { .. } => EventType::TaskStateChanged,
             Self::ReviewRecorded { .. } => EventType::ReviewRecorded,
+            Self::ReviewerCorrectionRecorded { .. } => EventType::ReviewerCorrectionRecorded,
             Self::AdjudicationRecorded { .. } => EventType::AdjudicationRecorded,
             Self::AssignmentUpdated { .. } => EventType::AssignmentUpdated,
         }
@@ -125,6 +135,9 @@ impl EventLogEntry {
             EventPayload::TaskStateChanged { task_state } => Some(&task_state.task_id),
             EventPayload::AssignmentUpdated { assignment } => Some(&assignment.task_id),
             EventPayload::AdjudicationRecorded { adjudication } => Some(&adjudication.task_id),
+            EventPayload::ReviewerCorrectionRecorded { correction, .. } => {
+                Some(&correction.task_id)
+            }
             EventPayload::AnnotationDeleted { .. } | EventPayload::ReviewRecorded { .. } => None,
         }
     }

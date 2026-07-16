@@ -14,8 +14,7 @@ use crate::{app::LabelloApp, theme};
 impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
         let admin_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
-        let mut discard_changes = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Dataset Admin");
             if self.loading.admin {
                 ui.spinner();
@@ -31,14 +30,7 @@ impl LabelloApp {
             {
                 self.request_admin_dataset();
             }
-            if admin_dirty && ui.button("Discard staged changes").clicked() {
-                discard_changes = true;
-            }
         });
-        if discard_changes {
-            self.datasets.admin_config = self.datasets.admin_baseline.clone();
-            self.runtime.notice = Some("Staged admin changes discarded".to_string());
-        }
         self.people_section(ui);
         self.images_section(ui);
         self.snapshots_section(ui);
@@ -54,7 +46,6 @@ impl LabelloApp {
             return;
         };
 
-        let mut save = false;
         let mut ingest = false;
         let mut upload_folder = false;
         ui.vertical(|ui| {
@@ -80,7 +71,7 @@ impl LabelloApp {
                     "Add image root",
                     "images",
                 );
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("Pick folder and upload")
                         .on_hover_text("Open a browser folder picker, upload files to a new dataset-relative root, then ingest them.")
@@ -135,23 +126,7 @@ impl LabelloApp {
             });
 
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        issues.is_empty() && admin_dirty && !self.loading.admin,
-                        egui::Button::new("Save Admin Config"),
-                    )
-                    .on_hover_text(if !admin_dirty {
-                        "No staged changes to save."
-                    } else if issues.is_empty() {
-                        "Persist the staged settings to labello.dataset.toml."
-                    } else {
-                        "Fix the errors in the validation summary before saving."
-                    })
-                    .clicked()
-                {
-                    save = issues.is_empty();
-                }
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(!ingesting_now, egui::Button::new("Run Ingest"))
                     .on_hover_text("Scan configured image roots and update the dataset image index.")
@@ -165,15 +140,61 @@ impl LabelloApp {
                 }
             });
         });
-        if save {
-            self.request_admin_save();
-        }
         if ingest {
             self.request_ingest();
         }
         if upload_folder {
             self.request_folder_upload();
         }
+    }
+
+    pub(crate) fn admin_status_bar(&mut self, ui: &mut egui::Ui) {
+        let dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let issues = self
+            .datasets
+            .admin_config
+            .as_ref()
+            .map(|config| config_issues(config, &self.config.user_id))
+            .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(if dirty {
+                    "Unsaved admin changes"
+                } else {
+                    "Admin config saved"
+                })
+                .color(if dirty { theme::AMBER } else { theme::TEAL })
+                .strong(),
+            );
+            if ui
+                .add_enabled(
+                    dirty && issues.is_empty() && !self.loading.admin,
+                    egui::Button::new("Save Admin Config"),
+                )
+                .on_disabled_hover_text(if issues.is_empty() {
+                    "No staged changes to save."
+                } else {
+                    "Fix validation errors before saving."
+                })
+                .clicked()
+            {
+                self.request_admin_save();
+            }
+            if ui
+                .add_enabled(
+                    dirty && !self.loading.admin,
+                    egui::Button::new("Discard staged changes"),
+                )
+                .clicked()
+            {
+                self.datasets.admin_config = self.datasets.admin_baseline.clone();
+                self.clear_admin_draft();
+                self.runtime.notice = Some("Staged admin changes discarded".to_string());
+            }
+            if !issues.is_empty() {
+                ui.colored_label(theme::RED, format!("{} validation error(s)", issues.len()));
+            }
+        });
     }
 
     fn people_section(&mut self, ui: &mut egui::Ui) {
@@ -275,9 +296,13 @@ impl LabelloApp {
                     RichText::new("Search the indexed images and inspect workflow state.")
                         .color(theme::MUTED),
                 );
-                ui.horizontal_wrapped(|ui| {
+                let compact_filters = ui.available_width() < 600.0;
+                let mut show_filters = |ui: &mut egui::Ui| {
                     ui.label("Search");
-                    let search = ui.text_edit_singleline(&mut self.admin_tools.image_search);
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut self.admin_tools.image_search)
+                            .desired_width(ui.available_width().min(320.0)),
+                    );
                     if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         self.admin_tools.image_query.page = 1;
@@ -387,7 +412,12 @@ impl LabelloApp {
                     if self.loading.images {
                         ui.spinner();
                     }
-                });
+                };
+                if compact_filters {
+                    ui.vertical(&mut show_filters);
+                } else {
+                    ui.horizontal_wrapped(show_filters);
+                }
                 if let Some(error) = &self.admin_tools.images_error {
                     ui.colored_label(theme::RED, error);
                 }
@@ -435,7 +465,7 @@ impl LabelloApp {
                     let previous = page.page > 1;
                     let next = page.page < page.total_pages;
                     let current_page = page.page;
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(
                                 previous && !self.loading.images,
@@ -471,7 +501,7 @@ impl LabelloApp {
                     RichText::new("Create and download native dataset snapshots. Image bytes are not included.")
                         .color(theme::MUTED),
                 );
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             !self.loading.creating_snapshot,
@@ -537,7 +567,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Live Statistics");
             if self.loading.stats {
                 ui.spinner();
@@ -557,14 +587,18 @@ impl LabelloApp {
             ("Pending", self.datasets.stats.pending_tasks),
             ("Reviewed", self.datasets.stats.reviewed_tasks),
             ("Unreviewed", self.datasets.stats.unreviewed_tasks),
+            ("Approved", self.datasets.stats.approved_tasks),
+            ("Rejected", self.datasets.stats.rejected_tasks),
+            (
+                "Reviewer corrected",
+                self.datasets.stats.reviewer_corrected_tasks,
+            ),
+            ("Finalized", self.datasets.stats.finalized_tasks),
         ];
-        let column_count = if ui.available_width() < 520.0 {
-            1
-        } else if ui.available_width() < 900.0 {
-            2
-        } else {
-            5
-        };
+        let minimum_card_width = 180.0;
+        let column_count = (((ui.available_width() + 10.0) / (minimum_card_width + 10.0)).floor()
+            as usize)
+            .clamp(1, 4);
         for row in metrics.chunks(column_count) {
             ui.columns(column_count, |columns| {
                 for (column, (label, value)) in columns.iter_mut().zip(row) {
@@ -575,21 +609,65 @@ impl LabelloApp {
         ui.add_space(12.0);
         theme::card_frame().show(ui, |ui| {
             ui.heading("Per Task");
-            for (task_id, stats) in &self.datasets.stats.per_task {
-                ui.label(format!(
-                    "{task_id}: {} completed, {} pending, {} reviewed, {} unreviewed",
-                    stats.completed, stats.pending, stats.reviewed, stats.unreviewed
-                ));
-            }
+            let rows = &self.datasets.stats.per_task;
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.set_min_width(980.0);
+                stats_task_row(
+                    ui,
+                    "Task",
+                    "Done",
+                    "Pending",
+                    "Reviewed",
+                    "Unreviewed",
+                    "Approved",
+                    "Rejected",
+                    "Corrected",
+                    "Finalized",
+                    true,
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("stats_tasks")
+                    .max_height(240.0)
+                    .show_rows(ui, 36.0, rows.len(), |ui, range| {
+                        for (task_id, stats) in rows.iter().skip(range.start).take(range.len()) {
+                            stats_task_row(
+                                ui,
+                                &task_id.to_string(),
+                                &stats.completed.to_string(),
+                                &stats.pending.to_string(),
+                                &stats.reviewed.to_string(),
+                                &stats.unreviewed.to_string(),
+                                &stats.approved.to_string(),
+                                &stats.rejected.to_string(),
+                                &stats.reviewer_corrected.to_string(),
+                                &stats.finalized.to_string(),
+                                false,
+                            );
+                        }
+                    });
+            });
         });
         theme::card_frame().show(ui, |ui| {
             ui.heading("Per Class");
-            for (class_id, stats) in &self.datasets.stats.per_class {
-                ui.label(format!(
-                    "{class_id}: {} annotations, {} completed tasks",
-                    stats.annotations, stats.completed_tasks
-                ));
-            }
+            let rows = &self.datasets.stats.per_class;
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.set_min_width(520.0);
+                stats_class_row(ui, "Class", "Annotations", "Completed tasks", true);
+                egui::ScrollArea::vertical()
+                    .id_salt("stats_classes")
+                    .max_height(240.0)
+                    .show_rows(ui, 36.0, rows.len(), |ui, range| {
+                        for (class_id, stats) in rows.iter().skip(range.start).take(range.len()) {
+                            stats_class_row(
+                                ui,
+                                &class_id.to_string(),
+                                &stats.annotations.to_string(),
+                                &stats.completed_tasks.to_string(),
+                                false,
+                            );
+                        }
+                    });
+            });
         });
         theme::card_frame().show(ui, |ui| {
             ui.heading("Throughput");
@@ -684,7 +762,7 @@ fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
             RichText::new("Fast path: create a class and its worker-visible task together.")
                 .color(theme::MUTED),
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Add bounding box class workflow").clicked() {
                 add_class_workflow(config, AnnotationType::BoundingBox);
             }
@@ -698,7 +776,7 @@ fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
             ui.small("No classes yet. Use one of the buttons above to create the first workflow.");
         }
         for label in labels {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&label.name).strong());
                 ui.small(format!("{}", label.class_id));
                 let annotation_type = AnnotationType::BoundingBox;
@@ -836,7 +914,7 @@ fn edit_string_list(
 ) {
     let mut remove = None;
     for (index, value) in values.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(label);
             ui.text_edit_singleline(value)
                 .on_hover_text("Dataset-relative path under the dataset root.");
@@ -866,7 +944,7 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [Tas
         let mut remove = None;
         for (index, label) in labels.iter_mut().enumerate() {
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut label.name)
                     .on_hover_text("Display name shown to annotators.");
@@ -895,7 +973,7 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [Tas
                     remove = Some(index);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Description");
                 let mut description = label.description.clone().unwrap_or_default();
                 if ui
@@ -950,7 +1028,7 @@ fn edit_tasks(
         for (index, task) in tasks.iter_mut().enumerate() {
             normalize_task_annotation(task);
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Task ID");
                 let mut task_id = task.task_id.to_string();
                 if ui
@@ -968,7 +1046,7 @@ fn edit_tasks(
                     remove = Some(index);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Annotation type");
                 let mut annotation_type = task.annotation_type.clone();
                 egui::ComboBox::from_id_salt(format!("task-type-{index}"))
@@ -994,7 +1072,7 @@ fn edit_tasks(
             {
                 edit_skeleton(ui, index, skeleton);
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Instruction title");
                 ui.text_edit_singleline(&mut task.instructions.title)
                     .on_hover_text("Tutorial/instruction title.");
@@ -1119,7 +1197,7 @@ fn set_task_annotation_type(task: &mut TaskDefinition, annotation_type: Annotati
 
 fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSpec) {
     ui.collapsing("Skeleton configuration", |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut skeleton.allow_hidden, "Allow hidden keypoints")
                 .on_hover_text("Annotators may mark a keypoint as hidden behind another object.");
             ui.checkbox(&mut skeleton.allow_absent, "Allow absent keypoints")
@@ -1131,7 +1209,7 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
         let mut renames = Vec::new();
         for (keypoint_index, keypoint) in skeleton.keypoints.iter_mut().enumerate() {
             let previous_name = keypoint.name.clone();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut keypoint.name)
                     .on_hover_text("Unique keypoint name used by skeleton edges.");
@@ -1176,7 +1254,7 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
             .collect();
         let mut remove_edge = None;
         for (edge_index, edge) in skeleton.edges.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("From");
                 egui::ComboBox::from_id_salt(format!(
                     "skeleton-edge-from-{task_index}-{edge_index}"
@@ -1259,7 +1337,7 @@ fn canonical_edge<'a>(from: &'a str, to: &'a str) -> (&'a str, &'a str) {
 
 fn edit_review(ui: &mut egui::Ui, task_index: usize, task: &mut TaskDefinition) {
     ui.collapsing("Review configuration", |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Workflow");
             let previous = task.review.workflow.clone();
             egui::ComboBox::from_id_salt(format!("review-workflow-{task_index}"))
@@ -1294,7 +1372,7 @@ fn edit_review(ui: &mut egui::Ui, task_index: usize, task: &mut TaskDefinition) 
                 }
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Required reviews");
             ui.add(
                 egui::DragValue::new(&mut task.review.required_reviews)
@@ -1320,7 +1398,7 @@ fn edit_review(ui: &mut egui::Ui, task_index: usize, task: &mut TaskDefinition) 
                     AnnotationType::BoundingBox => AgreementMetric::Iou,
                     AnnotationType::Skeleton => AgreementMetric::KeypointMeanDistance,
                 };
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Agreement metric");
                     ui.label(match agreement.metric {
                         AgreementMetric::Iou => "intersection over union",
@@ -1363,7 +1441,7 @@ fn edit_prelabels(
         let mut remove = None;
         for (index, config) in configs.iter_mut().enumerate() {
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Prelabel ID");
                 let mut config_id = config.config_id.to_string();
                 if ui
@@ -1393,7 +1471,7 @@ fn edit_prelabels(
                     remove = Some(index);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Model ID");
                 ui.text_edit_singleline(&mut config.model.model_id)
                     .on_hover_text("Stable model id.");
@@ -1401,7 +1479,7 @@ fn edit_prelabels(
                 ui.text_edit_singleline(&mut config.model.display_name)
                     .on_hover_text("Model display name.");
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Location");
                 ui.text_edit_singleline(&mut config.model.location)
                     .on_hover_text("Server/browser model location, depending on execution mode.");
@@ -1463,7 +1541,7 @@ fn edit_imbalance(ui: &mut egui::Ui, imbalance: &mut Option<ImbalanceConfig>) {
             *imbalance = configured.then(ImbalanceConfig::default);
         }
         if let Some(imbalance) = imbalance.as_mut() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Maximum class ratio");
                 ui.add(
                     egui::DragValue::new(&mut imbalance.max_ratio)
@@ -1883,15 +1961,23 @@ fn is_hex_color(value: &str) -> bool {
 }
 
 fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.text_edit_singleline(value)
-    })
-    .inner
+    if ui.available_width() < 520.0 {
+        ui.vertical(|ui| {
+            ui.label(label);
+            ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+        })
+        .inner
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_sized([150.0, 44.0], egui::Label::new(label));
+            ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+        })
+        .inner
+    }
 }
 
 fn destructive_button(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.small_button(format!("Double-click {label}"))
+    ui.button(format!("Double-click {label}"))
         .on_hover_text("Double-click to confirm this removal.")
         .double_clicked()
 }
@@ -1903,10 +1989,61 @@ fn show_issues(ui: &mut egui::Ui, issues: &[String]) {
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {
-    theme::card_frame().show(ui, |ui| {
+    let response = theme::card_frame().show(ui, |ui| {
+        ui.set_min_height(72.0);
         ui.label(RichText::new(label).color(theme::MUTED));
         ui.heading(value);
     });
+    response.response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("Metric {label}"))
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stats_task_row(
+    ui: &mut egui::Ui,
+    task: &str,
+    completed: &str,
+    pending: &str,
+    reviewed: &str,
+    unreviewed: &str,
+    approved: &str,
+    rejected: &str,
+    corrected: &str,
+    finalized: &str,
+    header: bool,
+) {
+    ui.horizontal(|ui| {
+        stats_cell(ui, task, 180.0, header);
+        for value in [
+            completed, pending, reviewed, unreviewed, approved, rejected, corrected, finalized,
+        ] {
+            stats_cell(ui, value, 84.0, header);
+        }
+    });
+}
+
+fn stats_class_row(
+    ui: &mut egui::Ui,
+    class: &str,
+    annotations: &str,
+    completed: &str,
+    header: bool,
+) {
+    ui.horizontal(|ui| {
+        stats_cell(ui, class, 220.0, header);
+        stats_cell(ui, annotations, 130.0, header);
+        stats_cell(ui, completed, 140.0, header);
+    });
+}
+
+fn stats_cell(ui: &mut egui::Ui, value: &str, width: f32, header: bool) {
+    let text = if header {
+        RichText::new(value).strong().color(theme::MUTED)
+    } else {
+        RichText::new(value).color(theme::TEXT)
+    };
+    ui.add_sized([width, 32.0], egui::Label::new(text).truncate());
 }
 
 #[cfg(test)]

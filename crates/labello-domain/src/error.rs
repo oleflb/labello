@@ -32,6 +32,12 @@ pub enum DomainError {
     #[error("annotation {annotation_id} version {version} does not exist")]
     MissingAnnotationVersion { annotation_id: String, version: u32 },
 
+    #[error("reviewer correction {0} is internally inconsistent")]
+    InvalidReviewerCorrection(String),
+
+    #[error("reviewer correction {0} already exists")]
+    DuplicateReviewerCorrection(String),
+
     #[error("task {0} does not exist")]
     MissingTask(String),
 

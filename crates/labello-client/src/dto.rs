@@ -1,8 +1,8 @@
 use labello_domain::{
-    AnnotationVersion, AssignmentId, AssignmentKind, ClassId, DatasetId, DatasetRole,
-    DatasetRoleAssignment, EventPayload, ImageId, ImageRecord, ImbalanceConfig, LabelClass,
-    OfflineSyncRequest, PrelabelConfig, PrelabelConfigId, TaskDefinition, TaskId, TaskStatus,
-    UserAccount, UserId,
+    AnnotationGeometry, AnnotationId, AssignmentId, AssignmentKind, ClassId, CorrectionId,
+    DatasetId, DatasetRole, DatasetRoleAssignment, EventPayload, ImageId, ImageRecord,
+    ImbalanceConfig, LabelClass, OfflineSyncRequest, PrelabelConfig, PrelabelConfigId,
+    TaskDefinition, TaskId, TaskStatus, UserAccount, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +61,8 @@ impl UpdateDatasetConfigRequest {
 pub struct AssignNextRequest {
     pub task_id: TaskId,
     pub kind: Option<AssignmentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_id: Option<AssignmentId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,9 +82,19 @@ pub struct AppendEventRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AnnotationBatchRequest {
+    pub payloads: Vec<EventPayload>,
+    #[serde(default)]
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CorrectionRequest {
-    pub annotation: AnnotationVersion,
-    pub previous_version: u32,
+    pub correction_id: CorrectionId,
+    pub annotation_id: AnnotationId,
+    pub expected_version: u32,
+    pub geometry: AnnotationGeometry,
     pub reason: Option<String>,
 }
 

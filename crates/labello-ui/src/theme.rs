@@ -26,13 +26,14 @@ pub fn apply(ctx: &egui::Context) {
     style.visuals.widgets.noninteractive.fg_stroke.color = TEXT;
     style.spacing.item_spacing = Vec2::new(10.0, 8.0);
     style.spacing.button_padding = Vec2::new(12.0, 8.0);
+    style.spacing.interact_size.y = 44.0;
     ctx.set_global_style(style);
 }
 
 pub fn top_bar_frame() -> Frame {
     Frame::new()
         .fill(Color32::from_rgb(8, 13, 23))
-        .inner_margin(Margin::symmetric(18, 12))
+        .inner_margin(Margin::symmetric(14, 8))
         .stroke(Stroke::new(1.0, Color32::from_rgb(30, 41, 59)))
 }
 

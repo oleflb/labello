@@ -429,7 +429,7 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
     let app = router(ApiState::new(temp.path()));
     create_dataset(&app).await;
     let body = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "datasetId": "ds",
         "userId": "admin",
         "fragments": []
@@ -478,14 +478,14 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "datasetId": "ds",
                         "userId": "admin",
                         "fragments": [{
                             "imageId": "img_1",
                             "baseSequence": 0,
                             "events": [{
-                                "schemaVersion": 1,
+                                "schemaVersion": 2,
                                 "eventSequence": 1,
                                 "eventId": "evt_1",
                                 "imageId": "img_1",
@@ -934,10 +934,154 @@ async fn correction_starts_a_new_review_round() {
     )
     .await;
     assert_eq!(final_approval.status(), StatusCode::OK);
+    let body = to_bytes(final_approval.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let review_state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        review_state["taskStates"]["bounding_box:pixel"]["status"],
+        "completed"
+    );
     assert_eq!(
         load_test_image_state(&app, &image_id).await["taskStates"]["bounding_box:pixel"]["status"],
         "completed"
     );
+}
+
+#[tokio::test]
+async fn reviewer_bbox_correction_is_terminal_rejected_idempotent_and_cancels_competitors() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    let (image_id, task_id) = prepare_correction_task(&app, false, true, "correct-box.png").await;
+    let assignment = claim_assignment_for_task(&app, "admin", "review", &task_id).await;
+    let competing = claim_assignment_for_task(&app, "reviewer_2", "review", &task_id).await;
+    let request = json!({
+        "correctionId": "cor_api_bbox",
+        "annotationId": "ann_1",
+        "expectedVersion": 1,
+        "geometry": {
+            "type": "bounding_box",
+            "geometry": { "x": 0.2, "y": 0.2, "width": 0.3, "height": 0.4 }
+        },
+        "reason": "box was too loose"
+    });
+
+    let mut stale_request = request.clone();
+    stale_request["expectedVersion"] = json!(0);
+    let stale = post_test_correction(&app, &image_id, "admin", &assignment, stale_request).await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let corrected =
+        post_test_correction(&app, &image_id, "admin", &assignment, request.clone()).await;
+    assert_eq!(corrected.status(), StatusCode::OK);
+    let body = to_bytes(corrected.into_body(), usize::MAX).await.unwrap();
+    let event: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(event["payload"]["kind"], "reviewer_correction_recorded");
+    let retry = post_test_correction(&app, &image_id, "admin", &assignment, request).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let body = to_bytes(retry.into_body(), usize::MAX).await.unwrap();
+    let retry_event: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(retry_event["eventId"], event["eventId"]);
+
+    let state = load_test_image_state(&app, &image_id).await;
+    assert_eq!(state["annotations"]["ann_1"].as_array().unwrap().len(), 2);
+    assert_eq!(state["annotations"]["ann_1"][1]["authorUserId"], "admin");
+    assert_eq!(
+        state["annotations"]["ann_1"][1]["source"]["source"],
+        "reviewer_correction"
+    );
+    assert_eq!(state["reviews"][0]["decision"], "rejected");
+    assert_eq!(state["taskStates"][&task_id]["status"], "completed");
+    assert_eq!(
+        state["taskStates"][&task_id]["outcome"],
+        "reviewer_corrected"
+    );
+    assert_eq!(
+        assignment_status_json(&state, assignment["assignmentId"].as_str().unwrap()),
+        "completed"
+    );
+    assert_eq!(
+        assignment_status_json(&state, competing["assignmentId"].as_str().unwrap()),
+        "cancelled"
+    );
+    assert!(
+        claim_assignment_for_task(&app, "other_annotator", "annotation", &task_id)
+            .await
+            .is_null()
+    );
+
+    let stats = get_test_stats(&app).await;
+    assert_eq!(stats["reviewedTasks"], 0);
+    assert_eq!(stats["approvedTasks"], 0);
+    assert_eq!(stats["rejectedTasks"], 1);
+    assert_eq!(stats["reviewerCorrectedTasks"], 1);
+    assert_eq!(stats["finalizedTasks"], 1);
+}
+
+#[tokio::test]
+async fn reviewer_keypoint_correction_uses_server_provenance_and_respects_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    let (image_id, task_id) = prepare_correction_task(&app, true, true, "correct-pose.png").await;
+    let assignment = claim_assignment_for_task(&app, "admin", "review", &task_id).await;
+    let response = post_test_correction(
+        &app,
+        &image_id,
+        "admin",
+        &assignment,
+        json!({
+            "correctionId": "cor_api_pose",
+            "annotationId": "ann_1",
+            "expectedVersion": 1,
+            "geometry": {
+                "type": "skeleton",
+                "geometry": {
+                    "keypoints": [{
+                        "name": "nose",
+                        "state": "visible",
+                        "point": { "x": 0.7, "y": 0.4 }
+                    }]
+                }
+            },
+            "reason": null
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state = load_test_image_state(&app, &image_id).await;
+    assert_eq!(
+        state["annotations"]["ann_1"][1]["geometry"]["geometry"]["keypoints"][0]["point"]["x"],
+        0.7
+    );
+    assert_eq!(
+        state["taskStates"][&task_id]["outcome"],
+        "reviewer_corrected"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    let (image_id, task_id) = prepare_correction_task(&app, false, false, "disabled.png").await;
+    let assignment = claim_assignment_for_task(&app, "admin", "review", &task_id).await;
+    let response = post_test_correction(
+        &app,
+        &image_id,
+        "admin",
+        &assignment,
+        json!({
+            "correctionId": "cor_api_disabled",
+            "annotationId": "ann_1",
+            "expectedVersion": 1,
+            "geometry": {
+                "type": "bounding_box",
+                "geometry": { "x": 0.2, "y": 0.2, "width": 0.3, "height": 0.3 }
+            },
+            "reason": null
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1140,6 +1284,95 @@ async fn assignment_lifecycle_is_exact_owned_and_resumable() {
     let reclaimed = claim_assignment(&app, "admin", "annotation").await;
     assert_eq!(reclaimed["imageId"], next["imageId"]);
     assert_ne!(reclaimed["assignmentId"], next["assignmentId"]);
+}
+
+#[tokio::test]
+async fn annotation_batch_validates_atomically_and_returns_resulting_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "batch.png", &png_bytes(2, 2)).await;
+    let assignment = claim_assignment(&app, "admin", "annotation").await;
+    let image_id = assignment["imageId"].as_str().unwrap();
+    let query = format!(
+        "assignmentId={}&imageId={}&taskId={}&kind=annotation",
+        assignment["assignmentId"].as_str().unwrap(),
+        image_id,
+        urlencoding::encode(assignment["taskId"].as_str().unwrap())
+    );
+    let annotation = |id: &str| {
+        json!({
+            "kind": "annotation_version_created",
+            "annotation": {
+                "annotationId": id,
+                "version": 1,
+                "taskId": "bounding_box:pixel",
+                "classId": "pixel",
+                "type": "bounding_box",
+                "source": { "source": "human" },
+                "geometry": {
+                    "type": "bounding_box",
+                    "geometry": { "x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5 }
+                },
+                "authorUserId": "admin",
+                "createdAt": labello_domain::now().to_rfc3339(),
+                "updatedAt": labello_domain::now().to_rfc3339(),
+                "deleted": false
+            },
+            "previous_version": null,
+            "reason": null
+        })
+    };
+    let post = |body: serde_json::Value| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{image_id}/annotation-batch?{query}"
+                ))
+                .header("x-user-id", "admin")
+                .header("x-user-role", "annotator")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+
+    let rejected = post(json!({
+        "payloads": [
+            annotation("ann_1"),
+            {
+                "kind": "annotation_deleted",
+                "annotation_id": "missing",
+                "version": 1,
+                "reason": null
+            }
+        ],
+        "complete": false
+    }))
+    .await
+    .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let state = load_test_image_state(&app, &ImageId::from(image_id)).await;
+    assert!(state["annotations"].as_object().unwrap().is_empty());
+
+    let request = json!({
+        "payloads": [annotation("ann_1"), annotation("ann_2")],
+        "complete": true
+    });
+    let saved = post(request.clone()).await.unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(saved["annotations"].as_object().unwrap().len(), 2);
+    let sequence = saved["currentSequence"].as_u64().unwrap();
+
+    let retried = post(request).await.unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let body = to_bytes(retried.into_body(), usize::MAX).await.unwrap();
+    let retried: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(retried["currentSequence"], sequence);
 }
 
 #[tokio::test]
@@ -1930,6 +2163,120 @@ async fn configure_pixel_task_review(app: &axum::Router, required_reviews: u32, 
     assert_eq!(update.status(), StatusCode::OK);
 }
 
+async fn prepare_correction_task(
+    app: &axum::Router,
+    skeleton: bool,
+    allow_reviewer_corrections: bool,
+    file_name: &str,
+) -> (ImageId, String) {
+    configure_pixel_task_review(app, 1, "approval").await;
+    let admin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/admin")
+                .header("x-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(admin.into_body(), usize::MAX).await.unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let task_id = if skeleton {
+        metadata["tasks"][0]["taskId"] = json!("skeleton:pixel");
+        metadata["tasks"][0]["annotationType"] = json!("skeleton");
+        metadata["tasks"][0]["skeleton"] = json!({
+            "keypoints": [{ "name": "nose", "required": true }],
+            "edges": [],
+            "allowHidden": true,
+            "allowAbsent": false
+        });
+        "skeleton:pixel"
+    } else {
+        "bounding_box:pixel"
+    };
+    metadata["tasks"][0]["review"]["allowReviewerCorrections"] = json!(allow_reviewer_corrections);
+    let update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/datasets/ds/admin")
+                .header("x-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": metadata["name"],
+                        "imageRoots": metadata["imageRoots"],
+                        "labelClasses": metadata["labelClasses"],
+                        "tasks": metadata["tasks"],
+                        "roleAssignments": metadata["roleAssignments"],
+                        "imbalance": metadata["imbalance"],
+                        "prelabelConfigs": metadata["prelabelConfigs"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let png = png_bytes(5, 5);
+    let image_id = ImageId::from_blake3_hex(blake3::hash(&png).to_hex().as_ref());
+    upload_test_image(app, file_name, &png).await;
+    let timestamp = labello_domain::now().to_rfc3339();
+    let (annotation_type, geometry) = if skeleton {
+        (
+            "skeleton",
+            json!({
+                "type": "skeleton",
+                "geometry": {
+                    "keypoints": [{
+                        "name": "nose",
+                        "state": "visible",
+                        "point": { "x": 0.5, "y": 0.5 }
+                    }]
+                }
+            }),
+        )
+    } else {
+        (
+            "bounding_box",
+            json!({
+                "type": "bounding_box",
+                "geometry": { "x": 0.1, "y": 0.1, "width": 0.3, "height": 0.3 }
+            }),
+        )
+    };
+    append_test_event(
+        app,
+        &image_id,
+        json!({
+            "kind": "annotation_version_created",
+            "annotation": {
+                "annotationId": "ann_1",
+                "version": 1,
+                "taskId": task_id,
+                "classId": "pixel",
+                "type": annotation_type,
+                "source": { "source": "human" },
+                "geometry": geometry,
+                "authorUserId": "admin",
+                "createdAt": timestamp,
+                "updatedAt": timestamp,
+                "deleted": false
+            },
+            "previous_version": null,
+            "reason": null
+        }),
+    )
+    .await;
+    submit_test_task_for_task(app, &image_id, task_id).await;
+    (image_id, task_id.to_string())
+}
+
 async fn upload_test_image(app: &axum::Router, file_name: &str, bytes: &[u8]) {
     let response = app
         .clone()
@@ -1972,7 +2319,11 @@ async fn append_test_event(app: &axum::Router, image_id: &ImageId, payload: serd
 }
 
 async fn submit_test_task(app: &axum::Router, image_id: &ImageId) {
-    let assignment = claim_assignment(app, "admin", "annotation").await;
+    submit_test_task_for_task(app, image_id, "bounding_box:pixel").await;
+}
+
+async fn submit_test_task_for_task(app: &axum::Router, image_id: &ImageId, task_id: &str) {
+    let assignment = claim_assignment_for_task(app, "admin", "annotation", task_id).await;
     assert_eq!(assignment["imageId"], image_id.as_str());
     let response = app
         .clone()
@@ -2041,6 +2392,15 @@ async fn post_test_review(
 }
 
 async fn claim_assignment(app: &axum::Router, user_id: &str, kind: &str) -> serde_json::Value {
+    claim_assignment_for_task(app, user_id, kind, "bounding_box:pixel").await
+}
+
+async fn claim_assignment_for_task(
+    app: &axum::Router,
+    user_id: &str,
+    kind: &str,
+    task_id: &str,
+) -> serde_json::Value {
     let role = match kind {
         "annotation" => "annotator",
         "review" => "reviewer",
@@ -2053,10 +2413,69 @@ async fn claim_assignment(app: &axum::Router, user_id: &str, kind: &str) -> serd
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind={kind}"
+                    "/datasets/ds/images/next?taskId={}&kind={kind}",
+                    urlencoding::encode(task_id)
                 ))
                 .header("x-user-id", user_id)
                 .header("x-user-role", role)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn post_test_correction(
+    app: &axum::Router,
+    image_id: &ImageId,
+    reviewer: &str,
+    assignment: &serde_json::Value,
+    request: serde_json::Value,
+) -> axum::response::Response {
+    let query = format!(
+        "assignmentId={}&imageId={}&taskId={}&kind=review",
+        assignment["assignmentId"].as_str().unwrap(),
+        assignment["imageId"].as_str().unwrap(),
+        urlencoding::encode(assignment["taskId"].as_str().unwrap())
+    );
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{image_id}/corrections?{query}"
+                ))
+                .header("x-user-id", reviewer)
+                .header("x-user-role", "reviewer")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn assignment_status_json<'a>(state: &'a serde_json::Value, assignment_id: &str) -> &'a str {
+    state["assignments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|assignment| assignment["assignmentId"] == assignment_id)
+        .unwrap()["status"]
+        .as_str()
+        .unwrap()
+}
+
+async fn get_test_stats(app: &axum::Router) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/stats")
+                .header("x-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -2,8 +2,8 @@ use std::{collections::BTreeSet, rc::Rc};
 
 use eframe::egui;
 use labello_client::{
-    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, LabelloApi,
-    PrelabelSuggestionRequest,
+    AnnotationBatchRequest, AssignNextRequest, AssignmentActionRequest, CorrectionRequest,
+    LabelloApi, PrelabelSuggestionRequest,
 };
 use labello_domain::{
     AdjudicationDecision, AdjudicationId, AdjudicationRecord, AnnotationId, Assignment,
@@ -18,6 +18,12 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn clear_current_image(&mut self) {
+        if let Some(request_id) = self.active_load_id {
+            self.runtime.active_requests.remove(&request_id);
+        }
+        if let Some(request_id) = self.active_operation_id {
+            self.runtime.active_requests.remove(&request_id);
+        }
         self.assignment = None;
         self.current = None;
         self.current_state = None;
@@ -31,11 +37,15 @@ impl LabelloApp {
         self.skeleton_keypoint_index = 0;
         self.next_keypoint_hidden = false;
         self.save_status = SaveStatus::Idle;
+        self.edit_generation = 0;
         self.review_index = 0;
         self.review_rejected = false;
+        self.correction_draft = None;
         self.canvas.fit_view();
         self.active_load_id = None;
         self.active_operation_id = None;
+        self.runtime.persistence.work_ready = None;
+        self.reset_work_draft_tracking();
         self.loading.image = false;
         self.loading.saving = false;
         self.queue.set_loading(false);
@@ -44,18 +54,21 @@ impl LabelloApp {
     pub(crate) fn start_workflow_command(&self, api: Rc<dyn LabelloApi>, command: UiCommand) {
         match command {
             UiCommand::ClaimAssignment {
+                request,
                 operation_id,
                 dataset_id,
                 task_id,
                 prelabel_config_ids,
                 kind,
-            } => self.spawn_message(async move {
+                reclaim_assignment_id,
+            } => self.spawn_message(request.clone(), async move {
                 let assignment = match api
                     .assign_next_image(
                         &dataset_id,
                         AssignNextRequest {
                             task_id,
                             kind: Some(kind.clone()),
+                            assignment_id: reclaim_assignment_id,
                         },
                     )
                     .await
@@ -63,6 +76,7 @@ impl LabelloApp {
                     Ok(assignment) => assignment,
                     Err(error) => {
                         return UiMessage::ImageLoaded {
+                            request,
                             operation_id,
                             assignment: None,
                             result: Box::new(Err(error.to_string())),
@@ -71,6 +85,7 @@ impl LabelloApp {
                 };
                 let Some(assignment) = assignment else {
                     return UiMessage::ImageLoaded {
+                        request,
                         operation_id,
                         assignment: None,
                         result: Box::new(Ok(None)),
@@ -87,18 +102,20 @@ impl LabelloApp {
                 .map(Some)
                 .map_err(|error| error.to_string());
                 UiMessage::ImageLoaded {
+                    request,
                     operation_id,
                     assignment: Some(assignment),
                     result: Box::new(result),
                 }
             }),
             UiCommand::ReloadAssignment {
+                request,
                 operation_id,
                 dataset_id,
                 assignment,
                 prelabel_config_ids,
                 fetch_prelabels,
-            } => self.spawn_message(async move {
+            } => self.spawn_message(request.clone(), async move {
                 let result = load_image(
                     api,
                     dataset_id,
@@ -110,20 +127,23 @@ impl LabelloApp {
                 .map(Some)
                 .map_err(|error| error.to_string());
                 UiMessage::ImageLoaded {
+                    request,
                     operation_id,
                     assignment: Some(assignment),
                     result: Box::new(result),
                 }
             }),
             UiCommand::SaveAnnotations {
+                request,
                 operation_id,
+                edit_generation,
                 dataset_id,
                 assignment,
                 annotations,
                 persisted,
                 modified,
                 submit,
-            } => self.spawn_message(async move {
+            } => self.spawn_message(request.clone(), async move {
                 let assignment_id = assignment.assignment_id.clone();
                 let result = save_annotations(SaveAnnotationsJob {
                     api,
@@ -137,17 +157,20 @@ impl LabelloApp {
                 .await
                 .map_err(|error| error.to_string());
                 UiMessage::SaveFinished {
+                    request,
                     operation_id,
                     assignment_id,
+                    edit_generation,
                     completed: submit,
-                    result,
+                    result: Box::new(result),
                 }
             }),
             UiCommand::ReleaseAssignment {
+                request,
                 operation_id,
                 dataset_id,
                 assignment,
-            } => self.spawn_message(async move {
+            } => self.spawn_message(request.clone(), async move {
                 let assignment_id = assignment.assignment_id.clone();
                 let result = api
                     .release_assignment(&dataset_id, assignment_action(&assignment))
@@ -155,39 +178,66 @@ impl LabelloApp {
                     .map(|_| ())
                     .map_err(|error| error.to_string());
                 UiMessage::ReleaseFinished {
+                    request,
                     operation_id,
                     assignment_id,
                     result,
                 }
             }),
             UiCommand::Review {
+                request,
                 operation_id,
                 dataset_id,
                 assignment,
                 review,
                 phase,
-            } => self.spawn_message(async move {
+            } => self.spawn_message(request.clone(), async move {
                 let assignment_id = assignment.assignment_id.clone();
                 let decision = review.decision.clone();
                 let result = api
                     .record_assigned_review(&dataset_id, assignment_action(&assignment), review)
                     .await
-                    .map(|_| ())
                     .map_err(|error| error.to_string());
                 UiMessage::ReviewFinished {
+                    request,
                     operation_id,
                     assignment_id,
                     phase,
                     decision,
+                    result: Box::new(result),
+                }
+            }),
+            UiCommand::Correction {
+                request,
+                operation_id,
+                dataset_id,
+                assignment,
+                correction,
+            } => self.spawn_message(request.clone(), async move {
+                let assignment_id = assignment.assignment_id.clone();
+                let result = api
+                    .record_assigned_correction(
+                        &dataset_id,
+                        assignment_action(&assignment),
+                        correction,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                UiMessage::CorrectionFinished {
+                    request,
+                    operation_id,
+                    assignment_id,
                     result,
                 }
             }),
             UiCommand::Adjudication {
+                request,
                 operation_id,
                 dataset_id,
                 assignment,
                 adjudication,
-            } => self.spawn_message(async move {
+            } => self.spawn_message(request.clone(), async move {
                 let assignment_id = assignment.assignment_id.clone();
                 let result = api
                     .record_assigned_adjudication(
@@ -199,6 +249,7 @@ impl LabelloApp {
                     .map(|_| ())
                     .map_err(|error| error.to_string());
                 UiMessage::AdjudicationFinished {
+                    request,
                     operation_id,
                     assignment_id,
                     result,
@@ -226,7 +277,9 @@ impl LabelloApp {
             return;
         }
         let operation_id = self.begin_load();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         self.queue_command(UiCommand::ClaimAssignment {
+            request,
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             task_id: task.task_id,
@@ -236,6 +289,7 @@ impl LabelloApp {
                 Vec::new()
             },
             kind,
+            reclaim_assignment_id: self.runtime.persistence.expected_assignment.clone(),
         });
     }
 
@@ -255,7 +309,9 @@ impl LabelloApp {
             Vec::new()
         };
         let operation_id = self.begin_load();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         self.queue_command(UiCommand::ReloadAssignment {
+            request,
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
@@ -275,9 +331,13 @@ impl LabelloApp {
             return;
         }
         let operation_id = self.begin_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        let edit_generation = self.edit_generation;
         self.save_status = SaveStatus::Saving;
         self.queue_command(UiCommand::SaveAnnotations {
+            request,
             operation_id,
+            edit_generation,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
             annotations: self.annotations.clone(),
@@ -295,7 +355,9 @@ impl LabelloApp {
             return;
         }
         let operation_id = self.begin_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         self.queue_command(UiCommand::ReleaseAssignment {
+            request,
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
@@ -303,6 +365,11 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_review(&mut self, decision: ReviewDecision) {
+        if decision == ReviewDecision::Approved && self.correction_draft.is_some() {
+            self.runtime.error =
+                Some("Discard correction mode before approving this object.".to_string());
+            return;
+        }
         let (Some(assignment), Some(task)) =
             (self.assignment.clone(), self.selected_task().cloned())
         else {
@@ -314,14 +381,8 @@ impl LabelloApp {
         {
             return;
         }
-        let targets = self
-            .annotations
-            .iter()
-            .filter(|annotation| {
-                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
-            })
-            .collect::<Vec<_>>();
-        let (target, phase) = if let Some(annotation) = targets.get(self.review_index) {
+        self.sync_review_selection();
+        let (target, phase) = if let Some(annotation) = self.current_review_annotation() {
             (
                 ReviewTarget::AnnotationVersion {
                     annotation_id: annotation.annotation_id.clone(),
@@ -337,7 +398,41 @@ impl LabelloApp {
                 ReviewPhase::FullImage,
             )
         };
-        self.queue_review(assignment, target, decision, phase);
+        let discard_correction = decision == ReviewDecision::Rejected;
+        if self.queue_review(assignment, target, decision, phase) && discard_correction {
+            self.discard_correction();
+        }
+    }
+
+    pub(crate) fn request_correction(&mut self) {
+        let (Some(assignment), Some(draft)) =
+            (self.assignment.clone(), self.correction_draft.clone())
+        else {
+            return;
+        };
+        if assignment.kind != AssignmentKind::Review
+            || self.loading.saving
+            || self.runtime.api.is_none()
+            || !self.can_correct_review_object()
+            || !draft.geometry_changed()
+        {
+            return;
+        }
+        let operation_id = self.begin_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        self.queue_command(UiCommand::Correction {
+            request,
+            operation_id,
+            dataset_id: self.config.dataset_id.clone(),
+            assignment,
+            correction: CorrectionRequest {
+                correction_id: draft.correction_id,
+                annotation_id: draft.annotation_id,
+                expected_version: draft.expected_version,
+                geometry: draft.edited_geometry,
+                reason: (!draft.reason.trim().is_empty()).then(|| draft.reason.trim().to_string()),
+            },
+        });
     }
 
     pub(crate) fn request_full_image_review(&mut self, decision: ReviewDecision) {
@@ -362,12 +457,14 @@ impl LabelloApp {
         target: ReviewTarget,
         decision: ReviewDecision,
         phase: ReviewPhase,
-    ) {
+    ) -> bool {
         if self.loading.saving || self.runtime.api.is_none() {
-            return;
+            return false;
         }
         let operation_id = self.begin_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         self.queue_command(UiCommand::Review {
+            request,
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
@@ -380,7 +477,7 @@ impl LabelloApp {
                 comment: None,
             },
             phase,
-        });
+        })
     }
 
     pub(crate) fn request_adjudication(&mut self, decision: AdjudicationDecision) {
@@ -396,7 +493,9 @@ impl LabelloApp {
             return;
         }
         let operation_id = self.begin_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         self.queue_command(UiCommand::Adjudication {
+            request,
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
@@ -434,7 +533,7 @@ impl LabelloApp {
         operation_id
     }
 
-    fn next_operation(&mut self) -> u64 {
+    pub(crate) fn next_operation(&mut self) -> u64 {
         self.next_operation_id = self.next_operation_id.wrapping_add(1);
         self.next_operation_id
     }
@@ -454,36 +553,21 @@ async fn save_annotations(
     job: SaveAnnotationsJob,
 ) -> labello_client::ClientResult<labello_domain::ImageState> {
     let action = assignment_action(&job.assignment);
-    let server_state = job
-        .api
-        .get_image_state(&job.dataset_id, &job.assignment.image_id)
-        .await?;
+    let mut payloads = Vec::new();
     for annotation in job.annotations {
         let payload = if job.persisted.contains(&annotation.annotation_id) && annotation.deleted {
-            if server_state
-                .current_annotation(&annotation.annotation_id)
-                .is_some_and(|current| current.deleted)
-            {
-                continue;
-            }
             EventPayload::AnnotationDeleted {
                 annotation_id: annotation.annotation_id,
                 version: annotation.version,
                 reason: None,
             }
         } else if !job.persisted.contains(&annotation.annotation_id) && !annotation.deleted {
-            if server_state.current_annotation(&annotation.annotation_id) == Some(&annotation) {
-                continue;
-            }
             EventPayload::AnnotationVersionCreated {
                 annotation,
                 previous_version: None,
                 reason: None,
             }
         } else if job.modified.contains(&annotation.annotation_id) && !annotation.deleted {
-            if server_state.current_annotation(&annotation.annotation_id) == Some(&annotation) {
-                continue;
-            }
             EventPayload::AnnotationVersionCreated {
                 previous_version: annotation.version.checked_sub(1),
                 annotation,
@@ -492,20 +576,17 @@ async fn save_annotations(
         } else {
             continue;
         };
-        job.api
-            .append_assigned_event(
-                &job.dataset_id,
-                action.clone(),
-                AppendEventRequest { payload },
-            )
-            .await?;
-    }
-    if job.submit {
-        job.api.complete_assignment(&job.dataset_id, action).await?;
-        return Ok(server_state);
+        payloads.push(payload);
     }
     job.api
-        .rebuild_image(&job.dataset_id, &job.assignment.image_id)
+        .apply_annotation_batch(
+            &job.dataset_id,
+            action,
+            AnnotationBatchRequest {
+                payloads,
+                complete: job.submit,
+            },
+        )
         .await
 }
 

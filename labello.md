@@ -356,7 +356,7 @@ Example metadata root:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "datasetId": "example-dataset",
   "createdAt": "2026-07-08T12:00:00Z",
   "updatedAt": "2026-07-08T12:00:00Z",
@@ -368,7 +368,7 @@ Example per-image event shape:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "eventSequence": 42,
   "eventId": "evt_01H00000000000000000000000",
   "imageId": "img_b4f9000000000000000000000000000000000000000000000000000000000000",
@@ -463,7 +463,7 @@ Example reviewer correction event:
 ```json
 {
   "eventId": "evt_01H00000000000000000000000",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "eventSequence": 57,
   "imageId": "img_b4f9000000000000000000000000000000000000000000000000000000000000",
   "type": "annotation_version_created",

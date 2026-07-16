@@ -8,13 +8,15 @@ use reqwest::{Method, RequestBuilder, Response, header::CONTENT_TYPE};
 use serde::{Serialize, de::DeserializeOwned};
 use url::Url;
 
+const STATS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 use crate::{
-    AdjudicationApi, AnnotationApi, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
-    AuthApi, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetApi,
-    DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob,
-    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
-    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi,
-    SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
+    AssignmentActionRequest, AuthApi, ClientError, ClientResult, CorrectionRequest,
+    CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery,
+    ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
+    ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -552,6 +554,28 @@ impl AnnotationApi for HttpLabelloApi {
             .await
         })
     }
+
+    fn apply_annotation_batch<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AnnotationBatchRequest,
+    ) -> crate::ApiFuture<'a, ImageState> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{}/annotation-batch",
+                        assignment.image_id
+                    ),
+                )?
+                .query(&assignment),
+                &request,
+            )
+            .await
+        })
+    }
 }
 
 impl ReviewApi for HttpLabelloApi {
@@ -560,7 +584,7 @@ impl ReviewApi for HttpLabelloApi {
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
         review: ReviewRecord,
-    ) -> crate::ApiFuture<'a, EventLogEntry> {
+    ) -> crate::ApiFuture<'a, ImageState> {
         Box::pin(async move {
             Self::send_json(
                 self.request(
@@ -578,7 +602,7 @@ impl ReviewApi for HttpLabelloApi {
         dataset_id: &'a DatasetId,
         assignment: AssignmentActionRequest,
         review: ReviewRecord,
-    ) -> crate::ApiFuture<'a, EventLogEntry> {
+    ) -> crate::ApiFuture<'a, ImageState> {
         Box::pin(async move {
             Self::send_json(
                 self.request(
@@ -723,6 +747,7 @@ impl StatsApi for HttpLabelloApi {
         Box::pin(async move {
             Self::json(
                 self.request(Method::GET, &format!("/datasets/{dataset_id}/stats"))?
+                    .timeout(STATS_REQUEST_TIMEOUT)
                     .send()
                     .await?,
             )

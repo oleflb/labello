@@ -15,19 +15,35 @@ const ZOOM_STEP: f32 = 1.25;
 const MIN_BOX_SIZE: f32 = 0.001;
 const HANDLE_HIT_RADIUS: f32 = 12.0;
 const HANDLE_SIZE: f32 = 8.0;
-const CONTROL_BAR_HEIGHT: f32 = 40.0;
-const CONTROL_HEIGHT: f32 = 28.0;
+const CONTROL_BAR_HEIGHT: f32 = 52.0;
+const CONTROL_HEIGHT: f32 = 44.0;
 const CONTROL_GAP: f32 = 4.0;
 const FOCUS_MARGIN: f32 = 1.35;
 const MIN_FOCUS_SPAN: f32 = 0.04;
 const DOUBLE_CLICK_DELAY: f64 = 0.3;
 const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
+const MAX_DASH_SEGMENTS: usize = 10_000;
 
 /// The result of moving or resizing an existing bounding-box annotation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundingBoxEdit {
     pub annotation_id: AnnotationId,
     pub bounding_box: BoundingBox,
+}
+
+/// The result of moving an existing skeleton keypoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeypointEdit {
+    pub annotation_id: AnnotationId,
+    pub keypoint_index: usize,
+    pub point: NormalizedPoint,
+}
+
+/// A selected keypoint on an existing skeleton annotation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeypointSelection {
+    pub annotation_id: AnnotationId,
+    pub keypoint_index: usize,
 }
 
 /// An action produced by the canvas.
@@ -41,12 +57,46 @@ pub enum CanvasAction<Edit = Infallible> {
     PlaceKeypoint(NormalizedPoint),
     Select(AnnotationId),
     EditBoundingBox(Edit),
+    SelectKeypoint(KeypointSelection),
+    EditKeypoint(KeypointEdit),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasInteraction {
+    pub editable: bool,
+    pub allow_create: bool,
+    pub allow_selection: bool,
+    pub edit_keypoints: bool,
+    pub selected_keypoint: Option<usize>,
+}
+
+impl CanvasInteraction {
+    pub fn annotations(editable: bool) -> Self {
+        Self {
+            editable,
+            allow_create: editable,
+            allow_selection: editable,
+            edit_keypoints: false,
+            selected_keypoint: None,
+        }
+    }
+
+    pub fn correction(selected_keypoint: Option<usize>) -> Self {
+        Self {
+            editable: true,
+            allow_create: false,
+            allow_selection: false,
+            edit_keypoints: true,
+            selected_keypoint,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct CanvasState {
     drag: Option<DragOperation>,
     draft_box: Option<BoundingBox>,
+    draft_keypoint: Option<NormalizedPoint>,
     zoom: f32,
     pan: Vec2,
     space_pan: bool,
@@ -60,6 +110,7 @@ impl Default for CanvasState {
         Self {
             drag: None,
             draft_box: None,
+            draft_keypoint: None,
             zoom: MIN_ZOOM,
             pan: Vec2::ZERO,
             space_pan: false,
@@ -79,13 +130,44 @@ enum ReviewViewTarget {
 }
 
 impl CanvasState {
+    /// Whether an annotation create, move, or resize interaction is active.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    fn cancel_drag(&mut self) {
+        self.drag = None;
+        self.draft_box = None;
+        self.draft_keypoint = None;
+    }
+
     /// Return the current zoom factor relative to the aspect-fitted image.
     pub fn current_zoom(&self) -> f32 {
         self.zoom
     }
 
+    pub(crate) fn stored_transform(&self) -> crate::persistence::StoredCanvasTransform {
+        crate::persistence::StoredCanvasTransform {
+            zoom: self.zoom,
+            pan_x: self.pan.x,
+            pan_y: self.pan.y,
+        }
+        .clamped()
+    }
+
+    pub(crate) fn restore_transform(
+        &mut self,
+        transform: crate::persistence::StoredCanvasTransform,
+    ) {
+        let transform = transform.clamped();
+        self.cancel_drag();
+        self.zoom = transform.zoom;
+        self.pan = vec2(transform.pan_x, transform.pan_y);
+    }
+
     /// Zoom in one step around the center of the viewport.
     pub fn zoom_in(&mut self) {
+        self.cancel_drag();
         let old_zoom = self.zoom;
         self.zoom = (old_zoom * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
         self.pan *= self.zoom / old_zoom;
@@ -93,6 +175,7 @@ impl CanvasState {
 
     /// Zoom out one step around the center of the viewport.
     pub fn zoom_out(&mut self) {
+        self.cancel_drag();
         let old_zoom = self.zoom;
         self.zoom = (old_zoom / ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
         self.pan *= self.zoom / old_zoom;
@@ -103,6 +186,7 @@ impl CanvasState {
 
     /// Fit the image to the canvas and center it.
     pub fn fit_view(&mut self) {
+        self.cancel_drag();
         self.zoom = MIN_ZOOM;
         self.pan = Vec2::ZERO;
     }
@@ -166,6 +250,11 @@ enum DragOperation {
         original: BoundingBox,
         handle: ResizeHandle,
     },
+    Keypoint {
+        annotation_id: AnnotationId,
+        keypoint_index: usize,
+        original: NormalizedPoint,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,7 +297,10 @@ pub fn show_canvas(
         Some(CanvasAction::PlaceKeypoint(point)) => Some(CanvasAction::PlaceKeypoint(point)),
         Some(CanvasAction::Select(id)) => Some(CanvasAction::Select(id)),
         // No annotation is selected above, so an edit cannot be started.
-        Some(CanvasAction::EditBoundingBox(_)) | None => None,
+        Some(CanvasAction::EditBoundingBox(_))
+        | Some(CanvasAction::SelectKeypoint(_))
+        | Some(CanvasAction::EditKeypoint(_))
+        | None => None,
     }
 }
 
@@ -238,6 +330,35 @@ pub fn show_canvas_interactive(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
+    show_canvas_configured(
+        ui,
+        state,
+        texture,
+        annotations,
+        image_size,
+        bounding_box_tool,
+        selected_annotation,
+        CanvasInteraction::annotations(editable),
+        skeleton_edges,
+        prelabels,
+    )
+}
+
+/// Show a canvas with an explicit interaction policy.
+#[allow(clippy::too_many_arguments)]
+pub fn show_canvas_configured(
+    ui: &mut Ui,
+    state: &mut CanvasState,
+    texture: Option<&egui::TextureHandle>,
+    annotations: &[AnnotationVersion],
+    image_size: [u32; 2],
+    bounding_box_tool: bool,
+    selected_annotation: Option<&AnnotationId>,
+    interaction: CanvasInteraction,
+    skeleton_edges: &[(String, String)],
+    prelabels: &[PrelabelSuggestion],
+) -> Option<CanvasAction<BoundingBoxEdit>> {
+    let editable = interaction.editable;
     let available = ui.available_size().max(vec2(1.0, 1.0));
     let (viewport, _) = ui.allocate_exact_size(available, Sense::hover());
     let controls = control_bar_rect(viewport);
@@ -245,15 +366,38 @@ pub fn show_canvas_interactive(
         pos2(viewport.left(), controls.bottom()),
         viewport.right_bottom(),
     );
-    let fitted_image = fitted_image_rect(interaction_rect, image_size);
-    state.clamp_to_viewport(interaction_rect, fitted_image);
-    state.apply_pending_review_view(interaction_rect, fitted_image);
+    if !editable {
+        state.cancel_drag();
+    }
     let response = ui.interact(
         interaction_rect,
         ui.id().with("annotation_canvas"),
         Sense::click_and_drag(),
     );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Annotation canvas"));
+    if !valid_rect(interaction_rect) {
+        state.cancel_drag();
+        paint_canvas(
+            ui,
+            viewport,
+            Rect::from_center_size(interaction_rect.center(), Vec2::ZERO),
+            None,
+            annotations,
+            selected_annotation,
+            false,
+            None,
+            None,
+            interaction.selected_keypoint,
+            None,
+            skeleton_edges,
+            prelabels,
+        );
+        show_view_controls(ui, controls, state);
+        return None;
+    }
+    let fitted_image = fitted_image_rect(interaction_rect, image_size);
+    state.clamp_to_viewport(interaction_rect, fitted_image);
+    state.apply_pending_review_view(interaction_rect, fitted_image);
 
     let view_consumed = handle_view_gestures(
         ui,
@@ -279,6 +423,20 @@ pub fn show_canvas_interactive(
     } else {
         None
     };
+    let keypoint_preview = if editable {
+        match &state.drag {
+            Some(DragOperation::Keypoint {
+                annotation_id,
+                keypoint_index,
+                ..
+            }) => state
+                .draft_keypoint
+                .map(|point| (annotation_id, *keypoint_index, point)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     paint_canvas(
         ui,
         viewport,
@@ -289,6 +447,8 @@ pub fn show_canvas_interactive(
         editable,
         preview,
         draft,
+        interaction.selected_keypoint,
+        keypoint_preview,
         skeleton_edges,
         prelabels,
     );
@@ -302,7 +462,7 @@ pub fn show_canvas_interactive(
         annotations,
         bounding_box_tool,
         selected_annotation,
-        editable,
+        interaction,
         view_consumed,
     );
     show_view_controls(ui, controls, state);
@@ -321,6 +481,8 @@ fn paint_canvas(
     editable: bool,
     edit_preview: Option<(&AnnotationId, BoundingBox)>,
     draft_box: Option<BoundingBox>,
+    selected_keypoint: Option<usize>,
+    keypoint_preview: Option<(&AnnotationId, usize, NormalizedPoint)>,
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
 ) {
@@ -417,13 +579,25 @@ fn paint_canvas(
                         );
                     }
                 }
-                for keypoint in &skeleton.keypoints {
+                for (keypoint_index, keypoint) in skeleton.keypoints.iter().enumerate() {
                     if let Some(point) = keypoint.point {
+                        let point = keypoint_preview
+                            .filter(|(id, index, _)| {
+                                *id == &annotation.annotation_id && *index == keypoint_index
+                            })
+                            .map_or(point, |(_, _, preview)| preview);
                         let center = normalized_to_screen(image_rect, pos2(point.x, point.y));
                         if selected {
                             painter.circle_stroke(center, 7.0, Stroke::new(2.0, Color32::WHITE));
                         }
                         painter.circle_filled(center, if selected { 5.0 } else { 4.0 }, color);
+                        if selected && selected_keypoint == Some(keypoint_index) {
+                            painter.circle_stroke(
+                                center,
+                                10.0,
+                                Stroke::new(3.0, Color32::from_rgb(96, 165, 250)),
+                            );
+                        }
                     }
                 }
             }
@@ -506,20 +680,33 @@ fn paint_draft_box(painter: &egui::Painter, image_rect: Rect, bbox: BoundingBox)
 }
 
 fn paint_dashed_segment(painter: &egui::Painter, start: Pos2, end: Pos2, color: Color32) {
+    if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite() {
+        return;
+    }
     let vector = end - start;
     let length = vector.length();
-    if length <= f32::EPSILON {
+    if !length.is_finite() || length <= f32::EPSILON {
         return;
     }
     let direction = vector / length;
     let mut offset = 0.0;
-    while offset < length {
+    for _ in 0..MAX_DASH_SEGMENTS {
+        if offset >= length {
+            break;
+        }
         let dash_end = (offset + 6.0).min(length);
+        if !dash_end.is_finite() || dash_end <= offset {
+            break;
+        }
         painter.line_segment(
             [start + direction * offset, start + direction * dash_end],
             Stroke::new(2.0, color),
         );
-        offset += 10.0;
+        let next = offset + 10.0;
+        if !next.is_finite() || next <= offset {
+            break;
+        }
+        offset = next;
     }
 }
 
@@ -540,7 +727,7 @@ fn show_view_controls(ui: &mut Ui, bar: Rect, state: &mut CanvasState) {
         Color32::from_rgba_unmultiplied(11, 16, 25, 224),
     );
 
-    let widths = [30.0, 58.0, 30.0, 44.0];
+    let widths = [44.0, 58.0, 44.0, 52.0];
     let total_width = widths.iter().sum::<f32>() + CONTROL_GAP * 3.0;
     let mut left = (bar.center().x - total_width * 0.5).max(bar.left() + 4.0);
     let top = bar.center().y - CONTROL_HEIGHT * 0.5;
@@ -615,8 +802,7 @@ fn handle_view_gestures(
         );
         state.pan += touch.translation_delta;
         state.clamp_to_viewport(viewport, fitted_image);
-        state.drag = None;
-        state.draft_box = None;
+        state.cancel_drag();
         state.space_pan = false;
         return true;
     }
@@ -639,8 +825,7 @@ fn handle_view_gestures(
             state.pan += pointer_delta;
             state.clamp_to_viewport(viewport, fitted_image);
         }
-        state.drag = None;
-        state.draft_box = None;
+        state.cancel_drag();
         if primary_released {
             state.space_pan = false;
         }
@@ -650,8 +835,7 @@ fn handle_view_gestures(
     if response.dragged_by(PointerButton::Middle) {
         state.pan += response.drag_delta();
         state.clamp_to_viewport(viewport, fitted_image);
-        state.drag = None;
-        state.draft_box = None;
+        state.cancel_drag();
         return true;
     }
 
@@ -666,6 +850,7 @@ fn handle_view_gestures(
                 pointer,
                 state.zoom * zoom_delta,
             );
+            state.cancel_drag();
             return true;
         }
         if wheel_delta != Vec2::ZERO {
@@ -676,6 +861,7 @@ fn handle_view_gestures(
                 pointer,
                 state.zoom * wheel_zoom_factor(wheel_delta),
             );
+            state.cancel_drag();
             return true;
         }
     }
@@ -698,8 +884,7 @@ fn handle_view_gestures(
     };
     if response.double_clicked() || repeated_click {
         state.fit_view();
-        state.drag = None;
-        state.draft_box = None;
+        state.cancel_drag();
         return true;
     }
     false
@@ -715,16 +900,34 @@ fn handle_annotation_pointer(
     annotations: &[AnnotationVersion],
     bounding_box_tool: bool,
     selected_annotation: Option<&AnnotationId>,
-    editable: bool,
+    interaction: CanvasInteraction,
     view_consumed: bool,
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
     if view_consumed || ui.input(|input| input.multi_touch().is_some()) {
+        state.cancel_drag();
         return None;
     }
 
     let pointer = response.interact_pointer_pos();
-    let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
-    if editable
+    let (primary_pressed, primary_released, primary_down, pointer_available, cancelled) =
+        ui.input(|input| {
+            (
+                input.pointer.primary_pressed(),
+                input.pointer.primary_released(),
+                input.pointer.primary_down(),
+                input.pointer.latest_pos().is_some(),
+                input.key_pressed(Key::Escape),
+            )
+        });
+    if !interaction.editable || cancelled {
+        state.cancel_drag();
+        return None;
+    }
+    if state.is_dragging() && ((!primary_down && !primary_released) || !pointer_available) {
+        state.cancel_drag();
+        return None;
+    }
+    if interaction.editable
         && primary_pressed
         && state.drag.is_none()
         && let Some(pointer) = pointer
@@ -752,6 +955,21 @@ fn handle_annotation_pointer(
         }
 
         if state.drag.is_none()
+            && interaction.edit_keypoints
+            && let Some(annotation_id) = selected_annotation
+            && let Some((keypoint_index, point)) =
+                keypoint_at(pointer, image_rect, annotation_id, annotations)
+        {
+            state.drag = Some(DragOperation::Keypoint {
+                annotation_id: annotation_id.clone(),
+                keypoint_index,
+                original: point,
+            });
+            state.draft_keypoint = Some(point);
+        }
+
+        if state.drag.is_none()
+            && interaction.allow_create
             && bounding_box_tool
             && image_rect.contains(pointer)
             && annotation_at(pointer, image_rect, annotations).is_none()
@@ -763,19 +981,19 @@ fn handle_annotation_pointer(
         }
     }
 
-    if editable
+    if interaction.editable
         && state.drag.is_some()
         && let Some(pointer) = pointer
     {
         update_drag_preview(state, image_rect, pointer);
     }
 
-    let primary_released = ui.input(|input| input.pointer.primary_released());
-    if editable && primary_released {
+    if primary_released {
         let drag = state.drag.take();
         let bbox = state.draft_box.take();
-        match (drag, bbox) {
-            (Some(DragOperation::Create { .. }), Some(bbox))
+        let keypoint = state.draft_keypoint.take();
+        match (drag, bbox, keypoint) {
+            (Some(DragOperation::Create { .. }), Some(bbox), _)
                 if bbox.width > 0.005 && bbox.height > 0.005 =>
             {
                 return Some(CanvasAction::CreateBoundingBox(bbox));
@@ -792,10 +1010,32 @@ fn handle_annotation_pointer(
                     ..
                 }),
                 Some(bounding_box),
+                _,
             ) if bbox_changed(original, bounding_box) => {
                 return Some(CanvasAction::EditBoundingBox(BoundingBoxEdit {
                     annotation_id,
                     bounding_box,
+                }));
+            }
+            (
+                Some(DragOperation::Keypoint {
+                    annotation_id,
+                    keypoint_index,
+                    original,
+                }),
+                _,
+                Some(point),
+            ) => {
+                if point != original {
+                    return Some(CanvasAction::EditKeypoint(KeypointEdit {
+                        annotation_id,
+                        keypoint_index,
+                        point,
+                    }));
+                }
+                return Some(CanvasAction::SelectKeypoint(KeypointSelection {
+                    annotation_id,
+                    keypoint_index,
                 }));
             }
             _ => {}
@@ -806,10 +1046,12 @@ fn handle_annotation_pointer(
         && let Some(pointer) = pointer
         && interaction_rect.contains(pointer)
     {
-        if let Some(annotation) = annotation_at(pointer, image_rect, annotations) {
+        if interaction.allow_selection
+            && let Some(annotation) = annotation_at(pointer, image_rect, annotations)
+        {
             return Some(CanvasAction::Select(annotation.annotation_id.clone()));
         }
-        if editable && !bounding_box_tool && image_rect.contains(pointer) {
+        if interaction.allow_create && !bounding_box_tool && image_rect.contains(pointer) {
             let point = screen_to_normalized(image_rect, pointer);
             return Some(CanvasAction::PlaceKeypoint(NormalizedPoint {
                 x: point.x.clamp(0.0, 1.0),
@@ -833,7 +1075,37 @@ fn update_drag_preview(state: &mut CanvasState, image_rect: Rect, pointer: Pos2)
         DragOperation::Resize {
             original, handle, ..
         } => Some(resize_bbox(*original, *handle, current)),
+        DragOperation::Keypoint { .. } => {
+            state.draft_keypoint = Some(NormalizedPoint {
+                x: current.x.clamp(0.0, 1.0),
+                y: current.y.clamp(0.0, 1.0),
+            });
+            None
+        }
     };
+}
+
+fn keypoint_at(
+    pos: Pos2,
+    image_rect: Rect,
+    annotation_id: &AnnotationId,
+    annotations: &[AnnotationVersion],
+) -> Option<(usize, NormalizedPoint)> {
+    let annotation = annotations
+        .iter()
+        .rev()
+        .find(|annotation| !annotation.deleted && &annotation.annotation_id == annotation_id)?;
+    let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
+        return None;
+    };
+    skeleton
+        .keypoints
+        .iter()
+        .enumerate()
+        .filter_map(|(index, keypoint)| keypoint.point.map(|point| (index, point)))
+        .find(|(_, point)| {
+            normalized_to_screen(image_rect, pos2(point.x, point.y)).distance(pos) <= 12.0
+        })
 }
 
 fn annotation_bbox(id: &AnnotationId, annotations: &[AnnotationVersion]) -> Option<BoundingBox> {
@@ -874,13 +1146,22 @@ fn annotation_at(
 }
 
 fn fitted_image_rect(viewport: Rect, image_size: [u32; 2]) -> Rect {
+    if !valid_rect(viewport) {
+        return Rect::from_center_size(viewport.center(), Vec2::ZERO);
+    }
     let source = vec2(image_size[0].max(1) as f32, image_size[1].max(1) as f32);
     let scale = (viewport.width() / source.x).min(viewport.height() / source.y);
     Rect::from_center_size(viewport.center(), source * scale)
 }
 
 fn transformed_image_rect(fitted_image: Rect, zoom: f32, pan: Vec2) -> Rect {
-    Rect::from_center_size(fitted_image.center() + pan, fitted_image.size() * zoom)
+    if !valid_rect(fitted_image) {
+        return Rect::from_center_size(fitted_image.center(), Vec2::ZERO);
+    }
+    Rect::from_center_size(
+        fitted_image.center() + vec2(finite_or(pan.x, 0.0), finite_or(pan.y, 0.0)),
+        fitted_image.size() * finite_or(zoom, MIN_ZOOM).clamp(MIN_ZOOM, MAX_ZOOM),
+    )
 }
 
 fn normalized_to_screen(image_rect: Rect, point: Pos2) -> Pos2 {
@@ -892,8 +1173,16 @@ fn normalized_to_screen(image_rect: Rect, point: Pos2) -> Pos2 {
 
 fn screen_to_normalized(image_rect: Rect, point: Pos2) -> Pos2 {
     pos2(
-        (point.x - image_rect.left()) / image_rect.width(),
-        (point.y - image_rect.top()) / image_rect.height(),
+        if image_rect.width().is_finite() && image_rect.width() > f32::EPSILON {
+            (point.x - image_rect.left()) / image_rect.width()
+        } else {
+            0.5
+        },
+        if image_rect.height().is_finite() && image_rect.height() > f32::EPSILON {
+            (point.y - image_rect.top()) / image_rect.height()
+        } else {
+            0.5
+        },
     )
 }
 
@@ -931,6 +1220,10 @@ fn annotation_focus_rect(annotation: &AnnotationVersion) -> Option<Rect> {
 }
 
 fn fit_normalized_rect(state: &mut CanvasState, viewport: Rect, fitted_image: Rect, target: Rect) {
+    if !valid_rect(viewport) || !valid_rect(fitted_image) {
+        state.cancel_drag();
+        return;
+    }
     let target_size = target
         .size()
         .max(Vec2::splat(MIN_FOCUS_SPAN))
@@ -958,6 +1251,10 @@ fn set_zoom_around(
     focus: Pos2,
     requested_zoom: f32,
 ) {
+    if !valid_rect(viewport) || !valid_rect(fitted_image) {
+        state.cancel_drag();
+        return;
+    }
     state.clamp_to_viewport(viewport, fitted_image);
     let old_zoom = state.zoom;
     let old_center = fitted_image.center() + state.pan;
@@ -971,11 +1268,23 @@ fn set_zoom_around(
 }
 
 fn clamp_pan(viewport: Rect, fitted_image: Rect, zoom: f32, pan: Vec2) -> Vec2 {
+    if !valid_rect(viewport) || !valid_rect(fitted_image) {
+        return Vec2::ZERO;
+    }
     let overflow = ((fitted_image.size() * zoom - viewport.size()) * 0.5).max(Vec2::ZERO);
     vec2(
         finite_or(pan.x, 0.0).clamp(-overflow.x, overflow.x),
         finite_or(pan.y, 0.0).clamp(-overflow.y, overflow.y),
     )
+}
+
+fn valid_rect(rect: Rect) -> bool {
+    rect.min.x.is_finite()
+        && rect.min.y.is_finite()
+        && rect.max.x.is_finite()
+        && rect.max.y.is_finite()
+        && rect.width() > f32::EPSILON
+        && rect.height() > f32::EPSILON
 }
 
 fn wheel_zoom_factor(delta: Vec2) -> f32 {
@@ -1100,10 +1409,24 @@ mod tests {
     use egui::{Event, Modifiers, MouseWheelUnit, TouchDeviceId, TouchId, TouchPhase};
     use egui_kittest::{Harness, kittest::Queryable};
 
-    #[derive(Default)]
     struct InteractiveTestState {
         canvas: CanvasState,
         actions: Vec<CanvasAction<BoundingBoxEdit>>,
+        editable: bool,
+        annotations: Vec<AnnotationVersion>,
+        selected_annotation: Option<AnnotationId>,
+    }
+
+    impl Default for InteractiveTestState {
+        fn default() -> Self {
+            Self {
+                canvas: CanvasState::default(),
+                actions: Vec::new(),
+                editable: true,
+                annotations: Vec::new(),
+                selected_annotation: None,
+            }
+        }
     }
 
     fn canvas_harness(bounding_box_tool: bool) -> Harness<'static, InteractiveTestState> {
@@ -1116,11 +1439,11 @@ mod tests {
                         ui,
                         &mut test.canvas,
                         None,
-                        &[],
+                        &test.annotations,
                         [400, 200],
                         bounding_box_tool,
-                        None,
-                        true,
+                        test.selected_annotation.as_ref(),
+                        test.editable,
                         &[],
                         &[],
                     ) {
@@ -1129,6 +1452,58 @@ mod tests {
                 },
                 InteractiveTestState::default(),
             )
+    }
+
+    fn correction_canvas_harness(
+        annotation: AnnotationVersion,
+        bounding_box_tool: bool,
+    ) -> Harness<'static, InteractiveTestState> {
+        let selected_annotation = annotation.annotation_id.clone();
+        Harness::builder()
+            .with_size(vec2(400.0, 300.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                move |ui, test: &mut InteractiveTestState| {
+                    if let Some(action) = show_canvas_configured(
+                        ui,
+                        &mut test.canvas,
+                        None,
+                        &test.annotations,
+                        [400, 200],
+                        bounding_box_tool,
+                        test.selected_annotation.as_ref(),
+                        CanvasInteraction::correction(None),
+                        &[],
+                        &[],
+                    ) {
+                        test.actions.push(action);
+                    }
+                },
+                InteractiveTestState {
+                    annotations: vec![annotation],
+                    selected_annotation: Some(selected_annotation),
+                    ..Default::default()
+                },
+            )
+    }
+
+    fn test_annotation(geometry: AnnotationGeometry) -> AnnotationVersion {
+        AnnotationVersion {
+            annotation_id: AnnotationId::from("ann_test"),
+            version: 1,
+            task_id: labello_domain::TaskId::from("task"),
+            class_id: labello_domain::ClassId::from("class"),
+            annotation_type: match &geometry {
+                AnnotationGeometry::BoundingBox(_) => labello_domain::AnnotationType::BoundingBox,
+                AnnotationGeometry::Skeleton(_) => labello_domain::AnnotationType::Skeleton,
+            },
+            source: labello_domain::AnnotationSource::Human,
+            geometry,
+            author_user_id: labello_domain::UserId::from("annotator"),
+            created_at: labello_domain::now(),
+            updated_at: labello_domain::now(),
+            deleted: false,
+        }
     }
 
     fn click_at(harness: &mut Harness<'_, InteractiveTestState>, pos: Pos2) {
@@ -1226,6 +1601,30 @@ mod tests {
         let rect = bbox_to_screen_rect(image, bbox(0.25, 0.1, 0.5, 0.4));
         assert_eq!(rect.min, pos2(225.0, 90.0));
         assert_eq!(rect.max, pos2(625.0, 250.0));
+    }
+
+    #[test]
+    fn degenerate_viewports_and_non_finite_dashes_have_finite_fallbacks() {
+        let degenerate = Rect::from_min_size(pos2(10.0, 20.0), Vec2::ZERO);
+        let fitted = fitted_image_rect(degenerate, [0, 0]);
+        assert_eq!(fitted.size(), Vec2::ZERO);
+        assert_eq!(
+            screen_to_normalized(fitted, pos2(50.0, 60.0)),
+            pos2(0.5, 0.5)
+        );
+        assert_eq!(
+            clamp_pan(degenerate, fitted, f32::NAN, Vec2::splat(f32::NAN)),
+            Vec2::ZERO
+        );
+
+        let context = egui::Context::default();
+        let painter = context.layer_painter(egui::LayerId::background());
+        paint_dashed_segment(
+            &painter,
+            pos2(f32::NAN, 0.0),
+            pos2(f32::INFINITY, 1.0),
+            Color32::WHITE,
+        );
     }
 
     #[test]
@@ -1608,6 +2007,162 @@ mod tests {
         };
         assert!(created.validate().is_ok());
         assert!(created.width > 0.0 && created.height > 0.0);
+    }
+
+    #[test]
+    fn correction_canvas_moves_existing_box_but_never_creates_one() {
+        let annotation = test_annotation(AnnotationGeometry::BoundingBox(bbox(0.2, 0.2, 0.2, 0.2)));
+        let mut harness = correction_canvas_harness(annotation, true);
+        let canvas = harness.get_by_label("Annotation canvas").rect();
+        let image_top = canvas.center().y - canvas.width() * 0.25;
+        let start = pos2(
+            canvas.left() + canvas.width() * 0.3,
+            image_top + canvas.width() * 0.15,
+        );
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            start,
+            start + vec2(30.0, 20.0),
+        );
+        assert!(matches!(
+            harness.state().actions.as_slice(),
+            [CanvasAction::EditBoundingBox(_)]
+        ));
+
+        harness.state_mut().actions.clear();
+        let top_left = pos2(
+            canvas.left() + canvas.width() * 0.2,
+            image_top + canvas.width() * 0.1,
+        );
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            top_left,
+            top_left - vec2(20.0, 15.0),
+        );
+        let [CanvasAction::EditBoundingBox(resized)] = harness.state().actions.as_slice() else {
+            panic!("expected one bounding-box resize action");
+        };
+        assert!(resized.bounding_box.width > 0.2);
+        assert!(resized.bounding_box.height > 0.2);
+
+        harness.state_mut().actions.clear();
+        let blank = pos2(canvas.right() - 20.0, canvas.bottom() - 20.0);
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            blank,
+            blank - vec2(50.0, 30.0),
+        );
+        assert!(harness.state().actions.is_empty());
+    }
+
+    #[test]
+    fn correction_canvas_selects_and_drags_existing_keypoint() {
+        let annotation = test_annotation(AnnotationGeometry::Skeleton(
+            labello_domain::SkeletonGeometry {
+                keypoints: vec![labello_domain::KeypointAnnotation {
+                    name: "nose".to_string(),
+                    state: labello_domain::KeypointState::Visible,
+                    point: Some(NormalizedPoint { x: 0.5, y: 0.5 }),
+                }],
+            },
+        ));
+        let mut harness = correction_canvas_harness(annotation, false);
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            center,
+            center + vec2(40.0, -20.0),
+        );
+        let [CanvasAction::EditKeypoint(edit)] = harness.state().actions.as_slice() else {
+            panic!("expected one keypoint edit action");
+        };
+        assert_eq!(edit.keypoint_index, 0);
+        assert!(edit.point.x > 0.5);
+        assert!(edit.point.y < 0.5);
+    }
+
+    #[test]
+    fn drag_is_cancelled_when_canvas_becomes_read_only_or_pointer_is_cancelled() {
+        let mut harness = canvas_harness(true);
+        let canvas = harness.get_by_label("Annotation canvas").rect();
+        let start = canvas.center();
+        harness.event(Event::PointerMoved(start));
+        harness.event(Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(harness.state().canvas.is_dragging());
+
+        harness.state_mut().editable = false;
+        harness.step();
+        assert!(!harness.state().canvas.is_dragging());
+        assert!(harness.state().actions.is_empty());
+
+        harness.state_mut().editable = true;
+        harness.event(Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        harness.event(Event::PointerMoved(start));
+        harness.event(Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(harness.state().canvas.is_dragging());
+        harness.key_press(Key::Escape);
+        harness.step();
+        assert!(!harness.state().canvas.is_dragging());
+        assert!(harness.state().actions.is_empty());
+
+        harness.event(Event::PointerMoved(start));
+        harness.event(Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(harness.state().canvas.is_dragging());
+        harness.event(Event::PointerGone);
+        harness.step();
+        assert!(!harness.state().canvas.is_dragging());
+    }
+
+    #[test]
+    fn wheel_zoom_cancels_an_active_annotation_drag() {
+        let mut harness = canvas_harness(true);
+        let center = harness.get_by_label("Annotation canvas").rect().center();
+        harness.event(Event::PointerMoved(center));
+        harness.event(Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(harness.state().canvas.is_dragging());
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, 120.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert!(!harness.state().canvas.is_dragging());
+        assert!(harness.state().actions.is_empty());
     }
 
     #[test]

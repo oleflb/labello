@@ -59,6 +59,9 @@ impl IntoResponse for ApiError {
             ApiError::Storage(labello_storage::StorageError::InvalidAssignment(_)) => {
                 StatusCode::BAD_REQUEST
             }
+            ApiError::Storage(labello_storage::StorageError::InvalidCorrection(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             ApiError::Storage(labello_storage::StorageError::AssignmentConflict(_)) => {
                 StatusCode::CONFLICT
             }

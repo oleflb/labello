@@ -8,28 +8,30 @@ use std::{
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
 use labello_client::{
-    AdjudicationApi, AnnotationApi, ApiFuture, AppendEventRequest, AssignNextRequest,
-    AssignmentActionRequest, AuthApi, ClientError, ClientResult, CorrectionRequest,
-    CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery,
-    ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
-    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
-    PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, SnapshotFile, StatsApi, TaskApi,
-    UpdateDatasetConfigRequest, UserApi,
+    AdjudicationApi, AnnotationApi, AnnotationBatchRequest, ApiFuture, AppendEventRequest,
+    AssignNextRequest, AssignmentActionRequest, AuthApi, ClientError, ClientResult,
+    CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi,
+    ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
+    KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
+    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, SnapshotFile,
+    StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
     AssignmentKind, AssignmentStatus, BoundingBox, BrowserAcceleration, ClassId, DatasetId,
     DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetSnapshot, DatasetStats,
     EventLogEntry, EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, ImageRecord,
-    ImageState, KeybindingSet, KeypointSpec, LabelClass, ModelSpec, OfflineBundle,
-    OfflineSyncRequest, OfflineSyncResult, OutputProcessing, PrelabelConfig, PrelabelConfigId,
-    PrelabelExecution, PrelabelSuggestion, ReviewConfig, ReviewRecord, SCHEMA_VERSION,
+    ImageState, KeybindingSet, KeypointAnnotation, KeypointSpec, KeypointState, LabelClass,
+    ModelSpec, NormalizedPoint, OfflineBundle, OfflineSyncRequest, OfflineSyncResult,
+    OutputProcessing, PrelabelConfig, PrelabelConfigId, PrelabelExecution, PrelabelSuggestion,
+    ReviewConfig, ReviewId, ReviewRecord, ReviewTarget, SCHEMA_VERSION, SkeletonGeometry,
     SkeletonSpec, SnapshotFileEntry, TaskDefinition, TaskId, TaskStatus, TutorialContent,
     UserAccount, UserId,
 };
 
 use crate::app::{
-    AppConfig, AppView, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, SaveStatus, UiMessage,
+    AppConfig, AppView, Drawer, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, LayoutMode,
+    RequestIdentity, SaveStatus, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
 
@@ -173,13 +175,13 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     });
     assert_eq!(api.last_image_query().unwrap().page, 2);
 
-    click(&mut harness, "Backups / Snapshots");
-    click(&mut harness, "Create snapshot");
+    click_accesskit_button(&mut harness, "Backups / Snapshots");
+    click_accesskit_button(&mut harness, "Create snapshot");
     step_until(&mut harness, 8, |app| !app.loading.creating_snapshot);
     assert_eq!(api.counts().create_snapshot, 1);
     assert!(harness.query_by_label("snapshot-test").is_some());
 
-    click(&mut harness, "Download");
+    click_accesskit_button(&mut harness, "Download");
     step_until(&mut harness, 8, |app| app.loading.snapshot_file.is_none());
     assert_eq!(api.counts().get_snapshot_file, 1);
     assert!(
@@ -243,27 +245,30 @@ fn replacement_session_request_ignores_the_stale_result() {
     app.auth.account = None;
 
     app.request_session();
-    let stale_request_id = app.auth.session_request_id;
+    let stale_request = app.runtime.commands.back().unwrap().request().clone();
     app.request_session();
-    let active_request_id = app.auth.session_request_id;
-    assert_ne!(stale_request_id, active_request_id);
+    let active_request = app.runtime.commands.back().unwrap().request().clone();
+    assert_ne!(stale_request, active_request);
 
     app.runtime
         .tx
         .send(UiMessage::SessionLoaded {
-            request_id: stale_request_id,
+            request: stale_request,
             result: Ok(account.clone()),
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
     assert!(app.loading.session);
     assert!(app.auth.account.is_none());
-    assert_eq!(app.auth.active_session_request_id, Some(active_request_id));
+    assert_eq!(
+        app.auth.active_session_request_id,
+        Some(active_request.request_id)
+    );
 
     app.runtime
         .tx
         .send(UiMessage::SessionLoaded {
-            request_id: active_request_id,
+            request: active_request,
             result: Ok(account.clone()),
         })
         .unwrap();
@@ -527,10 +532,12 @@ fn stale_save_responses_cannot_replace_the_current_image_state() {
         .runtime
         .tx
         .send(UiMessage::SaveFinished {
+            request: test_request(harness.state(), u64::MAX, Some("demo")),
             operation_id: u64::MAX,
             assignment_id: AssignmentId::generate(),
+            edit_generation: 0,
             completed: false,
-            result: Ok(ImageState::new(ImageId::from("img_stale"))),
+            result: Box::new(Ok(ImageState::new(ImageId::from("img_stale")))),
         })
         .unwrap();
     harness.step();
@@ -662,6 +669,329 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
 }
 
 #[test]
+fn autosave_waits_for_an_active_canvas_drag() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click(&mut harness, "Accept");
+    let start = harness.get_by_label("Annotation canvas").rect().center();
+    harness.drag_at(start);
+    harness.step();
+    assert!(harness.state().canvas.is_dragging());
+
+    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().autosave_if_due();
+
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert!(!harness.state().loading.saving);
+    assert_eq!(api.counts().annotation_batch, 0);
+}
+
+#[test]
+fn edits_made_during_save_remain_dirty_when_the_saved_generation_finishes() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click(&mut harness, "Accept");
+    harness.state_mut().request_save(false);
+    harness.state_mut().create_bbox(BoundingBox {
+        x: 0.55,
+        y: 0.55,
+        width: 0.2,
+        height: 0.2,
+    });
+
+    step_until(&mut harness, 10, |app| !app.loading.saving);
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().annotations.len(), 2);
+    assert_eq!(api.counts().annotation_batch, 1);
+}
+
+#[test]
+fn a_full_command_queue_cannot_strand_save_loading() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    click(&mut harness, "Accept");
+    while harness.state().runtime.commands.len() < 64 {
+        let request_id = 10_000 + harness.state().runtime.commands.len() as u64;
+        let request = test_request(harness.state(), request_id, None);
+        assert!(
+            harness
+                .state_mut()
+                .queue_command(UiCommand::DatasetList { request })
+        );
+    }
+
+    harness.state_mut().request_save(false);
+
+    assert!(!harness.state().loading.saving);
+    assert_eq!(harness.state().active_operation_id, None);
+    assert_eq!(harness.state().save_status, SaveStatus::Retry);
+}
+
+#[test]
+fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
+    let api = Rc::new(SpyApi::new());
+    let metadata = api.metadata();
+    let users = api.dataset_users();
+    let mut app = base_live_app(api);
+    app.auth.checked = true;
+    app.datasets.metadata = Some(metadata.clone());
+    app.datasets.admin_config = Some(metadata);
+    app.datasets.users = users.clone();
+    app.datasets.users_baseline = users;
+
+    saturate_command_queue(&mut app);
+    app.request_dataset_list();
+    assert!(!app.loading.datasets);
+
+    saturate_command_queue(&mut app);
+    app.request_create_dataset();
+    assert!(!app.loading.dataset);
+
+    saturate_command_queue(&mut app);
+    app.request_admin_dataset();
+    assert!(!app.loading.admin);
+
+    saturate_command_queue(&mut app);
+    app.request_admin_save();
+    assert!(!app.loading.admin);
+
+    saturate_command_queue(&mut app);
+    app.request_role_save(UserId::from("reviewer"));
+    assert!(app.loading.roles_user.is_none());
+
+    saturate_command_queue(&mut app);
+    app.request_images();
+    assert!(!app.loading.images);
+
+    saturate_command_queue(&mut app);
+    app.request_snapshots();
+    assert!(!app.loading.snapshots);
+
+    saturate_command_queue(&mut app);
+    app.request_snapshot_create();
+    assert!(!app.loading.creating_snapshot);
+
+    saturate_command_queue(&mut app);
+    app.request_snapshot_download("snapshot".to_string(), "manifest.json".to_string());
+    assert!(app.loading.snapshot_file.is_none());
+
+    saturate_command_queue(&mut app);
+    app.request_ingest();
+    assert!(!app.loading.ingesting);
+    assert!(!app.loading.ingest_polling);
+
+    saturate_command_queue(&mut app);
+    app.loading.ingesting = true;
+    app.loading.ingest_job_id = Some("job".to_string());
+    app.loading.last_ingest_poll = Some(Instant::now() - Duration::from_secs(1));
+    app.refresh_ingest_if_due();
+    assert!(app.loading.ingesting);
+    assert!(!app.loading.ingest_polling);
+
+    saturate_command_queue(&mut app);
+    app.request_keybindings_save();
+    assert!(!app.loading.keybindings);
+
+    app.view = AppView::Stats;
+    saturate_command_queue(&mut app);
+    app.request_stats();
+    assert!(!app.loading.stats);
+    assert!(app.datasets.active_stats_request.is_none());
+
+    saturate_command_queue(&mut app);
+    let session_request = test_request(&app, 90_001, None);
+    app.loading.session = true;
+    app.auth.checked = false;
+    app.auth.active_session_request_id = Some(session_request.request_id);
+    assert!(!app.queue_command(UiCommand::Session {
+        request: session_request
+    }));
+    assert!(!app.loading.session);
+    assert!(app.auth.checked);
+    assert!(app.auth.active_session_request_id.is_none());
+
+    saturate_command_queue(&mut app);
+    let logout_request = test_request(&app, 90_002, None);
+    app.loading.logout = true;
+    assert!(!app.queue_command(UiCommand::Logout {
+        request: logout_request
+    }));
+    assert!(!app.loading.logout);
+}
+
+#[test]
+fn queue_saturation_rolls_back_claim_release_review_and_adjudication() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+
+    saturate_command_queue(harness.state_mut());
+    harness.state_mut().request_release();
+    assert!(!harness.state().loading.saving);
+    assert!(harness.state().active_operation_id.is_none());
+
+    harness.state_mut().clear_current_image();
+    saturate_command_queue(harness.state_mut());
+    harness.state_mut().request_next_image();
+    assert!(!harness.state().loading.image);
+    assert!(harness.state().active_load_id.is_none());
+    assert!(!harness.state().queue.is_loading());
+
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut review = loaded_review_harness(api);
+    saturate_command_queue(review.state_mut());
+    review
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Approved);
+    assert!(!review.state().loading.saving);
+    assert!(review.state().active_operation_id.is_none());
+
+    let annotation_id = review.state().selected_annotation.clone().unwrap();
+    review.state_mut().start_correction();
+    review.state_mut().edit_correction_bbox(BoundingBoxEdit {
+        annotation_id,
+        bounding_box: BoundingBox {
+            x: 0.3,
+            y: 0.3,
+            width: 0.2,
+            height: 0.2,
+        },
+    });
+    saturate_command_queue(review.state_mut());
+    review.state_mut().request_correction();
+    assert!(!review.state().loading.saving);
+    assert!(review.state().active_operation_id.is_none());
+    assert!(review.state().correction_draft.is_some());
+
+    review.state_mut().view = AppView::Adjudicate;
+    review.state_mut().assignment.as_mut().unwrap().kind = AssignmentKind::Adjudication;
+    saturate_command_queue(review.state_mut());
+    review
+        .state_mut()
+        .request_adjudication(labello_domain::AdjudicationDecision::AcceptAnnotation);
+    assert!(!review.state().loading.saving);
+    assert!(review.state().active_operation_id.is_none());
+}
+
+#[test]
+fn stale_auth_and_workspace_messages_cannot_mutate_current_owners() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    let stale_auth = test_request(&app, 100, None);
+    app.begin_auth_epoch();
+    app.loading.datasets = true;
+    app.runtime.active_requests.insert(101);
+    app.runtime
+        .tx
+        .send(UiMessage::DatasetList {
+            request: stale_auth,
+            result: Ok(vec![DatasetSummary {
+                dataset_id: DatasetId::from("stale"),
+                name: "Stale".to_string(),
+                roles: vec![DatasetRole::DataAdmin],
+                total_images: 999,
+            }]),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.loading.datasets);
+    assert!(app.datasets.summaries.is_empty());
+    assert!(app.runtime.active_requests.contains(&101));
+
+    let stale_workspace = test_request(&app, 102, Some("demo"));
+    app.begin_workspace_epoch();
+    app.config.dataset_id = DatasetId::from("other");
+    app.loading.admin = true;
+    app.runtime.active_requests.insert(103);
+    app.runtime
+        .tx
+        .send(UiMessage::AdminSaved {
+            request: stale_workspace,
+            result: Box::new(Ok(SpyApi::new().metadata())),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.loading.admin);
+    assert!(app.datasets.admin_config.is_none());
+    assert!(app.runtime.active_requests.contains(&103));
+}
+
+#[test]
+fn api_login_logout_dataset_and_view_boundaries_rotate_epochs() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    let initial_auth = app.auth_epoch;
+    let initial_workspace = app.workspace_epoch;
+
+    app.rebuild_http_api();
+    assert!(app.auth_epoch > initial_auth);
+    assert!(app.workspace_epoch > initial_workspace);
+
+    let rebuilt_auth = app.auth_epoch;
+    app.request_session();
+    assert!(app.auth_epoch > rebuilt_auth);
+    let login_request = app.runtime.commands.back().unwrap().request();
+    assert_eq!(login_request.auth_epoch, app.auth_epoch);
+    assert_eq!(login_request.workspace_epoch, app.workspace_epoch);
+
+    app.loading.session = false;
+    let login_auth = app.auth_epoch;
+    app.request_logout();
+    assert!(app.auth_epoch > login_auth);
+    let logout_request = app.runtime.commands.back().unwrap().request();
+    assert_eq!(logout_request.auth_epoch, app.auth_epoch);
+
+    app.loading.logout = false;
+    app.runtime.commands.clear();
+    let before_dataset = app.workspace_epoch;
+    app.request_load_dataset();
+    assert!(app.workspace_epoch > before_dataset);
+
+    app.loading.dataset = false;
+    app.runtime.commands.clear();
+    app.datasets.metadata = Some(SpyApi::new().metadata());
+    app.view = AppView::Annotate;
+    let before_view = app.workspace_epoch;
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Stats));
+    assert!(app.workspace_epoch > before_view);
+}
+
+#[test]
+fn dataset_creation_completion_accepts_its_new_dataset_identity() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    let mut metadata = SpyApi::new().metadata();
+    metadata.dataset_id = DatasetId::from("new-dataset");
+    metadata.name = "New dataset".to_string();
+    let request = test_request(&app, 700, Some("new-dataset"));
+    app.loading.dataset = true;
+    app.runtime.active_requests.insert(request.request_id);
+    app.runtime
+        .tx
+        .send(UiMessage::DatasetCreated {
+            request,
+            result: Box::new(Ok(metadata)),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert_eq!(app.config.dataset_id, DatasetId::from("new-dataset"));
+    assert!(app.loading.dataset);
+    let load = app.runtime.commands.front().unwrap();
+    assert_eq!(
+        load.request().dataset_id.as_ref(),
+        Some(&DatasetId::from("new-dataset"))
+    );
+}
+
+#[test]
 fn setup_recommends_a_single_continue_work_action() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
@@ -770,15 +1100,18 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
     let state = harness.state().current_state.clone().unwrap();
     harness.state_mut().active_operation_id = Some(77);
     harness.state_mut().loading.saving = true;
+    harness.state_mut().runtime.active_requests.insert(77);
     harness
         .state()
         .runtime
         .tx
         .send(UiMessage::SaveFinished {
+            request: test_request(harness.state(), 76, Some("demo")),
             operation_id: 76,
             assignment_id: assignment.assignment_id.clone(),
+            edit_generation: 0,
             completed: false,
-            result: Ok(state.clone()),
+            result: Box::new(Ok(state.clone())),
         })
         .unwrap();
     harness.step();
@@ -790,10 +1123,12 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
         .runtime
         .tx
         .send(UiMessage::SaveFinished {
+            request: test_request(harness.state(), 77, Some("demo")),
             operation_id: 77,
             assignment_id: assignment.assignment_id,
+            edit_generation: 0,
             completed: false,
-            result: Ok(state),
+            result: Box::new(Ok(state)),
         })
         .unwrap();
     harness.step();
@@ -805,32 +1140,241 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
 fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    for width in [900.0, 1024.0, 1180.0, 1280.0, 1500.0] {
-        harness.set_size(egui::vec2(width, 820.0));
+    let sizes = viewport_sizes();
+    let mut boundary_widths = Vec::new();
+    for (width, height) in sizes {
+        harness.set_size(egui::vec2(width, height));
         harness.step();
         let canvas = harness.get_by_label("Annotation canvas");
+        let minimum_width = if width < 600.0 { width - 40.0 } else { 560.0 };
+        let minimum_height = match height as u32 {
+            568 => 210.0,
+            667 => 290.0,
+            768 => 390.0,
+            800 => 420.0,
+            820 => 450.0,
+            _ => 620.0,
+        };
         assert!(
-            canvas.rect().width() >= 560.0,
-            "canvas too narrow at {width}"
+            canvas.rect().width() >= minimum_width,
+            "canvas too narrow at {width}x{height}: {:?}",
+            canvas.rect(),
         );
         assert!(
-            canvas.rect().height() >= 500.0,
-            "canvas too short at {width}"
+            canvas.rect().height() >= minimum_height,
+            "canvas too short at {width}x{height}: {:?}",
+            canvas.rect(),
         );
-        for label in ["Save", "Submit & next", "Skip"] {
-            assert_eq!(
-                harness
-                    .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
-                    .count(),
-                1,
-                "duplicate {label} controls at {width}"
+        assert_control_inside(
+            &harness,
+            "Fit",
+            egui::accesskit::Role::Button,
+            width,
+            height,
+        );
+        if width < 600.0 {
+            assert_control_inside(
+                &harness,
+                "Submit & next",
+                egui::accesskit::Role::Button,
+                width,
+                height,
             );
+            assert_control_inside(
+                &harness,
+                "More actions",
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        } else {
+            for label in ["Save", "Submit & next", "Skip"] {
+                assert_eq!(
+                    harness
+                        .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+                        .count(),
+                    1,
+                    "duplicate {label} controls at {width}"
+                );
+                assert_control_inside(
+                    &harness,
+                    label,
+                    egui::accesskit::Role::Button,
+                    width,
+                    height,
+                );
+            }
         }
-        if width < 1240.0 {
-            assert!(harness.query_by_label("Workflow").is_some());
-            assert!(harness.query_by_label("Inspector").is_some());
+        if width == 1239.0 || width == 1240.0 {
+            boundary_widths.push(canvas.rect().width());
         }
     }
+    assert_eq!(boundary_widths.len(), 2);
+    assert!((boundary_widths[0] - boundary_widths[1]).abs() <= 2.0);
+}
+
+#[test]
+fn setup_geometry_stays_clamped_at_supported_viewports() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+    harness.state_mut().config.dataset_id = DatasetId::from(
+        "a-very-long-dataset-name-that-must-be-truncated-without-growing-the-shell",
+    );
+
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        assert_label_inside(&harness, "Welcome To Labello", width, height);
+        if width < LayoutMode::COMPACT_MAX_WIDTH {
+            assert_control_inside(
+                &harness,
+                "View: Setup",
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        } else {
+            assert_label_inside(&harness, "Setup", width, height);
+        }
+        assert_visible_controls_clamped(&harness, width, height);
+    }
+}
+
+#[test]
+fn review_correction_drawer_and_actions_stay_reachable() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut harness = loaded_review_harness(api);
+    harness.state_mut().start_correction();
+
+    for (width, height) in viewport_sizes() {
+        harness.state_mut().drawer =
+            (LayoutMode::for_width(width) != LayoutMode::Wide).then_some(Drawer::Inspector);
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        assert_canvas_geometry(&harness, width, height);
+        let finalize =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, "Correct & finalize");
+        finalize.scroll_to_me();
+        harness.step();
+        assert_control_inside(
+            &harness,
+            "Correct & finalize",
+            egui::accesskit::Role::Button,
+            width,
+            height,
+        );
+        assert_visible_controls_clamped(&harness, width, height);
+    }
+}
+
+#[test]
+fn admin_geometry_keeps_save_and_discard_visible() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api);
+    harness
+        .state_mut()
+        .datasets
+        .admin_config
+        .as_mut()
+        .unwrap()
+        .name = "Unsaved responsive admin name".to_string();
+
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        assert_label_inside(&harness, "Dataset Admin", width, height);
+        for label in ["Save Admin Config", "Discard staged changes"] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
+        assert_visible_controls_clamped(&harness, width, height);
+    }
+}
+
+#[test]
+fn stats_geometry_keeps_header_actions_and_equal_cards_in_view() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().clear_current_image();
+    harness.state_mut().view = AppView::Stats;
+    harness.state_mut().request_stats();
+    step_until(&mut harness, 8, |app| !app.loading.stats);
+
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        assert_label_inside(&harness, "Live Statistics", width, height);
+        assert_control_inside(
+            &harness,
+            "Refresh now",
+            egui::accesskit::Role::Button,
+            width,
+            height,
+        );
+        let cards = ["Metric Images", "Metric Completed", "Metric Pending"]
+            .map(|label| harness.get_by_label(label).rect());
+        if width >= 600.0 {
+            assert!(
+                (cards[0].width() - cards[1].width()).abs() <= 2.0,
+                "metric cards are not equal at {width}x{height}: {cards:?}",
+            );
+        }
+        assert_visible_controls_clamped(&harness, width, height);
+    }
+}
+
+#[test]
+fn settings_and_transition_modals_are_viewport_constrained() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.state_mut().show_settings = true;
+        harness.step();
+        assert_label_inside(&harness, "Keyboard shortcuts", width, height);
+        assert_visible_controls_clamped(&harness, width, height);
+
+        harness.state_mut().show_settings = false;
+        harness.state_mut().pending_transition =
+            Some(crate::app::PendingTransition::NextAssignment);
+        harness.step();
+        for label in ["Release and switch", "Cancel"] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
+        assert_visible_controls_clamped(&harness, width, height);
+        harness.state_mut().pending_transition = None;
+    }
+}
+
+#[test]
+fn responsive_modes_do_not_switch_at_1240() {
+    assert_eq!(LayoutMode::for_width(599.0), LayoutMode::Compact);
+    assert_eq!(LayoutMode::for_width(600.0), LayoutMode::Medium);
+    assert_eq!(LayoutMode::for_width(1239.0), LayoutMode::Medium);
+    assert_eq!(LayoutMode::for_width(1240.0), LayoutMode::Medium);
+    assert_eq!(LayoutMode::for_width(1366.0), LayoutMode::Wide);
 }
 
 #[test]
@@ -874,7 +1418,8 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
     let counts = api.counts();
     assert!(counts.append_event >= 2);
-    assert_eq!(counts.rebuild_image, 1);
+    assert_eq!(counts.annotation_batch, 1);
+    assert_eq!(counts.rebuild_image, 0);
 
     click(&mut harness, "Submit & next");
     step_until(&mut harness, 10, |app| {
@@ -1056,6 +1601,272 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
 }
 
 #[test]
+fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_draft() {
+    let disabled_api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &disabled_api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        false,
+    );
+    let disabled = loaded_review_harness(disabled_api);
+    assert!(disabled.query_by_label("Correct object").is_none());
+
+    let api = Rc::new(SpyApi::new());
+    let original = BoundingBox {
+        x: 0.2,
+        y: 0.2,
+        width: 0.3,
+        height: 0.3,
+    };
+    let annotation_id =
+        seed_review_annotation(&api, AnnotationGeometry::BoundingBox(original), true);
+    let mut harness = loaded_review_harness(api.clone());
+    click(&mut harness, "Correct object");
+    harness.state_mut().edit_correction_bbox(BoundingBoxEdit {
+        annotation_id,
+        bounding_box: BoundingBox {
+            x: 0.3,
+            y: 0.25,
+            width: 0.25,
+            height: 0.35,
+        },
+    });
+    harness.step();
+
+    assert!(
+        harness
+            .state()
+            .correction_draft
+            .as_ref()
+            .unwrap()
+            .geometry_changed()
+    );
+    assert!(matches!(
+        harness.state().annotations[0].geometry,
+        AnnotationGeometry::BoundingBox(box_geometry) if box_geometry == original
+    ));
+    assert_eq!(api.counts().annotation_batch, 0);
+    harness
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Approved);
+    assert_eq!(api.counts().record_review, 0);
+    assert!(harness.state().correction_draft.is_some());
+
+    api.fail_next_correction();
+    click(&mut harness, "Correct & finalize");
+    step_until(&mut harness, 8, |app| !app.loading.saving);
+    assert_eq!(api.counts().record_correction, 1);
+    assert!(harness.state().correction_draft.is_some());
+    assert!(harness.state().current.is_some());
+
+    click(&mut harness, "Correct & finalize");
+    step_until(&mut harness, 12, |_| api.counts().record_correction == 2);
+    let request = api.last_correction().unwrap();
+    assert_eq!(request.expected_version, 1);
+    assert!(matches!(
+        request.geometry,
+        AnnotationGeometry::BoundingBox(_)
+    ));
+    assert_eq!(api.counts().annotation_batch, 0);
+}
+
+#[test]
+fn review_target_is_canonical_and_full_image_phase_cannot_correct() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut harness = loaded_review_harness(api);
+    let canonical = harness.state().annotations[0].annotation_id.clone();
+    let mut arbitrary = harness.state().annotations[0].clone();
+    arbitrary.annotation_id = labello_domain::AnnotationId::from("arbitrary");
+    harness.state_mut().annotations.push(arbitrary.clone());
+    harness.state_mut().selected_annotation = Some(arbitrary.annotation_id.clone());
+
+    harness
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Approved);
+    assert_eq!(
+        harness.state().selected_annotation.as_ref(),
+        Some(&canonical)
+    );
+    let UiCommand::Review { review, .. } = harness.state().runtime.commands.back().unwrap() else {
+        panic!("expected review command");
+    };
+    assert!(matches!(
+        &review.target,
+        ReviewTarget::AnnotationVersion { annotation_id, .. } if annotation_id == &canonical
+    ));
+
+    harness.state_mut().runtime.commands.clear();
+    harness.state_mut().runtime.active_requests.clear();
+    harness.state_mut().active_operation_id = None;
+    harness.state_mut().loading.saving = false;
+    harness.state_mut().review_index = harness.state().annotations.len();
+    harness.state_mut().selected_annotation = Some(arbitrary.annotation_id);
+    harness.state_mut().sync_review_selection();
+    assert!(harness.state().selected_annotation.is_none());
+    assert!(!harness.state().can_correct_review_object());
+    harness.state_mut().start_correction();
+    assert!(harness.state().correction_draft.is_none());
+}
+
+#[test]
+fn correction_mode_blocks_review_shortcuts_and_saturation_never_discards_the_draft() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut harness = loaded_review_harness(api.clone());
+    harness.state_mut().start_correction();
+    assert!(harness.state().correction_draft.is_some());
+
+    harness.key_press(egui::Key::Y);
+    harness.step();
+    harness.key_press(egui::Key::N);
+    harness.step();
+    assert_eq!(api.counts().record_review, 0);
+    assert!(harness.state().correction_draft.is_some());
+
+    saturate_command_queue(harness.state_mut());
+    harness
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Rejected);
+    assert!(harness.state().correction_draft.is_some());
+    assert!(!harness.state().loading.saving);
+
+    harness.state_mut().runtime.commands.clear();
+    harness.state_mut().runtime.active_requests.clear();
+    harness
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Rejected);
+    assert!(harness.state().correction_draft.is_none());
+    assert!(harness.state().loading.saving);
+}
+
+#[test]
+fn review_and_save_responses_propagate_renewed_assignments_without_refetching_state() {
+    let review_api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &review_api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut review = loaded_review_harness(review_api.clone());
+    let original_review_expiry = review.state().assignment.as_ref().unwrap().expires_at;
+    let state_reads = review_api.counts().get_image_state;
+    review
+        .state_mut()
+        .request_review(labello_domain::ReviewDecision::Approved);
+    step_until(&mut review, 8, |app| !app.loading.saving);
+    assert_eq!(review_api.counts().get_image_state, state_reads);
+    assert!(
+        review.state().assignment.as_ref().unwrap().expires_at > original_review_expiry,
+        "review response did not renew the active assignment"
+    );
+
+    let save_api = Rc::new(SpyApi::new());
+    let mut work = loaded_work_harness(save_api);
+    click(&mut work, "Accept");
+    let original_save_expiry = work.state().assignment.as_ref().unwrap().expires_at;
+    work.state_mut().request_save(false);
+    step_until(&mut work, 8, |app| !app.loading.saving);
+    assert!(
+        work.state().assignment.as_ref().unwrap().expires_at > original_save_expiry,
+        "save response did not renew the active assignment"
+    );
+}
+
+#[test]
+fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
+    let api = Rc::new(SpyApi::new());
+    {
+        let mut state = api.state.borrow_mut();
+        state.metadata.tasks[0].annotation_type = AnnotationType::Skeleton;
+        state.metadata.tasks[0].prelabel_config_ids.clear();
+        state.metadata.tasks[0].skeleton = Some(SkeletonSpec {
+            keypoints: vec![KeypointSpec {
+                name: "nose".to_string(),
+                required: true,
+            }],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: false,
+        });
+    }
+    let annotation_id = seed_review_annotation(
+        &api,
+        AnnotationGeometry::Skeleton(SkeletonGeometry {
+            keypoints: vec![KeypointAnnotation {
+                name: "nose".to_string(),
+                state: KeypointState::Visible,
+                point: Some(NormalizedPoint { x: 0.5, y: 0.5 }),
+            }],
+        }),
+        true,
+    );
+    let mut harness = loaded_review_harness(api);
+    harness.set_size(egui::vec2(1500.0, 1100.0));
+    harness.step();
+    click(&mut harness, "Correct object");
+    harness.state_mut().select_correction_keypoint(0);
+    harness.step();
+    click(&mut harness, "Hidden");
+    harness
+        .state_mut()
+        .edit_correction_keypoint(crate::canvas::KeypointEdit {
+            annotation_id,
+            keypoint_index: 0,
+            point: NormalizedPoint { x: 0.65, y: 0.4 },
+        });
+
+    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
+        panic!("expected skeleton correction draft");
+    };
+    assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
+    assert_eq!(skeleton.keypoints[0].point.unwrap().x, 0.65);
+    assert!(matches!(
+        harness.state().annotations[0].geometry,
+        AnnotationGeometry::Skeleton(ref original)
+            if original.keypoints[0].state == KeypointState::Visible
+                && original.keypoints[0].point.unwrap().x == 0.5
+    ));
+
+    click(&mut harness, "Undo correction");
+    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
+        panic!("expected skeleton correction draft");
+    };
+    assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
+    assert_eq!(skeleton.keypoints[0].point.unwrap().x, 0.5);
+}
+
+#[test]
 fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
@@ -1130,9 +1941,7 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 
     harness.set_size(egui::vec2(390.0, 760.0));
     harness.step();
-    assert!(harness.query_by_label("Setup").is_some());
-    assert!(harness.query_by_label("Annotate").is_some());
-    assert!(harness.query_by_label("Stats").is_some());
+    assert!(harness.query_by_label("View: Stats").is_some());
 
     harness.set_size(egui::vec2(1280.0, 820.0));
     harness.step();
@@ -1162,16 +1971,25 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
 
     let mut app = base_live_app(Rc::new(SpyApi::new()));
     app.setup.started = true;
+    app.datasets.active_stats_request = Some((20, DatasetId::from("demo")));
+    app.loading.stats = true;
+    app.runtime.active_requests.insert(20);
     for index in 0..20 {
         app.runtime
             .tx
-            .send(UiMessage::StatsLoaded(Ok(stats(index))))
+            .send(UiMessage::StatsLoaded {
+                request: test_request(&app, index as u64 + 1, Some("demo")),
+                result: Ok(stats(index)),
+            })
             .unwrap();
     }
     app.process_messages(&egui::Context::default());
-    assert_eq!(app.datasets.stats.total_images, 7);
+    assert_eq!(app.datasets.stats.total_images, 0);
     app.process_messages(&egui::Context::default());
-    assert_eq!(app.datasets.stats.total_images, 15);
+    assert_eq!(app.datasets.stats.total_images, 0);
+    app.process_messages(&egui::Context::default());
+    assert_eq!(app.datasets.stats.total_images, 19);
+    assert!(!app.loading.stats);
 
     app.runtime
         .tx
@@ -1193,6 +2011,86 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
     );
 }
 
+#[test]
+fn stats_ignore_stale_request_and_dataset_responses() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    app.view = AppView::Stats;
+    app.loading.stats = true;
+    app.datasets.active_stats_request = Some((2, DatasetId::from("demo")));
+    app.runtime.active_requests.insert(2);
+
+    for (request_id, dataset_id) in [(1, "demo"), (2, "other")] {
+        app.runtime
+            .tx
+            .send(UiMessage::StatsLoaded {
+                request: test_request(&app, request_id, Some(dataset_id)),
+                result: Ok(stats(request_id as usize)),
+            })
+            .unwrap();
+    }
+    app.process_messages(&egui::Context::default());
+    assert!(app.loading.stats);
+    assert_eq!(app.datasets.stats.total_images, 0);
+
+    app.runtime
+        .tx
+        .send(UiMessage::StatsLoaded {
+            request: test_request(&app, 2, Some("demo")),
+            result: Ok(stats(42)),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(!app.loading.stats);
+    assert_eq!(app.datasets.stats.total_images, 42);
+    assert!(app.datasets.last_stats_completion.is_some());
+}
+
+#[test]
+fn stats_polling_is_scheduled_from_completion_and_queue_failure_recovers() {
+    let api = Rc::new(SpyApi::new());
+    let metadata = api.state.borrow().metadata.clone();
+    let mut app = base_live_app(api);
+    app.setup.started = true;
+    app.view = AppView::Stats;
+    app.datasets.metadata = Some(metadata);
+    app.datasets.last_stats_completion = Some(Instant::now());
+
+    app.refresh_stats_if_due();
+    assert!(app.runtime.commands.is_empty());
+
+    app.datasets.last_stats_completion = Some(Instant::now() - Duration::from_secs(4));
+    app.refresh_stats_if_due();
+    assert!(app.loading.stats);
+    assert_eq!(app.runtime.commands.len(), 1);
+
+    app.loading.stats = false;
+    app.datasets.active_stats_request = None;
+    app.runtime.commands.clear();
+    for request_id in 10_000..10_064 {
+        app.runtime.commands.push_back(UiCommand::DatasetList {
+            request: test_request(&app, request_id, None),
+        });
+    }
+    app.request_stats();
+    assert!(!app.loading.stats);
+    assert!(app.datasets.active_stats_request.is_none());
+    assert!(app.datasets.last_stats_completion.is_some());
+}
+
+#[test]
+fn changing_datasets_cancels_an_inflight_stats_request() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    app.loading.stats = true;
+    app.datasets.active_stats_request = Some((7, DatasetId::from("demo")));
+    app.datasets.stats = stats(99);
+
+    app.open_dataset(DatasetId::from("other"), AppView::Stats);
+
+    assert!(!app.loading.stats);
+    assert!(app.datasets.active_stats_request.is_none());
+    assert_eq!(app.datasets.stats, DatasetStats::default());
+}
+
 fn live_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     Harness::builder()
         .with_size(egui::vec2(1500.0, 780.0))
@@ -1205,6 +2103,16 @@ fn loaded_work_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Annotate");
     step_until(&mut harness, 12, |app| app.current.is_some());
+    harness
+}
+
+fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+    click(&mut harness, "Review");
+    step_until(&mut harness, 12, |app| {
+        app.view == AppView::Review && app.current.is_some()
+    });
     harness
 }
 
@@ -1228,6 +2136,129 @@ fn base_live_app(api: Rc<SpyApi>) -> LabelloApp {
     app.runtime.api = Some(api);
     app.runtime.error = None;
     app
+}
+
+fn test_request(app: &LabelloApp, request_id: u64, dataset_id: Option<&str>) -> RequestIdentity {
+    RequestIdentity {
+        auth_epoch: app.auth_epoch,
+        workspace_epoch: app.workspace_epoch,
+        request_id,
+        dataset_id: dataset_id.map(DatasetId::from),
+    }
+}
+
+fn saturate_command_queue(app: &mut LabelloApp) {
+    app.runtime.commands.clear();
+    app.runtime.active_requests.clear();
+    for request_id in 80_000..80_064 {
+        app.runtime.commands.push_back(UiCommand::DatasetList {
+            request: test_request(app, request_id, None),
+        });
+    }
+}
+
+fn viewport_sizes() -> [(f32, f32); 9] {
+    [
+        (320.0, 568.0),
+        (390.0, 667.0),
+        (600.0, 800.0),
+        (768.0, 1024.0),
+        (1024.0, 768.0),
+        (1239.0, 820.0),
+        (1240.0, 820.0),
+        (1366.0, 768.0),
+        (1440.0, 900.0),
+    ]
+}
+
+fn assert_control_inside(
+    harness: &Harness<'static, LabelloApp>,
+    label: &str,
+    role: egui::accesskit::Role,
+    width: f32,
+    height: f32,
+) {
+    let node = harness.get_by_role_and_label(role, label);
+    let rect = node.rect();
+    assert!(
+        rect.left() >= -0.5
+            && rect.top() >= -0.5
+            && rect.right() <= width + 0.5
+            && rect.bottom() <= height + 0.5,
+        "{label:?} is outside {width}x{height}: {rect:?}",
+    );
+    if role == egui::accesskit::Role::Button {
+        assert!(
+            rect.height() >= 43.0,
+            "{label:?} touch target is shorter than 44px: {rect:?}",
+        );
+    }
+}
+
+fn assert_label_inside(
+    harness: &Harness<'static, LabelloApp>,
+    label: &str,
+    width: f32,
+    height: f32,
+) {
+    let rect = harness.get_by_label(label).rect();
+    assert!(
+        rect.left() >= -0.5
+            && rect.top() >= -0.5
+            && rect.right() <= width + 0.5
+            && rect.bottom() <= height + 0.5,
+        "{label:?} is outside {width}x{height}: {rect:?}",
+    );
+}
+
+fn assert_canvas_geometry(harness: &Harness<'static, LabelloApp>, width: f32, height: f32) {
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    let dataset = harness.get_by_label_contains("Dataset ").rect();
+    assert!(
+        canvas.top() >= dataset.bottom(),
+        "canvas overlaps the top shell"
+    );
+    assert!(
+        canvas.left() >= -0.5
+            && canvas.top() >= -0.5
+            && canvas.right() <= width + 0.5
+            && canvas.bottom() <= height + 0.5,
+        "canvas is outside {width}x{height}: {canvas:?}",
+    );
+    let minimum = if width < 600.0 { 200.0 } else { 360.0 };
+    assert!(
+        canvas.height() >= minimum,
+        "canvas is not useful at {width}x{height}: {canvas:?}",
+    );
+}
+
+fn assert_visible_controls_clamped(
+    harness: &Harness<'static, LabelloApp>,
+    width: f32,
+    height: f32,
+) {
+    for role in [
+        egui::accesskit::Role::Button,
+        egui::accesskit::Role::CheckBox,
+        egui::accesskit::Role::ComboBox,
+        egui::accesskit::Role::TextInput,
+    ] {
+        for node in harness.query_all_by_role(role) {
+            let rect = node.rect();
+            // Scroll areas retain accessibility nodes just outside their clip rect.
+            // Check horizontal containment for controls that are fully visible vertically.
+            if rect.top() < 0.0 || rect.bottom() > height {
+                continue;
+            }
+            assert!(
+                rect.left() >= -0.5
+                    && rect.right() <= width + 0.5
+                    && rect.left().is_finite()
+                    && rect.right().is_finite(),
+                "visible {role:?} is outside {width}x{height}: {rect:?}\n{node:?}",
+            );
+        }
+    }
 }
 
 fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
@@ -1375,6 +2406,14 @@ impl SpyApi {
     fn last_oauth_return_to(&self) -> Option<String> {
         self.state.borrow().last_oauth_return_to.clone()
     }
+
+    fn fail_next_correction(&self) {
+        self.state.borrow_mut().fail_next_correction = true;
+    }
+
+    fn last_correction(&self) -> Option<CorrectionRequest> {
+        self.state.borrow().last_correction.clone()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1394,8 +2433,10 @@ struct CallCounts {
     get_image_state: usize,
     get_image_preview: usize,
     append_event: usize,
+    annotation_batch: usize,
     rebuild_image: usize,
     record_review: usize,
+    record_correction: usize,
     record_adjudication: usize,
     dataset_stats: usize,
     get_keybindings: usize,
@@ -1424,6 +2465,8 @@ struct SpyState {
     last_image_query: Option<ImageExplorerQuery>,
     last_oauth_return_to: Option<String>,
     snapshots: Vec<DatasetSnapshot>,
+    fail_next_correction: bool,
+    last_correction: Option<CorrectionRequest>,
 }
 
 impl SpyState {
@@ -1525,6 +2568,8 @@ impl SpyState {
             last_image_query: None,
             last_oauth_return_to: None,
             snapshots: Vec::new(),
+            fail_next_correction: false,
+            last_correction: None,
         }
     }
 
@@ -1955,6 +3000,62 @@ impl AnnotationApi for SpyApi {
         image_state.apply_event(&event).unwrap();
         ready(Ok(event))
     }
+
+    fn apply_annotation_batch<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AnnotationBatchRequest,
+    ) -> ApiFuture<'a, ImageState> {
+        if !self
+            .state
+            .borrow()
+            .active_assignment
+            .as_ref()
+            .is_some_and(|active| assignment_matches(active, &assignment))
+        {
+            return ready(Err(ClientError::Demo("stale assignment".to_string())));
+        }
+        let mut state = self.state.borrow_mut();
+        state.counts.annotation_batch += 1;
+        let complete = request.complete;
+        if complete {
+            state.counts.complete_assignment += 1;
+        }
+        for payload in request.payloads {
+            state.counts.append_event += 1;
+            state.events.push(payload.clone());
+            let image_state = state
+                .states
+                .entry(assignment.image_id.clone())
+                .or_insert_with(|| ImageState::new(assignment.image_id.clone()));
+            let event = EventLogEntry::new(
+                image_state.current_sequence + 1,
+                assignment.image_id.clone(),
+                UserId::from("admin"),
+                DatasetRole::Annotator,
+                now(),
+                payload,
+            );
+            image_state.apply_event(&event).unwrap();
+        }
+        let mut result = state
+            .states
+            .get(&assignment.image_id)
+            .cloned()
+            .unwrap_or_else(|| ImageState::new(assignment.image_id.clone()));
+        if complete {
+            state.active_assignment = None;
+        } else if let Some(renewed) = state.active_assignment.as_mut() {
+            renewed.updated_at = now();
+            renewed.expires_at = Some(now() + chrono::Duration::minutes(15));
+            result
+                .assignments
+                .retain(|existing| existing.assignment_id != renewed.assignment_id);
+            result.assignments.push(renewed.clone());
+        }
+        ready(Ok(result))
+    }
 }
 
 impl ReviewApi for SpyApi {
@@ -1963,7 +3064,7 @@ impl ReviewApi for SpyApi {
         _dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
         review: ReviewRecord,
-    ) -> ApiFuture<'a, EventLogEntry> {
+    ) -> ApiFuture<'a, ImageState> {
         let mut state = self.state.borrow_mut();
         state.counts.record_review += 1;
         let image_state = state
@@ -1979,7 +3080,7 @@ impl ReviewApi for SpyApi {
             EventPayload::ReviewRecorded { review },
         );
         image_state.apply_event(&event).unwrap();
-        ready(Ok(event))
+        ready(Ok(image_state.clone()))
     }
 
     fn record_assigned_review<'a>(
@@ -1987,7 +3088,7 @@ impl ReviewApi for SpyApi {
         _dataset_id: &'a DatasetId,
         assignment: AssignmentActionRequest,
         review: ReviewRecord,
-    ) -> ApiFuture<'a, EventLogEntry> {
+    ) -> ApiFuture<'a, ImageState> {
         if !self
             .state
             .borrow()
@@ -2000,23 +3101,37 @@ impl ReviewApi for SpyApi {
         let complete = matches!(&review.target, labello_domain::ReviewTarget::Task { .. });
         let mut state = self.state.borrow_mut();
         state.counts.record_review += 1;
+        let mut renewed = state.active_assignment.clone();
+        if !complete && let Some(assignment) = renewed.as_mut() {
+            assignment.updated_at = now();
+            assignment.expires_at = Some(now() + chrono::Duration::minutes(15));
+        }
         let image_state = state
             .states
             .entry(assignment.image_id.clone())
             .or_insert_with(|| ImageState::new(assignment.image_id.clone()));
         let event = EventLogEntry::new(
             image_state.current_sequence + 1,
-            assignment.image_id,
+            assignment.image_id.clone(),
             UserId::from("admin"),
             DatasetRole::Reviewer,
             now(),
             EventPayload::ReviewRecorded { review },
         );
         image_state.apply_event(&event).unwrap();
+        if let Some(renewed) = renewed.clone() {
+            image_state
+                .assignments
+                .retain(|existing| existing.assignment_id != renewed.assignment_id);
+            image_state.assignments.push(renewed);
+        }
+        let result = image_state.clone();
         if complete {
             state.active_assignment = None;
+        } else {
+            state.active_assignment = renewed;
         }
-        ready(Ok(event))
+        ready(Ok(result))
     }
 
     fn record_correction<'a>(
@@ -2025,16 +3140,32 @@ impl ReviewApi for SpyApi {
         image_id: &'a ImageId,
         request: CorrectionRequest,
     ) -> ApiFuture<'a, EventLogEntry> {
+        let mut state = self.state.borrow_mut();
+        state.counts.record_correction += 1;
+        state.last_correction = Some(request.clone());
+        if state.fail_next_correction {
+            state.fail_next_correction = false;
+            return ready(Err(ClientError::Demo("correction conflict".to_string())));
+        }
+        state.active_assignment = None;
         ready(Ok(EventLogEntry::new(
             1,
             image_id.clone(),
             UserId::from("admin"),
             DatasetRole::Reviewer,
             now(),
-            EventPayload::AnnotationVersionCreated {
-                annotation: request.annotation,
-                previous_version: Some(request.previous_version),
-                reason: request.reason,
+            EventPayload::ReviewRecorded {
+                review: ReviewRecord {
+                    review_id: ReviewId::generate(),
+                    target: ReviewTarget::AnnotationVersion {
+                        annotation_id: request.annotation_id,
+                        version: request.expected_version,
+                    },
+                    reviewer_user_id: UserId::from("admin"),
+                    decision: labello_domain::ReviewDecision::Rejected,
+                    timestamp: now(),
+                    comment: request.reason,
+                },
             },
         )))
     }
@@ -2325,6 +3456,56 @@ fn task(id: &str, name: &str, prelabel_configs: Vec<&str>) -> TaskDefinition {
     }
 }
 
+fn seed_review_annotation(
+    api: &SpyApi,
+    geometry: AnnotationGeometry,
+    allow_reviewer_corrections: bool,
+) -> labello_domain::AnnotationId {
+    let mut spy = api.state.borrow_mut();
+    let annotation_type = match &geometry {
+        AnnotationGeometry::BoundingBox(_) => AnnotationType::BoundingBox,
+        AnnotationGeometry::Skeleton(_) => AnnotationType::Skeleton,
+    };
+    spy.metadata.tasks[0].annotation_type = annotation_type.clone();
+    spy.metadata.tasks[0].review.allow_reviewer_corrections = allow_reviewer_corrections;
+    let task_id = spy.metadata.tasks[0].task_id.clone();
+    let class_id = spy.metadata.tasks[0].class_ids[0].clone();
+    let image_id = spy.metadata.images.keys().next().unwrap().clone();
+    let annotation_id = labello_domain::AnnotationId::from("review_annotation");
+    let timestamp = now();
+    let annotation = labello_domain::AnnotationVersion {
+        annotation_id: annotation_id.clone(),
+        version: 1,
+        task_id,
+        class_id,
+        annotation_type,
+        source: labello_domain::AnnotationSource::Human,
+        geometry,
+        author_user_id: UserId::from("annotator"),
+        created_at: timestamp,
+        updated_at: timestamp,
+        deleted: false,
+    };
+    let event = EventLogEntry::new(
+        1,
+        image_id.clone(),
+        UserId::from("annotator"),
+        DatasetRole::Annotator,
+        timestamp,
+        EventPayload::AnnotationVersionCreated {
+            annotation,
+            previous_version: None,
+            reason: None,
+        },
+    );
+    spy.states
+        .get_mut(&image_id)
+        .unwrap()
+        .apply_event(&event)
+        .unwrap();
+    annotation_id
+}
+
 fn prelabel_config(id: &str) -> PrelabelConfig {
     PrelabelConfig {
         config_id: PrelabelConfigId::from(id),
@@ -2355,6 +3536,10 @@ fn stats(total_images: usize) -> DatasetStats {
             pending: 1,
             reviewed: 1,
             unreviewed: 1,
+            approved: 1,
+            rejected: 0,
+            reviewer_corrected: 0,
+            finalized: 1,
         },
     );
     let mut per_class = BTreeMap::new();
@@ -2371,6 +3556,10 @@ fn stats(total_images: usize) -> DatasetStats {
         pending_tasks: 1,
         reviewed_tasks: 1,
         unreviewed_tasks: 1,
+        approved_tasks: 1,
+        rejected_tasks: 0,
+        reviewer_corrected_tasks: 0,
+        finalized_tasks: 1,
         per_task,
         per_class,
         throughput: Vec::new(),

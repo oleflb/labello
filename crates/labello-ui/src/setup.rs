@@ -18,10 +18,12 @@ impl LabelloApp {
         ui.add_space(18.0);
         theme::card_frame().show(ui, |ui| {
             ui.heading("Connection");
-            ui.horizontal(|ui| {
-                ui.label("API URL");
-                ui.text_edit_singleline(&mut self.config.api_base_url)
-                    .on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.");
+            form_row(ui, "API URL", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.api_base_url)
+                        .desired_width(ui.available_width()),
+                )
+                .on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.");
             });
             if self.loading.session {
                 ui.horizontal(|ui| {
@@ -44,15 +46,23 @@ impl LabelloApp {
                     "Use explicit local user headers only when server dev auth is enabled.",
                 );
             if self.setup.dev_auth {
-                ui.horizontal(|ui| {
-                    ui.label("Dev token");
-                    ui.add(egui::TextEdit::singleline(&mut self.config.dev_token).password(true))
-                        .on_hover_text("Must match developmentAuth.token in labello.server.toml.");
+                form_row(ui, "Dev token", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.config.dev_token)
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    )
+                    .on_hover_text("Must match developmentAuth.token in labello.server.toml.");
                 });
                 let mut user_id = self.config.user_id.to_string();
-                ui.horizontal(|ui| {
-                    ui.label("Development user ID");
-                    if ui.text_edit_singleline(&mut user_id).changed() {
+                form_row(ui, "Development user ID", |ui| {
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut user_id)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed()
+                    {
                         self.config.user_id = UserId::from(user_id);
                     }
                 });
@@ -100,7 +110,7 @@ impl LabelloApp {
             let datasets = self.datasets.summaries.clone();
             if let Some(dataset) = self.recommended_dataset()
                 && ui
-                    .add_sized([220.0, 42.0], egui::Button::new("Continue Work"))
+                    .add_sized([220.0, 44.0], egui::Button::new("Continue Work"))
                     .on_hover_text("Open your most recent dataset and recommended work queue.")
                     .clicked()
             {
@@ -143,26 +153,30 @@ impl LabelloApp {
         ui.add_space(12.0);
         if self.auth.account.is_some() {
             theme::card_frame().show(ui, |ui| {
-            ui.heading("Create Dataset");
-            ui.horizontal(|ui| {
-                ui.label("ID");
-                ui.text_edit_singleline(&mut self.setup.create_dataset_id)
+                ui.heading("Create Dataset");
+                form_row(ui, "ID", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.setup.create_dataset_id)
+                            .desired_width(ui.available_width()),
+                    )
                     .on_hover_text("Stable dataset id used as the dataset folder name.");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut self.setup.create_dataset_name)
+                });
+                form_row(ui, "Name", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.setup.create_dataset_name)
+                            .desired_width(ui.available_width()),
+                    )
                     .on_hover_text("Human-readable dataset name.");
+                });
+                if ui
+                    .button("Create as current user")
+                    .on_hover_text("Create a new dataset. Requires bootstrap admin access.")
+                    .clicked()
+                {
+                    self.request_create_dataset();
+                }
+                ui.small("Dataset creation requires the current user to be a bootstrap admin in labello.server.toml.");
             });
-            if ui
-                .button("Create as current user")
-                .on_hover_text("Create a new dataset. Requires bootstrap admin access.")
-                .clicked()
-            {
-                self.request_create_dataset();
-            }
-            ui.small("Dataset creation requires the current user to be a bootstrap admin in labello.server.toml.");
-        });
         }
     }
 
@@ -200,6 +214,42 @@ impl LabelloApp {
         }
     }
 
+    pub(crate) fn compact_navigation(&mut self, ui: &mut egui::Ui) {
+        let current = match self.view {
+            AppView::Setup => "Setup",
+            AppView::Annotate => "Annotate",
+            AppView::Review => "Review",
+            AppView::Adjudicate => "Adjudicate",
+            AppView::Admin => "Admin",
+            AppView::Stats => "Stats",
+        };
+        ui.menu_button(format!("View: {current}"), |ui| {
+            let mut destination = None;
+            if ui.button("Setup").clicked() {
+                destination = Some(AppView::Setup);
+            }
+            for (view, role, label) in [
+                (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
+                (AppView::Review, DatasetRole::Reviewer, "Review"),
+                (AppView::Adjudicate, DatasetRole::Adjudicator, "Adjudicate"),
+            ] {
+                if self.has_dataset_role(role) && ui.button(label).clicked() {
+                    destination = Some(view);
+                }
+            }
+            if self.datasets.metadata.is_some() && ui.button("Stats").clicked() {
+                destination = Some(AppView::Stats);
+            }
+            if self.can_admin() && ui.button("Admin").clicked() {
+                destination = Some(AppView::Admin);
+            }
+            if let Some(view) = destination {
+                self.open_view(view);
+                ui.close();
+            }
+        });
+    }
+
     pub(crate) fn open_view(&mut self, view: AppView) {
         if view == AppView::Setup {
             self.request_transition(PendingTransition::View(view));
@@ -233,6 +283,12 @@ impl LabelloApp {
         if self.loading.dataset {
             return;
         }
+        if self.config.dataset_id != dataset_id {
+            self.loading.stats = false;
+            self.datasets.active_stats_request = None;
+            self.datasets.last_stats_completion = None;
+            self.datasets.stats = labello_domain::DatasetStats::default();
+        }
         self.config.dataset_id = dataset_id;
         self.datasets.requested_view = Some(view);
         self.request_load_dataset();
@@ -243,7 +299,12 @@ impl LabelloApp {
     }
 
     fn recommended_dataset(&self) -> Option<labello_client::DatasetSummary> {
-        let remembered = crate::persistence::load_last_dataset(&self.config.user_id);
+        let remembered = self
+            .runtime
+            .persistence
+            .preference
+            .as_ref()
+            .map(|preference| preference.dataset_id.clone());
         remembered
             .and_then(|id| {
                 self.datasets
@@ -253,6 +314,20 @@ impl LabelloApp {
             })
             .or_else(|| self.datasets.summaries.first())
             .cloned()
+    }
+}
+
+fn form_row(ui: &mut egui::Ui, label: &str, add_field: impl FnOnce(&mut egui::Ui)) {
+    if ui.available_width() < 520.0 {
+        ui.vertical(|ui| {
+            ui.label(label);
+            add_field(ui);
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_sized([150.0, 44.0], egui::Label::new(label));
+            add_field(ui);
+        });
     }
 }
 

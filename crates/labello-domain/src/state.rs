@@ -4,8 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdjudicationRecord, AnnotationId, AnnotationVersion, Assignment, DomainError, DomainResult,
-    EventLogEntry, EventPayload, ImageId, ReviewRecord, SCHEMA_VERSION, TaskId, TaskState,
+    AdjudicationRecord, AnnotationId, AnnotationVersion, Assignment, AssignmentKind,
+    AssignmentStatus, DomainError, DomainResult, EventLogEntry, EventPayload, ImageId,
+    ReviewDecision, ReviewRecord, ReviewTarget, ReviewerCorrectionRecord, SCHEMA_VERSION, TaskId,
+    TaskOutcome, TaskState, TaskStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -16,6 +18,7 @@ pub struct ImageState {
     pub current_sequence: u64,
     pub annotations: BTreeMap<AnnotationId, Vec<AnnotationVersion>>,
     pub reviews: Vec<ReviewRecord>,
+    pub reviewer_corrections: Vec<ReviewerCorrectionRecord>,
     pub adjudications: Vec<AdjudicationRecord>,
     pub task_states: BTreeMap<TaskId, TaskState>,
     pub assignments: Vec<Assignment>,
@@ -29,6 +32,7 @@ impl ImageState {
             current_sequence: 0,
             annotations: BTreeMap::new(),
             reviews: Vec::new(),
+            reviewer_corrections: Vec::new(),
             adjudications: Vec::new(),
             task_states: BTreeMap::new(),
             assignments: Vec::new(),
@@ -67,20 +71,37 @@ impl ImageState {
                     .annotations
                     .get_mut(annotation_id)
                     .ok_or_else(|| DomainError::MissingAnnotation(annotation_id.to_string()))?;
-                let version = versions
-                    .iter_mut()
-                    .find(|candidate| candidate.version == *version)
-                    .ok_or_else(|| DomainError::MissingAnnotationVersion {
+                let current = versions
+                    .last_mut()
+                    .ok_or_else(|| DomainError::MissingAnnotation(annotation_id.to_string()))?;
+                if current.version != *version || current.deleted {
+                    return Err(DomainError::MissingAnnotationVersion {
                         annotation_id: annotation_id.to_string(),
                         version: *version,
-                    })?;
-                version.deleted = true;
+                    });
+                }
+                current.deleted = true;
             }
             EventPayload::TaskStateChanged { task_state } => {
                 self.task_states
                     .insert(task_state.task_id.clone(), task_state.clone());
             }
             EventPayload::ReviewRecorded { review } => self.reviews.push(review.clone()),
+            EventPayload::ReviewerCorrectionRecorded {
+                correction,
+                annotation,
+                review,
+                task_state,
+                assignments,
+            } => {
+                self.apply_reviewer_correction(
+                    correction,
+                    annotation,
+                    review,
+                    task_state,
+                    assignments,
+                )?;
+            }
             EventPayload::AdjudicationRecorded { adjudication } => {
                 self.adjudications.push(adjudication.clone());
             }
@@ -141,6 +162,85 @@ impl ImageState {
             )));
         }
         versions.push(annotation);
+        Ok(())
+    }
+
+    fn apply_reviewer_correction(
+        &mut self,
+        correction: &ReviewerCorrectionRecord,
+        annotation: &AnnotationVersion,
+        review: &ReviewRecord,
+        task_state: &TaskState,
+        assignments: &[Assignment],
+    ) -> DomainResult<()> {
+        let valid_review = review.decision == ReviewDecision::Rejected
+            && review.reviewer_user_id == correction.reviewer_user_id
+            && matches!(
+                &review.target,
+                ReviewTarget::AnnotationVersion {
+                    annotation_id,
+                    version,
+                } if annotation_id == &correction.annotation_id
+                    && *version == correction.previous_version
+            );
+        let valid_annotation = annotation.annotation_id == correction.annotation_id
+            && annotation.task_id == correction.task_id
+            && annotation.version == correction.corrected_version
+            && correction.corrected_version == correction.previous_version + 1
+            && annotation.author_user_id == correction.reviewer_user_id
+            && matches!(
+                &annotation.source,
+                crate::AnnotationSource::ReviewerCorrection { correction_id }
+                    if correction_id == &correction.correction_id
+            );
+        let valid_task_state = task_state.task_id == correction.task_id
+            && task_state.status == TaskStatus::Completed
+            && task_state.outcome == Some(TaskOutcome::ReviewerCorrected)
+            && task_state.completed_by.as_ref() == Some(&correction.reviewer_user_id);
+        let valid_assignments = assignments.iter().any(|assignment| {
+            assignment.assignment_id == correction.assignment_id
+                && assignment.assigned_to == correction.reviewer_user_id
+                && assignment.status == AssignmentStatus::Completed
+        }) && assignments.iter().all(|assignment| {
+            assignment.image_id == self.image_id
+                && assignment.task_id == correction.task_id
+                && assignment.kind == AssignmentKind::Review
+                && matches!(
+                    assignment.status,
+                    AssignmentStatus::Completed | AssignmentStatus::Cancelled
+                )
+        });
+        if !valid_review || !valid_annotation || !valid_task_state || !valid_assignments {
+            return Err(DomainError::InvalidReviewerCorrection(
+                correction.correction_id.to_string(),
+            ));
+        }
+        if self
+            .reviewer_corrections
+            .iter()
+            .any(|candidate| candidate.correction_id == correction.correction_id)
+        {
+            return Err(DomainError::DuplicateReviewerCorrection(
+                correction.correction_id.to_string(),
+            ));
+        }
+
+        self.apply_annotation_version(annotation.clone(), Some(correction.previous_version))?;
+        self.reviews.push(review.clone());
+        self.reviewer_corrections.push(correction.clone());
+        self.task_states
+            .insert(task_state.task_id.clone(), task_state.clone());
+        for assignment in assignments {
+            if let Some(existing) = self
+                .assignments
+                .iter_mut()
+                .find(|candidate| candidate.assignment_id == assignment.assignment_id)
+            {
+                *existing = assignment.clone();
+            } else {
+                self.assignments.push(assignment.clone());
+            }
+        }
         Ok(())
     }
 }
@@ -226,7 +326,7 @@ mod tests {
                 .version,
             1
         );
-        let state_after_second = rebuild_state(image_id, &events).unwrap();
+        let mut state_after_second = rebuild_state(image_id, &events).unwrap();
         assert_eq!(
             state_after_second
                 .current_annotation(&annotation_id)
@@ -234,5 +334,143 @@ mod tests {
                 .version,
             2
         );
+
+        let stale_delete = EventLogEntry::new(
+            3,
+            state_after_second.image_id.clone(),
+            UserId::from("user_1"),
+            DatasetRole::Annotator,
+            now(),
+            EventPayload::AnnotationDeleted {
+                annotation_id,
+                version: 1,
+                reason: None,
+            },
+        );
+        assert!(state_after_second.apply_event(&stale_delete).is_err());
+    }
+
+    #[test]
+    fn replays_reviewer_correction_as_one_terminal_rejection() {
+        let image_id = ImageId::from("img_correction");
+        let task_id = TaskId::from("bounding_box:person");
+        let annotation_id = AnnotationId::from("ann_1");
+        let annotator = UserId::from("annotator");
+        let reviewer = UserId::from("reviewer");
+        let correction_id = crate::CorrectionId::from("cor_1");
+        let assignment_id = crate::AssignmentId::from("asg_1");
+        let timestamp = now();
+        let first = AnnotationVersion {
+            annotation_id: annotation_id.clone(),
+            version: 1,
+            task_id: task_id.clone(),
+            class_id: crate::ClassId::from("person"),
+            annotation_type: AnnotationType::BoundingBox,
+            source: AnnotationSource::Human,
+            geometry: AnnotationGeometry::BoundingBox(BoundingBox {
+                x: 0.1,
+                y: 0.1,
+                width: 0.2,
+                height: 0.2,
+            }),
+            author_user_id: annotator.clone(),
+            created_at: timestamp,
+            updated_at: timestamp,
+            deleted: false,
+        };
+        let corrected = AnnotationVersion {
+            version: 2,
+            source: AnnotationSource::ReviewerCorrection {
+                correction_id: correction_id.clone(),
+            },
+            geometry: AnnotationGeometry::BoundingBox(BoundingBox {
+                x: 0.2,
+                y: 0.2,
+                width: 0.3,
+                height: 0.3,
+            }),
+            author_user_id: reviewer.clone(),
+            updated_at: timestamp,
+            ..first.clone()
+        };
+        let assignment = Assignment {
+            assignment_id: assignment_id.clone(),
+            image_id: image_id.clone(),
+            task_id: task_id.clone(),
+            assigned_to: reviewer.clone(),
+            kind: AssignmentKind::Review,
+            status: AssignmentStatus::Completed,
+            expires_at: Some(timestamp + std::time::Duration::from_secs(60)),
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let correction = ReviewerCorrectionRecord {
+            correction_id: correction_id.clone(),
+            assignment_id,
+            annotation_id: annotation_id.clone(),
+            previous_version: 1,
+            corrected_version: 2,
+            task_id: task_id.clone(),
+            reviewer_user_id: reviewer.clone(),
+            timestamp,
+            reason: Some("box was too small".to_string()),
+        };
+        let events = vec![
+            EventLogEntry::new(
+                1,
+                image_id.clone(),
+                annotator,
+                DatasetRole::Annotator,
+                timestamp,
+                EventPayload::AnnotationVersionCreated {
+                    annotation: first,
+                    previous_version: None,
+                    reason: None,
+                },
+            ),
+            EventLogEntry::new(
+                2,
+                image_id.clone(),
+                reviewer.clone(),
+                DatasetRole::Reviewer,
+                timestamp,
+                EventPayload::ReviewerCorrectionRecorded {
+                    correction,
+                    annotation: Box::new(corrected),
+                    review: ReviewRecord {
+                        review_id: crate::ReviewId::from("rev_1"),
+                        target: ReviewTarget::AnnotationVersion {
+                            annotation_id: annotation_id.clone(),
+                            version: 1,
+                        },
+                        reviewer_user_id: reviewer.clone(),
+                        decision: ReviewDecision::Rejected,
+                        timestamp,
+                        comment: Some("box was too small".to_string()),
+                    },
+                    task_state: TaskState {
+                        task_id: task_id.clone(),
+                        status: TaskStatus::Completed,
+                        outcome: Some(TaskOutcome::ReviewerCorrected),
+                        assigned_to: None,
+                        completed_by: Some(reviewer),
+                        completed_at: Some(timestamp),
+                        updated_at: timestamp,
+                    },
+                    assignments: vec![assignment],
+                },
+            ),
+        ];
+
+        let state = rebuild_state(image_id, &events).unwrap();
+
+        assert_eq!(state.current_annotation(&annotation_id).unwrap().version, 2);
+        assert_eq!(state.reviews[0].decision, ReviewDecision::Rejected);
+        assert_eq!(state.reviewer_corrections.len(), 1);
+        assert_eq!(
+            state.task_states[&task_id].outcome,
+            Some(TaskOutcome::ReviewerCorrected)
+        );
+        assert_eq!(state.assignments[0].status, AssignmentStatus::Completed);
     }
 }

@@ -94,6 +94,7 @@ id_type!(ClassId);
 id_type!(UserId);
 id_type!(AnnotationId);
 id_type!(ReviewId);
+id_type!(CorrectionId);
 id_type!(AdjudicationId);
 id_type!(AssignmentId);
 id_type!(EventId);
@@ -120,6 +121,12 @@ impl AnnotationId {
 impl ReviewId {
     pub fn generate() -> Self {
         Self::new(format!("rev_{}", uuid::Uuid::now_v7().simple()))
+    }
+}
+
+impl CorrectionId {
+    pub fn generate() -> Self {
+        Self::new(format!("cor_{}", uuid::Uuid::now_v7().simple()))
     }
 }
 
@@ -167,6 +174,7 @@ mod tests {
         assert!(EventId::generate().validate_path_segment().is_ok());
         assert!(AnnotationId::generate().validate_path_segment().is_ok());
         assert!(ReviewId::generate().validate_path_segment().is_ok());
+        assert!(CorrectionId::generate().validate_path_segment().is_ok());
         assert!(AdjudicationId::generate().validate_path_segment().is_ok());
         assert!(AssignmentId::generate().validate_path_segment().is_ok());
         assert!(

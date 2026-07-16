@@ -8,11 +8,11 @@ use labello_domain::{
 };
 
 use crate::{
-    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, ClientError, ClientResult,
-    CorrectionRequest, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery,
-    ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineBundleRequest, PrelabelSuggestionRequest, SetDatasetRolesRequest,
-    UpdateDatasetConfigRequest,
+    AnnotationBatchRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
+    ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetSummary,
+    DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestReport,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest, PrelabelSuggestionRequest,
+    SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -173,6 +173,13 @@ pub trait AnnotationApi {
                 .await
         })
     }
+
+    fn apply_annotation_batch<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        assignment: AssignmentActionRequest,
+        request: AnnotationBatchRequest,
+    ) -> ApiFuture<'a, ImageState>;
 }
 
 pub trait ReviewApi {
@@ -181,14 +188,14 @@ pub trait ReviewApi {
         dataset_id: &'a DatasetId,
         image_id: &'a ImageId,
         review: ReviewRecord,
-    ) -> ApiFuture<'a, EventLogEntry>;
+    ) -> ApiFuture<'a, ImageState>;
 
     fn record_assigned_review<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
         assignment: AssignmentActionRequest,
         review: ReviewRecord,
-    ) -> ApiFuture<'a, EventLogEntry> {
+    ) -> ApiFuture<'a, ImageState> {
         Box::pin(async move {
             self.record_review(dataset_id, &assignment.image_id, review)
                 .await

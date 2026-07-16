@@ -390,30 +390,52 @@ impl DatasetRepository {
             return Ok(Vec::new());
         }
         let text = tokio::fs::read_to_string(&path).await.with_path(&path)?;
-        text.lines()
+        let events = text
+            .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| serde_json::from_str(line).with_json_path(&path))
-            .collect()
+            .collect::<StorageResult<Vec<EventLogEntry>>>()?;
+        for event in &events {
+            labello_domain::validate_schema_version(event.schema_version)?;
+        }
+        Ok(events)
     }
 
     pub async fn rebuild_image_state(&self, image_id: &ImageId) -> StorageResult<ImageState> {
         let events = self.load_events(image_id).await?;
         let state = rebuild_state(image_id.clone(), &events)?;
         write_json_atomic(&self.state_path(image_id), &state).await?;
-        self.stats_cache.invalidate();
+        if events.iter().any(stats_relevant_event) {
+            self.stats_cache.invalidate();
+        }
         Ok(state)
     }
 
     pub async fn load_image_state(&self, image_id: &ImageId) -> StorageResult<ImageState> {
         let path = self.state_path(image_id);
-        if tokio::fs::try_exists(&path).await.with_path(&path)? {
+        let cached = if tokio::fs::try_exists(&path).await.with_path(&path)? {
             let state: ImageState = read_json(&path).await?;
             labello_domain::validate_schema_version(state.schema_version)?;
-            Ok(state)
+            Some(state)
         } else {
-            rebuild_state(image_id.clone(), &self.load_events(image_id).await?)
-                .map_err(StorageError::from)
+            None
+        };
+        let events = self.load_events(image_id).await?;
+        let event_sequence = events
+            .last()
+            .map(|event| event.event_sequence)
+            .unwrap_or_default();
+        if let Some(state) = cached.as_ref()
+            && state.image_id == *image_id
+            && state.current_sequence == event_sequence
+        {
+            return Ok(state.clone());
         }
+        let state = rebuild_state(image_id.clone(), &events)?;
+        if cached.is_some() || !events.is_empty() {
+            write_json_atomic(&path, &state).await?;
+        }
+        Ok(state)
     }
 
     pub async fn append_payload(
@@ -437,6 +459,18 @@ impl DatasetRepository {
         actor: &Actor,
         payloads: Vec<EventPayload>,
     ) -> StorageResult<Vec<EventLogEntry>> {
+        let (events, _) = self
+            .append_payloads_with_state_unlocked(image_id, actor, payloads)
+            .await?;
+        Ok(events)
+    }
+
+    pub(crate) async fn append_payloads_with_state_unlocked(
+        &self,
+        image_id: &ImageId,
+        actor: &Actor,
+        payloads: Vec<EventPayload>,
+    ) -> StorageResult<(Vec<EventLogEntry>, ImageState)> {
         let mut next_state = self.load_image_state(image_id).await?;
         let mut events = Vec::with_capacity(payloads.len());
         for payload in payloads {
@@ -451,12 +485,12 @@ impl DatasetRepository {
             next_state.apply_event(&event)?;
             events.push(event);
         }
-        for event in &events {
-            self.append_event_line(event).await?;
-        }
+        self.append_events_atomic(image_id, &events).await?;
         write_json_atomic(&self.state_path(image_id), &next_state).await?;
-        self.stats_cache.invalidate();
-        Ok(events)
+        if events.iter().any(stats_relevant_event) {
+            self.stats_cache.invalidate();
+        }
+        Ok((events, next_state))
     }
 
     pub(crate) async fn append_resequenced_events(
@@ -474,12 +508,12 @@ impl DatasetRepository {
             next_state.apply_event(&event)?;
             resequenced.push(event);
         }
-        for event in &resequenced {
-            self.append_event_line(event).await?;
-        }
+        self.append_events_atomic(image_id, &resequenced).await?;
         *state = next_state;
         write_json_atomic(&self.state_path(image_id), state).await?;
-        self.stats_cache.invalidate();
+        if resequenced.iter().any(stats_relevant_event) {
+            self.stats_cache.invalidate();
+        }
         Ok(events.len())
     }
 
@@ -491,23 +525,57 @@ impl DatasetRepository {
             .clone()
     }
 
-    async fn append_event_line(&self, event: &EventLogEntry) -> StorageResult<()> {
-        let path = self.events_path(&event.image_id);
+    async fn append_events_atomic(
+        &self,
+        image_id: &ImageId,
+        events: &[EventLogEntry],
+    ) -> StorageResult<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let path = self.events_path(image_id);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.with_path(parent)?;
         }
-        let line = serde_json::to_string(event).with_json_path(&path)?;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7().simple()));
+        let existing = if tokio::fs::try_exists(&path).await.with_path(&path)? {
+            tokio::fs::read(&path).await.with_path(&path)?
+        } else {
+            Vec::new()
+        };
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .with_path(&temporary)?;
+        file.write_all(&existing).await.with_path(&temporary)?;
+        if !existing.is_empty() && !existing.ends_with(b"\n") {
+            file.write_all(b"\n").await.with_path(&temporary)?;
+        }
+        for event in events {
+            let line = serde_json::to_string(event).with_json_path(&path)?;
+            file.write_all(line.as_bytes())
+                .await
+                .with_path(&temporary)?;
+            file.write_all(b"\n").await.with_path(&temporary)?;
+        }
+        file.sync_all().await.with_path(&temporary)?;
+        drop(file);
+        tokio::fs::rename(&temporary, &path)
             .await
             .with_path(&path)?;
-        file.write_all(line.as_bytes()).await.with_path(&path)?;
-        file.write_all(b"\n").await.with_path(&path)?;
-        file.flush().await.with_path(&path)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::File::open(parent)
+                .await
+                .with_path(parent)?
+                .sync_all()
+                .await
+                .with_path(parent)?;
+        }
         Ok(())
     }
+}
+
+fn stats_relevant_event(event: &EventLogEntry) -> bool {
+    !matches!(&event.payload, EventPayload::AssignmentUpdated { .. })
 }
 
 async fn write_snapshot_bytes(
@@ -729,6 +797,65 @@ mod tests {
         assert!(matches!(error, StorageError::Domain(_)));
         assert!(repo.load_events(&image_id).await.unwrap().is_empty());
         assert_eq!(state.current_sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn load_recovers_state_left_behind_a_complete_event_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_recovery");
+        let actor = Actor {
+            user_id: UserId::from("user_1"),
+            role: DatasetRole::Annotator,
+        };
+        repo.append_payload(
+            &image_id,
+            &actor,
+            EventPayload::TaskStateChanged {
+                task_state: TaskState::new(TaskId::from("task_1"), now()),
+            },
+        )
+        .await
+        .unwrap();
+        let stale = repo.load_image_state(&image_id).await.unwrap();
+
+        let lock = repo.image_lock(&image_id);
+        let _guard = lock.lock().await;
+        repo.append_payloads_unlocked(
+            &image_id,
+            &actor,
+            vec![
+                EventPayload::TaskStateChanged {
+                    task_state: TaskState::new(TaskId::from("task_2"), now()),
+                },
+                EventPayload::TaskStateChanged {
+                    task_state: TaskState::new(TaskId::from("task_3"), now()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        write_json_atomic(&repo.state_path(&image_id), &stale)
+            .await
+            .unwrap();
+        drop(_guard);
+
+        let recovered = repo.load_image_state(&image_id).await.unwrap();
+        assert_eq!(recovered.current_sequence, 3);
+        assert_eq!(recovered.task_states.len(), 3);
+        assert_eq!(
+            read_json::<ImageState>(&repo.state_path(&image_id))
+                .await
+                .unwrap(),
+            recovered
+        );
     }
 
     #[test]

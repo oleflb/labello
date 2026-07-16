@@ -52,6 +52,9 @@ pub enum StorageError {
     #[error("invalid assignment: {0}")]
     InvalidAssignment(String),
 
+    #[error("invalid reviewer correction: {0}")]
+    InvalidCorrection(String),
+
     #[error("assignment conflict: {0}")]
     AssignmentConflict(String),
 
