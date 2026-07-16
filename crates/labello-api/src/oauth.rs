@@ -4,6 +4,21 @@ use url::Url;
 
 use crate::error::{ApiError, ApiResult};
 
+#[derive(Clone, Debug)]
+pub(crate) struct GithubOAuthEndpoints {
+    pub token_url: String,
+    pub user_url: String,
+}
+
+impl Default for GithubOAuthEndpoints {
+    fn default() -> Self {
+        Self {
+            token_url: "https://github.com/login/oauth/access_token".to_string(),
+            user_url: "https://api.github.com/user".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubOAuthConfig {
@@ -37,13 +52,14 @@ struct GithubUserResponse {
     name: Option<String>,
 }
 
-pub async fn exchange_code(
+pub(crate) async fn exchange_code(
     client: &reqwest::Client,
     config: &GithubOAuthConfig,
+    endpoints: &GithubOAuthEndpoints,
     code: &str,
 ) -> ApiResult<UserAccount> {
     let token: GithubTokenResponse = client
-        .post("https://github.com/login/oauth/access_token")
+        .post(&endpoints.token_url)
         .header("Accept", "application/json")
         .form(&serde_json::json!({
             "client_id": config.client_id,
@@ -58,7 +74,7 @@ pub async fn exchange_code(
         .await?;
 
     let user: GithubUserResponse = client
-        .get("https://api.github.com/user")
+        .get(&endpoints.user_url)
         .bearer_auth(token.access_token)
         .header("User-Agent", "labello")
         .send()

@@ -20,4 +20,4 @@ egui_kittest = { workspace = true, features = ["eframe"] }
 js-sys.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys = { workspace = true, features = ["Blob", "Document", "Element", "Event", "EventTarget", "File", "FileList", "FormData", "Headers", "HtmlAnchorElement", "HtmlElement", "HtmlInputElement", "Request", "RequestInit", "Response", "Storage", "Url", "Window"] }
+web-sys = { workspace = true, features = ["Blob", "Document", "Element", "Event", "EventTarget", "File", "FileList", "FormData", "Headers", "HtmlAnchorElement", "HtmlElement", "HtmlInputElement", "Request", "RequestCredentials", "RequestInit", "Response", "Storage", "Url", "Window"] }

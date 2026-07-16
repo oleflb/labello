@@ -47,7 +47,7 @@ impl LabelloApp {
                 ui.horizontal(|ui| {
                     ui.label("Dev token");
                     ui.add(egui::TextEdit::singleline(&mut self.config.dev_token).password(true))
-                        .on_hover_text("Must match devAuth.token in labello.server.toml.");
+                        .on_hover_text("Must match developmentAuth.token in labello.server.toml.");
                 });
                 let mut user_id = self.config.user_id.to_string();
                 ui.horizontal(|ui| {
@@ -60,6 +60,7 @@ impl LabelloApp {
                     if let Err(error) = self.config.user_id.validate_path_segment() {
                         self.runtime.error = Some(format!("User ID: {error}"));
                     } else {
+                        self.auth.account = None;
                         self.current = None;
                         self.datasets.metadata = None;
                         self.datasets.admin_config = None;

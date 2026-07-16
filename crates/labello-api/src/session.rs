@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ApiError, ApiResult};
 
 pub const SESSION_COOKIE: &str = "labello_session";
+pub const OAUTH_FLOW_COOKIE: &str = "labello_oauth_flow";
 const SESSION_LIFETIME_DAYS: i64 = 30;
 const OAUTH_STATE_LIFETIME_MINUTES: i64 = 10;
 
@@ -26,7 +27,7 @@ pub(crate) struct ServerStore {
 struct StoreData {
     users: BTreeMap<UserId, UserAccount>,
     sessions: BTreeMap<String, SessionRecord>,
-    oauth_states: BTreeMap<String, Timestamp>,
+    oauth_flows: BTreeMap<String, OAuthFlowRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +35,19 @@ struct StoreData {
 struct SessionRecord {
     user_id: UserId,
     expires_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthFlowRecord {
+    cookie_hash: String,
+    return_to: String,
+    expires_at: Timestamp,
+}
+
+pub(crate) struct OAuthFlow {
+    pub state: String,
+    pub cookie_token: String,
 }
 
 impl ServerStore {
@@ -102,14 +116,14 @@ impl ServerStore {
     pub(crate) fn session_user(&self, token: &str) -> ApiResult<Option<UserAccount>> {
         self.ensure_loaded()?;
         let mut data = self.lock();
-        let before = data.sessions.len() + data.oauth_states.len();
+        let before = data.sessions.len() + data.oauth_flows.len();
         prune(&mut data);
         let user = data
             .sessions
             .get(&token_hash(token))
             .and_then(|session| data.users.get(&session.user_id))
             .cloned();
-        if before != data.sessions.len() + data.oauth_states.len() {
+        if before != data.sessions.len() + data.oauth_flows.len() {
             self.save(&data)?;
         }
         Ok(user)
@@ -122,30 +136,54 @@ impl ServerStore {
         self.save(&data)
     }
 
-    pub(crate) fn create_oauth_state(&self) -> ApiResult<String> {
+    pub(crate) fn create_oauth_flow(&self, return_to: String) -> ApiResult<OAuthFlow> {
         self.ensure_loaded()?;
         let state = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
+        let cookie_token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
         let mut data = self.lock();
         prune(&mut data);
-        data.oauth_states.insert(
+        data.oauth_flows.insert(
             token_hash(&state),
-            now() + chrono::Duration::minutes(OAUTH_STATE_LIFETIME_MINUTES),
+            OAuthFlowRecord {
+                cookie_hash: token_hash(&cookie_token),
+                return_to,
+                expires_at: now() + chrono::Duration::minutes(OAUTH_STATE_LIFETIME_MINUTES),
+            },
         );
         self.save(&data)?;
-        Ok(state)
+        Ok(OAuthFlow {
+            state,
+            cookie_token,
+        })
     }
 
-    pub(crate) fn consume_oauth_state(&self, state: &str) -> ApiResult<bool> {
+    pub(crate) fn consume_oauth_flow(
+        &self,
+        state: &str,
+        cookie_token: &str,
+    ) -> ApiResult<Option<String>> {
         self.ensure_loaded()?;
         let mut data = self.lock();
         prune(&mut data);
-        let valid = data.oauth_states.remove(&token_hash(state)).is_some();
+        let state_hash = token_hash(state);
+        let matches_cookie = data
+            .oauth_flows
+            .get(&state_hash)
+            .is_some_and(|flow| flow.cookie_hash == token_hash(cookie_token));
+        let return_to = matches_cookie
+            .then(|| data.oauth_flows.remove(&state_hash))
+            .flatten()
+            .map(|flow| flow.return_to);
         self.save(&data)?;
-        Ok(valid)
+        Ok(return_to)
     }
 
     fn ensure_loaded(&self) -> ApiResult<()> {
@@ -180,8 +218,8 @@ fn prune(data: &mut StoreData) {
     let timestamp = now();
     data.sessions
         .retain(|_, session| session.expires_at > timestamp);
-    data.oauth_states
-        .retain(|_, expires_at| *expires_at > timestamp);
+    data.oauth_flows
+        .retain(|_, flow| flow.expires_at > timestamp);
 }
 
 fn token_hash(token: &str) -> String {
@@ -194,15 +232,46 @@ fn store_error(error: std::io::Error) -> ApiError {
 
 pub(crate) fn session_cookie(token: &str, secure: bool) -> String {
     format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={};{}",
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; {}; Max-Age={}{}",
+        same_site(secure),
         SESSION_LIFETIME_DAYS * 24 * 60 * 60,
-        if secure { " Secure" } else { "" }
+        secure_attribute(secure),
     )
 }
 
 pub(crate) fn expired_session_cookie(secure: bool) -> String {
     format!(
-        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;{}",
-        if secure { " Secure" } else { "" }
+        "{SESSION_COOKIE}=; Path=/; HttpOnly; {}; Max-Age=0{}",
+        same_site(secure),
+        secure_attribute(secure),
     )
+}
+
+pub(crate) fn oauth_flow_cookie(token: &str, secure: bool) -> String {
+    format!(
+        "{OAUTH_FLOW_COOKIE}={token}; Path=/auth/github; HttpOnly; {}; Max-Age={}{}",
+        same_site(secure),
+        OAUTH_STATE_LIFETIME_MINUTES * 60,
+        secure_attribute(secure),
+    )
+}
+
+pub(crate) fn expired_oauth_flow_cookie(secure: bool) -> String {
+    format!(
+        "{OAUTH_FLOW_COOKIE}=; Path=/auth/github; HttpOnly; {}; Max-Age=0{}",
+        same_site(secure),
+        secure_attribute(secure),
+    )
+}
+
+fn same_site(secure: bool) -> &'static str {
+    if secure {
+        "SameSite=None"
+    } else {
+        "SameSite=Lax"
+    }
+}
+
+fn secure_attribute(secure: bool) -> &'static str {
+    if secure { "; Secure" } else { "" }
 }

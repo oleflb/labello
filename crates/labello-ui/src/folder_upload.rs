@@ -7,6 +7,52 @@ const MAX_FILES_PER_BATCH: u32 = 24;
 #[cfg(target_arch = "wasm32")]
 const MAX_BATCH_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UploadAuthMode {
+    Session,
+    Development { user_id: String, dev_token: String },
+    Anonymous,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadCredentials {
+    Include,
+    Omit,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UploadRequestPolicy<'a> {
+    credentials: UploadCredentials,
+    user_id: Option<&'a str>,
+    dev_token: Option<&'a str>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl UploadAuthMode {
+    fn request_policy(&self) -> UploadRequestPolicy<'_> {
+        match self {
+            Self::Session => UploadRequestPolicy {
+                credentials: UploadCredentials::Include,
+                user_id: None,
+                dev_token: None,
+            },
+            Self::Development { user_id, dev_token } => UploadRequestPolicy {
+                credentials: UploadCredentials::Omit,
+                user_id: Some(user_id),
+                dev_token: Some(dev_token),
+            },
+            Self::Anonymous => UploadRequestPolicy {
+                credentials: UploadCredentials::Omit,
+                user_id: None,
+                dev_token: None,
+            },
+        }
+    }
+}
+
 impl LabelloApp {
     pub(crate) fn request_folder_upload(&mut self) {
         if self.loading.uploading {
@@ -72,8 +118,16 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
     let config = UploadConfig {
         api_base_url: app.config.api_base_url.clone(),
         dataset_id: app.config.dataset_id.to_string(),
-        user_id: app.config.user_id.to_string(),
-        dev_token: app.config.dev_token.clone(),
+        auth: if app.setup.dev_auth {
+            UploadAuthMode::Development {
+                user_id: app.config.user_id.to_string(),
+                dev_token: app.config.dev_token.clone(),
+            }
+        } else if app.auth.account.is_some() {
+            UploadAuthMode::Session
+        } else {
+            UploadAuthMode::Anonymous
+        },
         root,
     };
     let input_for_callback = input.clone();
@@ -98,8 +152,7 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
 struct UploadConfig {
     api_base_url: String,
     dataset_id: String,
-    user_id: String,
-    dev_token: String,
+    auth: UploadAuthMode,
     root: String,
 }
 
@@ -315,15 +368,22 @@ async fn fetch(
 ) -> Result<web_sys::Response, String> {
     use wasm_bindgen::JsCast;
 
+    let policy = config.auth.request_policy();
+    init.set_credentials(match policy.credentials {
+        UploadCredentials::Include => web_sys::RequestCredentials::Include,
+        UploadCredentials::Omit => web_sys::RequestCredentials::Omit,
+    });
     let request = web_sys::Request::new_with_str_and_init(&url, &init).map_err(js_error)?;
-    request
-        .headers()
-        .set("x-user-id", &config.user_id)
-        .map_err(js_error)?;
-    if !config.dev_token.is_empty() {
+    if let Some(user_id) = policy.user_id {
         request
             .headers()
-            .set("x-dev-token", &config.dev_token)
+            .set("x-user-id", user_id)
+            .map_err(js_error)?;
+    }
+    if let Some(dev_token) = policy.dev_token {
+        request
+            .headers()
+            .set("x-dev-token", dev_token)
             .map_err(js_error)?;
     }
     let window = web_sys::window().ok_or_else(|| "missing browser window".to_string())?;
@@ -438,4 +498,50 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
     error
         .as_string()
         .unwrap_or_else(|| "browser API error".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UploadAuthMode, UploadCredentials, UploadRequestPolicy};
+
+    #[test]
+    fn session_requests_include_credentials_without_development_headers() {
+        assert_eq!(
+            UploadAuthMode::Session.request_policy(),
+            UploadRequestPolicy {
+                credentials: UploadCredentials::Include,
+                user_id: None,
+                dev_token: None,
+            }
+        );
+    }
+
+    #[test]
+    fn development_requests_omit_credentials_and_send_both_headers() {
+        let auth = UploadAuthMode::Development {
+            user_id: "developer".to_string(),
+            dev_token: "secret".to_string(),
+        };
+
+        assert_eq!(
+            auth.request_policy(),
+            UploadRequestPolicy {
+                credentials: UploadCredentials::Omit,
+                user_id: Some("developer"),
+                dev_token: Some("secret"),
+            }
+        );
+    }
+
+    #[test]
+    fn anonymous_requests_omit_credentials_and_development_headers() {
+        assert_eq!(
+            UploadAuthMode::Anonymous.request_policy(),
+            UploadRequestPolicy {
+                credentials: UploadCredentials::Omit,
+                user_id: None,
+                dev_token: None,
+            }
+        );
+    }
 }

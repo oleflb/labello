@@ -1281,6 +1281,8 @@ async fn session_survives_state_recreation_and_logout_invalidates_it() {
     assert_eq!(logout.status(), StatusCode::NO_CONTENT);
     let cleared = logout.headers()[header::SET_COOKIE].to_str().unwrap();
     assert!(cleared.contains("HttpOnly"));
+    assert!(cleared.contains("SameSite=Lax"));
+    assert!(!cleared.contains("Secure"));
     assert!(cleared.contains("Max-Age=0"));
 
     let expired = app
@@ -1297,19 +1299,46 @@ async fn session_survives_state_recreation_and_logout_invalidates_it() {
 }
 
 #[tokio::test]
-async fn oauth_login_issues_one_time_server_verified_state() {
+async fn oauth_flow_binds_state_to_browser_and_redirects_once_to_valid_return_target() {
     let temp = tempfile::tempdir().unwrap();
-    let state = ApiState::new(temp.path()).with_github_oauth(crate::GithubOAuthConfig {
-        client_id: "client".to_string(),
-        client_secret: "secret".to_string(),
-        redirect_uri: "http://localhost/callback".to_string(),
-    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_address = listener.local_addr().unwrap();
+    let mock_github = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async { axum::Json(json!({ "access_token": "github-token" })) }),
+        )
+        .route(
+            "/user",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "id": 42, "login": "octocat", "name": "Octo Cat" }))
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, mock_github).await.unwrap() });
+
+    let state = ApiState::new(temp.path())
+        .with_browser_origins(vec!["https://app.example.com".to_string()])
+        .unwrap()
+        .with_session_cookie_secure(true)
+        .with_github_oauth(crate::GithubOAuthConfig {
+            client_id: "client".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_uri: "https://api.example.com/auth/github/callback".to_string(),
+        })
+        .with_github_oauth_endpoints(crate::oauth::GithubOAuthEndpoints {
+            token_url: format!("http://{mock_address}/token"),
+            user_url: format!("http://{mock_address}/user"),
+        });
     let app = router(state.clone());
+    let return_to = "https://app.example.com/datasets/ds?tab=review";
     let login = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/auth/github/login?state=attacker-chosen")
+                .uri(format!(
+                    "/auth/github/login?returnTo={}",
+                    urlencoding::encode(return_to)
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1322,19 +1351,117 @@ async fn oauth_login_issues_one_time_server_verified_state() {
         .query_pairs()
         .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
         .unwrap();
-    assert_ne!(generated, "attacker-chosen");
-    let rejected = app
+    let browser_a_cookie = login.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(browser_a_cookie.starts_with("labello_oauth_flow="));
+    assert!(browser_a_cookie.contains("Path=/auth/github"));
+    assert!(browser_a_cookie.contains("HttpOnly"));
+    assert!(browser_a_cookie.contains("SameSite=None"));
+    assert!(browser_a_cookie.contains("Secure"));
+    let browser_a_cookie = browser_a_cookie.split(';').next().unwrap().to_string();
+
+    let invalid_return = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/auth/github/callback?code=unused&state=attacker-chosen")
+                .uri("/auth/github/login?returnTo=https%3A%2F%2Fevil.example%2Fsteal")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-    assert!(state.server_store.consume_oauth_state(&generated).unwrap());
-    assert!(!state.server_store.consume_oauth_state(&generated).unwrap());
+    assert_eq!(invalid_return.status(), StatusCode::BAD_REQUEST);
+
+    let missing_cookie = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/auth/github/callback?code=unused&state={generated}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_cookie.status(), StatusCode::UNAUTHORIZED);
+
+    let browser_b_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/github/login?returnTo=https%3A%2F%2Fapp.example.com%2Fother")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let browser_b_cookie = browser_b_login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let wrong_browser = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/auth/github/callback?code=unused&state={generated}"
+                ))
+                .header(header::COOKIE, browser_b_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_browser.status(), StatusCode::UNAUTHORIZED);
+
+    let callback = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/auth/github/callback?code=valid-code&state={generated}"
+                ))
+                .header(header::COOKIE, &browser_a_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()[header::LOCATION], return_to);
+    let set_cookies: Vec<_> = callback
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(set_cookies.len(), 2);
+    assert!(set_cookies.iter().any(|cookie| {
+        cookie.starts_with("labello_session=")
+            && cookie.contains("SameSite=None")
+            && cookie.contains("Secure")
+    }));
+    assert!(set_cookies.iter().any(|cookie| {
+        cookie.starts_with("labello_oauth_flow=;") && cookie.contains("Max-Age=0")
+    }));
+
+    let replay = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/auth/github/callback?code=valid-code&state={generated}"
+                ))
+                .header(header::COOKIE, browser_a_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1396,15 +1523,22 @@ async fn data_admin_lists_discovered_users_and_assigns_roles() {
 async fn credentialed_cors_only_allows_configured_origins() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(
-        ApiState::new(temp.path()).with_allowed_origins(vec!["http://localhost:8081".to_string()]),
+        ApiState::new(temp.path())
+            .with_browser_origins(vec!["https://app.remote.example".to_string()])
+            .unwrap(),
     );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
                 .uri("/me")
-                .header(header::ORIGIN, "http://localhost:8081")
+                .header(header::ORIGIN, "https://app.remote.example")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type,x-dev-token,x-user-id,x-user-role",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1413,12 +1547,74 @@ async fn credentialed_cors_only_allows_configured_origins() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-        "http://localhost:8081"
+        "https://app.remote.example"
     );
     assert_eq!(
         response.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
         "true"
     );
+    let allowed_headers = response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap();
+    for expected in ["content-type", "x-dev-token", "x-user-id", "x-user-role"] {
+        assert!(allowed_headers.contains(expected), "{allowed_headers}");
+    }
+
+    let actual = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(header::ORIGIN, "https://app.remote.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        actual.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+        "x-image-width,x-image-height"
+    );
+
+    let denied = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        denied
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+}
+
+#[test]
+fn browser_origin_configuration_rejects_empty_and_non_origin_urls() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(
+        ApiState::new(temp.path())
+            .with_browser_origins(Vec::new())
+            .is_err()
+    );
+    for invalid in [
+        "https://app.example/path",
+        "https://app.example?query=yes",
+        "file:///tmp/app",
+        "not a URL",
+    ] {
+        assert!(
+            ApiState::new(temp.path())
+                .with_browser_origins(vec![invalid.to_string()])
+                .is_err(),
+            "accepted {invalid}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1,47 +1,35 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+use anyhow::{Context, bail};
 use labello_api::{ApiState, GithubOAuthConfig, router};
 use labello_domain::UserId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerConfig {
     bind: String,
     datasets_root: String,
     bootstrap_admins: Vec<String>,
-    #[serde(default)]
-    allowed_origins: Vec<String>,
-    #[serde(default = "default_cookie_secure")]
+    browser_origins: Vec<String>,
     session_cookie_secure: bool,
-    dev_auth: DevAuthConfig,
+    development_auth: DevelopmentAuthConfig,
     github_oauth: Option<GithubOAuthFileConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DevAuthConfig {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DevelopmentAuthConfig {
     enabled: bool,
-    #[serde(default = "default_dev_token")]
     token: String,
-    default_user_id: String,
-    default_role: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GithubOAuthFileConfig {
     client_id: String,
     client_secret: String,
     redirect_uri: String,
-}
-
-fn default_dev_token() -> String {
-    "dev-local-token".to_string()
-}
-
-fn default_cookie_secure() -> bool {
-    true
 }
 
 impl Default for ServerConfig {
@@ -50,16 +38,14 @@ impl Default for ServerConfig {
             bind: "127.0.0.1:8080".to_string(),
             datasets_root: "datasets".to_string(),
             bootstrap_admins: vec!["admin".to_string()],
-            allowed_origins: vec![
+            browser_origins: vec![
                 "http://127.0.0.1:8081".to_string(),
                 "http://localhost:8081".to_string(),
             ],
             session_cookie_secure: false,
-            dev_auth: DevAuthConfig {
+            development_auth: DevelopmentAuthConfig {
                 enabled: true,
                 token: "dev-local-token".to_string(),
-                default_user_id: "admin".to_string(),
-                default_role: "data_admin".to_string(),
             },
             github_oauth: None,
         }
@@ -91,25 +77,8 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let datasets_root = PathBuf::from(&config.datasets_root);
-    let bind: SocketAddr = config.bind.parse()?;
-    let dev_auth_token = config
-        .dev_auth
-        .enabled
-        .then(|| config.dev_auth.token.clone())
-        .filter(|token| !token.is_empty());
-    let mut state = ApiState::new(datasets_root)
-        .with_dev_auth_token(dev_auth_token)
-        .with_allowed_origins(config.allowed_origins.clone())
-        .with_session_cookie_secure(config.session_cookie_secure)
-        .with_bootstrap_admins(config.bootstrap_admins.iter().cloned().map(UserId::from));
-    if let Some(github) = config.github_oauth {
-        state = state.with_github_oauth(GithubOAuthConfig {
-            client_id: github.client_id,
-            client_secret: github.client_secret,
-            redirect_uri: github.redirect_uri,
-        });
-    }
+    let bind: SocketAddr = config.bind.parse().context("invalid server bind address")?;
+    let state = build_state(config)?;
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "labello server listening");
@@ -122,8 +91,9 @@ fn load_or_create_config() -> anyhow::Result<ServerConfig> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("labello.server.toml"));
     if path.exists() {
-        let text = std::fs::read_to_string(&path)?;
-        Ok(toml::from_str(&text)?)
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read server config {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("invalid server config {}", path.display()))
     } else {
         let config = ServerConfig::default();
         if let Some(parent) = path.parent()
@@ -133,5 +103,109 @@ fn load_or_create_config() -> anyhow::Result<ServerConfig> {
         }
         std::fs::write(&path, toml::to_string_pretty(&config)?)?;
         Ok(config)
+    }
+}
+
+fn build_state(config: ServerConfig) -> anyhow::Result<ApiState> {
+    if config.development_auth.enabled && config.development_auth.token.trim().is_empty() {
+        bail!("developmentAuth.token must be nonempty when developmentAuth.enabled is true");
+    }
+    let dev_auth_token = config
+        .development_auth
+        .enabled
+        .then_some(config.development_auth.token);
+    let mut state = ApiState::new(PathBuf::from(config.datasets_root))
+        .with_dev_auth_token(dev_auth_token)
+        .with_browser_origins(config.browser_origins)
+        .context("invalid browserOrigins")?
+        .with_session_cookie_secure(config.session_cookie_secure)
+        .with_bootstrap_admins(config.bootstrap_admins.into_iter().map(UserId::from));
+    if let Some(github) = config.github_oauth {
+        state = state.with_github_oauth(GithubOAuthConfig {
+            client_id: github.client_id,
+            client_secret: github.client_secret,
+            redirect_uri: github.redirect_uri,
+        });
+    }
+    Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONFIG: &str = r#"
+bind = "127.0.0.1:8080"
+datasetsRoot = "datasets"
+bootstrapAdmins = ["admin"]
+browserOrigins = ["https://app.example.com"]
+sessionCookieSecure = true
+
+[developmentAuth]
+enabled = false
+token = "unused"
+"#;
+
+    #[test]
+    fn parses_required_server_schema() {
+        let config: ServerConfig = toml::from_str(CONFIG).unwrap();
+        assert_eq!(config.browser_origins, ["https://app.example.com"]);
+        assert!(!config.development_auth.enabled);
+    }
+
+    #[test]
+    fn rejects_old_and_missing_config_fields() {
+        let old = CONFIG
+            .replace("browserOrigins", "allowedOrigins")
+            .replace("developmentAuth", "devAuth");
+        let error = toml::from_str::<ServerConfig>(&old)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+
+        let missing = CONFIG.replace("sessionCookieSecure = true\n", "");
+        let error = toml::from_str::<ServerConfig>(&missing)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing field `sessionCookieSecure`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_removed_development_auth_defaults() {
+        let old = CONFIG.replace(
+            "token = \"unused\"",
+            "token = \"unused\"\ndefaultUserId = \"admin\"\ndefaultRole = \"data_admin\"",
+        );
+        let error = toml::from_str::<ServerConfig>(&old)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn startup_rejects_invalid_origins_and_empty_enabled_dev_token() {
+        let mut config: ServerConfig = toml::from_str(CONFIG).unwrap();
+        config.browser_origins = vec!["https://app.example.com/path".to_string()];
+        assert!(
+            build_state(config)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("browserOrigins")
+        );
+
+        let mut config: ServerConfig = toml::from_str(CONFIG).unwrap();
+        config.development_auth.enabled = true;
+        config.development_auth.token.clear();
+        assert!(
+            build_state(config)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("developmentAuth.token")
+        );
     }
 }

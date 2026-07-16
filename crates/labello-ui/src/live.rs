@@ -6,7 +6,7 @@ use std::{
 
 use eframe::egui;
 use labello_client::{
-    AuthHeaders, HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest,
+    AuthMode, HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest,
     SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
@@ -17,15 +17,16 @@ use crate::app::{
 impl LabelloApp {
     pub(crate) fn rebuild_http_api(&mut self) {
         match HttpLabelloApi::new(&self.config.api_base_url).map(|api| {
-            api.with_auth(AuthHeaders {
-                user_id: self.setup.dev_auth.then(|| self.config.user_id.clone()),
-                role: None,
-                dev_token: if !self.setup.dev_auth || self.config.dev_token.is_empty() {
-                    None
-                } else {
-                    Some(self.config.dev_token.clone())
-                },
-            })
+            let auth = if self.setup.dev_auth {
+                AuthMode::Development {
+                    user_id: self.config.user_id.clone(),
+                    role: None,
+                    dev_token: non_empty(&self.config.dev_token),
+                }
+            } else {
+                AuthMode::Session
+            };
+            api.with_auth(auth)
         }) {
             Ok(api) => {
                 self.runtime.api = Some(Rc::new(api));
@@ -44,7 +45,11 @@ impl LabelloApp {
                 break;
             };
             match message {
-                UiMessage::SessionLoaded(result) => {
+                UiMessage::SessionLoaded { request_id, result } => {
+                    if self.auth.active_session_request_id != Some(request_id) {
+                        continue;
+                    }
+                    self.auth.active_session_request_id = None;
                     self.loading.session = false;
                     self.auth.checked = true;
                     match result {
@@ -89,7 +94,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::GithubLoginUrl(result) => match result {
-                    Ok(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+                    Ok(url) => ctx.open_url(egui::OpenUrl::same_tab(url)),
                     Err(error) => self.runtime.error = Some(error),
                 },
                 UiMessage::DatasetList(result) => {
@@ -452,15 +457,18 @@ impl LabelloApp {
             return;
         };
         match command {
-            UiCommand::Session => self.spawn_message(async move {
-                UiMessage::SessionLoaded(api.me().await.map_err(|error| error.to_string()))
+            UiCommand::Session { request_id } => self.spawn_message(async move {
+                UiMessage::SessionLoaded {
+                    request_id,
+                    result: api.me().await.map_err(|error| error.to_string()),
+                }
             }),
             UiCommand::Logout => self.spawn_message(async move {
                 UiMessage::LogoutFinished(api.logout().await.map_err(|error| error.to_string()))
             }),
-            UiCommand::GithubLogin => self.spawn_message(async move {
+            UiCommand::GithubLogin { return_to } => self.spawn_message(async move {
                 UiMessage::GithubLoginUrl(
-                    api.github_login_url(OAuthLoginRequest { return_to: None })
+                    api.github_login_url(OAuthLoginRequest { return_to })
                         .await
                         .map_err(|error| error.to_string()),
                 )
@@ -600,8 +608,7 @@ impl LabelloApp {
 
     pub(crate) fn start_setup_load(&mut self) {
         if self.runtime.api.is_some() && !self.auth.checked && !self.loading.session {
-            self.loading.session = true;
-            self.queue_command(UiCommand::Session);
+            self.request_session();
         }
     }
 
@@ -615,17 +622,22 @@ impl LabelloApp {
 
     pub(crate) fn request_github_login(&mut self) {
         if self.runtime.api.is_some() {
-            self.queue_command(UiCommand::GithubLogin);
+            self.queue_command(UiCommand::GithubLogin {
+                return_to: self.config.application_url.clone(),
+            });
         }
     }
 
     pub(crate) fn request_session(&mut self) {
-        if self.loading.session || self.runtime.api.is_none() {
+        if self.runtime.api.is_none() {
             return;
         }
+        self.auth.session_request_id = self.auth.session_request_id.wrapping_add(1);
+        let request_id = self.auth.session_request_id;
+        self.auth.active_session_request_id = Some(request_id);
         self.auth.checked = false;
         self.loading.session = true;
-        self.queue_command(UiCommand::Session);
+        self.queue_command(UiCommand::Session { request_id });
     }
 
     pub(crate) fn refresh_stats_if_due(&mut self) {

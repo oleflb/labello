@@ -236,6 +236,67 @@ fn signed_out_session_auth_hides_raw_credentials_and_offers_github() {
 }
 
 #[test]
+fn replacement_session_request_ignores_the_stale_result() {
+    let api = Rc::new(SpyApi::new());
+    let account = api.state.borrow().users[0].account.clone();
+    let mut app = base_live_app(api);
+    app.auth.account = None;
+
+    app.request_session();
+    let stale_request_id = app.auth.session_request_id;
+    app.request_session();
+    let active_request_id = app.auth.session_request_id;
+    assert_ne!(stale_request_id, active_request_id);
+
+    app.runtime
+        .tx
+        .send(UiMessage::SessionLoaded {
+            request_id: stale_request_id,
+            result: Ok(account.clone()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.loading.session);
+    assert!(app.auth.account.is_none());
+    assert_eq!(app.auth.active_session_request_id, Some(active_request_id));
+
+    app.runtime
+        .tx
+        .send(UiMessage::SessionLoaded {
+            request_id: active_request_id,
+            result: Ok(account.clone()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(!app.loading.session);
+    assert_eq!(app.auth.account, Some(account));
+}
+
+#[test]
+fn github_login_uses_the_application_url_and_same_tab() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.request_github_login();
+    app.start_next_command();
+
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        app.process_messages(ui.ctx());
+    });
+
+    assert_eq!(
+        api.last_oauth_return_to().as_deref(),
+        Some("https://app.example.test/label?dataset=demo")
+    );
+    assert_eq!(
+        output.platform_output.commands,
+        vec![egui::OutputCommand::OpenUrl(egui::OpenUrl::same_tab(
+            "https://example.invalid/login",
+        ))]
+    );
+}
+
+#[test]
 fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_admin_harness(api.clone());
@@ -1158,6 +1219,7 @@ fn loaded_admin_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
 fn base_live_app(api: Rc<SpyApi>) -> LabelloApp {
     let mut app = LabelloApp::live_http(AppConfig {
         api_base_url: "http://example.invalid".to_string(),
+        application_url: Some("https://app.example.test/label?dataset=demo".to_string()),
         dev_token: "dev".to_string(),
         user_id: UserId::from("admin"),
         dataset_id: DatasetId::from("demo"),
@@ -1309,6 +1371,10 @@ impl SpyApi {
     fn last_image_query(&self) -> Option<ImageExplorerQuery> {
         self.state.borrow().last_image_query.clone()
     }
+
+    fn last_oauth_return_to(&self) -> Option<String> {
+        self.state.borrow().last_oauth_return_to.clone()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1356,6 +1422,7 @@ struct SpyState {
     users: Vec<DatasetUser>,
     fail_me: bool,
     last_image_query: Option<ImageExplorerQuery>,
+    last_oauth_return_to: Option<String>,
     snapshots: Vec<DatasetSnapshot>,
 }
 
@@ -1456,6 +1523,7 @@ impl SpyState {
             users,
             fail_me: false,
             last_image_query: None,
+            last_oauth_return_to: None,
             snapshots: Vec::new(),
         }
     }
@@ -2130,7 +2198,8 @@ impl PrelabelApi for SpyApi {
 }
 
 impl AuthApi for SpyApi {
-    fn github_login_url<'a>(&'a self, _request: OAuthLoginRequest) -> ApiFuture<'a, String> {
+    fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String> {
+        self.state.borrow_mut().last_oauth_return_to = request.return_to;
         ready(Ok("https://example.invalid/login".to_string()))
     }
 

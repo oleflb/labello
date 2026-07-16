@@ -8,6 +8,7 @@ use labello_client::IngestJob;
 use labello_domain::{DatasetId, IdValidationError, UserId};
 use labello_storage::DatasetRepository;
 use tokio::sync::RwLock;
+use url::Url;
 
 use crate::{GithubOAuthConfig, error::ApiResult, session::ServerStore};
 
@@ -17,12 +18,13 @@ pub struct ApiState {
     bootstrap_admins: Arc<BTreeSet<UserId>>,
     dev_auth_token: Option<Arc<String>>,
     dev_auth_enabled: bool,
-    allowed_origins: Arc<Vec<String>>,
+    browser_origins: Arc<Vec<String>>,
     session_cookie_secure: bool,
     pub(crate) server_store: ServerStore,
     ingest_jobs: Arc<RwLock<BTreeMap<String, IngestJob>>>,
     repositories: Arc<Mutex<BTreeMap<DatasetId, Arc<DatasetRepository>>>>,
     pub github_oauth: Option<GithubOAuthConfig>,
+    pub(crate) github_oauth_endpoints: crate::oauth::GithubOAuthEndpoints,
     pub http: reqwest::Client,
 }
 
@@ -35,11 +37,12 @@ impl ApiState {
             bootstrap_admins: Arc::new(BTreeSet::from([UserId::from("admin")])),
             dev_auth_token: None,
             dev_auth_enabled: cfg!(test),
-            allowed_origins: Arc::new(Vec::new()),
+            browser_origins: Arc::new(Vec::new()),
             session_cookie_secure: true,
             ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
             repositories: Arc::new(Mutex::new(BTreeMap::new())),
             github_oauth: None,
+            github_oauth_endpoints: crate::oauth::GithubOAuthEndpoints::default(),
             http: reqwest::Client::new(),
         }
     }
@@ -71,13 +74,13 @@ impl ApiState {
         self.bootstrap_admins.contains(user_id)
     }
 
-    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
-        self.allowed_origins = Arc::new(origins);
-        self
+    pub fn with_browser_origins(mut self, origins: Vec<String>) -> ApiResult<Self> {
+        self.browser_origins = Arc::new(validate_browser_origins(origins)?);
+        Ok(self)
     }
 
-    pub fn allowed_origins(&self) -> &[String] {
-        &self.allowed_origins
+    pub fn browser_origins(&self) -> &[String] {
+        &self.browser_origins
     }
 
     pub fn with_session_cookie_secure(mut self, secure: bool) -> Self {
@@ -95,6 +98,15 @@ impl ApiState {
 
     pub fn with_github_oauth(mut self, config: GithubOAuthConfig) -> Self {
         self.github_oauth = Some(config);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_github_oauth_endpoints(
+        mut self,
+        endpoints: crate::oauth::GithubOAuthEndpoints,
+    ) -> Self {
+        self.github_oauth_endpoints = endpoints;
         self
     }
 
@@ -127,6 +139,37 @@ impl ApiState {
     pub async fn get_ingest_job(&self, job_id: &str) -> Option<IngestJob> {
         self.ingest_jobs.read().await.get(job_id).cloned()
     }
+}
+
+fn validate_browser_origins(origins: Vec<String>) -> ApiResult<Vec<String>> {
+    if origins.is_empty() {
+        return Err(crate::error::ApiError::BadRequest(
+            "browserOrigins must contain at least one origin".to_string(),
+        ));
+    }
+    origins
+        .into_iter()
+        .map(|origin| {
+            let url = Url::parse(&origin).map_err(|error| {
+                crate::error::ApiError::BadRequest(format!(
+                    "invalid browser origin {origin:?}: {error}"
+                ))
+            })?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.path() != "/"
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(crate::error::ApiError::BadRequest(format!(
+                    "invalid browser origin {origin:?}: expected an http(s) origin without credentials, path, query, or fragment"
+                )));
+            }
+            Ok(url.origin().ascii_serialization())
+        })
+        .collect()
 }
 
 #[cfg(test)]

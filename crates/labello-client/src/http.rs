@@ -17,18 +17,23 @@ use crate::{
     SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct AuthHeaders {
-    pub user_id: Option<UserId>,
-    pub role: Option<labello_domain::DatasetRole>,
-    pub dev_token: Option<String>,
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AuthMode {
+    #[default]
+    Anonymous,
+    Session,
+    Development {
+        user_id: UserId,
+        role: Option<labello_domain::DatasetRole>,
+        dev_token: Option<String>,
+    },
 }
 
 #[derive(Clone)]
 pub struct HttpLabelloApi {
     base_url: Url,
     client: reqwest::Client,
-    auth: AuthHeaders,
+    auth: AuthMode,
 }
 
 impl HttpLabelloApi {
@@ -36,11 +41,11 @@ impl HttpLabelloApi {
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
             client: reqwest::Client::new(),
-            auth: AuthHeaders::default(),
+            auth: AuthMode::default(),
         })
     }
 
-    pub fn with_auth(mut self, auth: AuthHeaders) -> Self {
+    pub fn with_auth(mut self, auth: AuthMode) -> Self {
         self.auth = auth;
         self
     }
@@ -51,18 +56,36 @@ impl HttpLabelloApi {
 
     fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
         let mut request = self.client.request(method, self.endpoint(path)?);
-        #[cfg(target_arch = "wasm32")]
-        {
-            request = request.fetch_credentials_include();
-        }
-        if let Some(user_id) = &self.auth.user_id {
-            request = request.header("x-user-id", user_id.as_str());
-        }
-        if let Some(role) = &self.auth.role {
-            request = request.header("x-user-role", role.to_string());
-        }
-        if let Some(token) = &self.auth.dev_token {
-            request = request.header("x-dev-token", token);
+        match &self.auth {
+            AuthMode::Anonymous => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    request = request.fetch_credentials_omit();
+                }
+            }
+            AuthMode::Session => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    request = request.fetch_credentials_include();
+                }
+            }
+            AuthMode::Development {
+                user_id,
+                role,
+                dev_token,
+            } => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    request = request.fetch_credentials_omit();
+                }
+                request = request.header("x-user-id", user_id.as_str());
+                if let Some(role) = role {
+                    request = request.header("x-user-role", role.to_string());
+                }
+                if let Some(token) = dev_token {
+                    request = request.header("x-dev-token", token);
+                }
+            }
         }
         Ok(request)
     }
@@ -865,5 +888,46 @@ impl UserApi for HttpLabelloApi {
             )
             .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_and_session_modes_do_not_add_development_headers() {
+        for mode in [AuthMode::Anonymous, AuthMode::Session] {
+            let request = HttpLabelloApi::new("http://example.invalid")
+                .unwrap()
+                .with_auth(mode)
+                .request(Method::GET, "/me")
+                .unwrap()
+                .build()
+                .unwrap();
+
+            assert!(!request.headers().contains_key("x-user-id"));
+            assert!(!request.headers().contains_key("x-user-role"));
+            assert!(!request.headers().contains_key("x-dev-token"));
+        }
+    }
+
+    #[test]
+    fn development_mode_adds_only_configured_development_headers() {
+        let request = HttpLabelloApi::new("http://example.invalid")
+            .unwrap()
+            .with_auth(AuthMode::Development {
+                user_id: UserId::from("developer"),
+                role: Some(labello_domain::DatasetRole::Reviewer),
+                dev_token: Some("secret".to_string()),
+            })
+            .request(Method::GET, "/me")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(request.headers()["x-user-id"], "developer");
+        assert_eq!(request.headers()["x-user-role"], "reviewer");
+        assert_eq!(request.headers()["x-dev-token"], "secret");
     }
 }

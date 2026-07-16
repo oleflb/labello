@@ -34,7 +34,7 @@ mod workflow;
 const MAX_INGEST_REPORT_DETAILS: usize = 100;
 
 pub fn router(state: ApiState) -> Router {
-    let allowed_origins = state.allowed_origins().to_vec();
+    let browser_origins = state.browser_origins().to_vec();
     let app = Router::new()
         .route("/health", get(health))
         .route("/me", get(me))
@@ -145,12 +145,15 @@ pub fn router(state: ApiState) -> Router {
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    if allowed_origins.is_empty() {
+    if browser_origins.is_empty() {
         app
     } else {
-        let origins = allowed_origins
+        let origins = browser_origins
             .iter()
-            .filter_map(|origin| HeaderValue::from_str(origin).ok())
+            .map(|origin| {
+                HeaderValue::from_str(origin)
+                    .expect("browser origins are validated when API state is configured")
+            })
             .collect::<Vec<_>>();
         app.layer(
             CorsLayer::new()
@@ -162,6 +165,10 @@ pub fn router(state: ApiState) -> Router {
                     header::HeaderName::from_static("x-dev-token"),
                     header::HeaderName::from_static("x-user-id"),
                     header::HeaderName::from_static("x-user-role"),
+                ])
+                .expose_headers([
+                    header::HeaderName::from_static("x-image-width"),
+                    header::HeaderName::from_static("x-image-height"),
                 ]),
         )
     }

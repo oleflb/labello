@@ -12,5 +12,5 @@ pub mod traits;
 pub use demo::DemoLabelloApi;
 pub use dto::*;
 pub use error::*;
-pub use http::{AuthHeaders, HttpLabelloApi};
+pub use http::{AuthMode, HttpLabelloApi};
 pub use traits::*;

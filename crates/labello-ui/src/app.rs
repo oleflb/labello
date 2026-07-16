@@ -30,6 +30,7 @@ pub const IMAGE_QUEUE_SIZE: usize = 8;
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub api_base_url: String,
+    pub application_url: Option<String>,
     pub dev_token: String,
     pub user_id: UserId,
     pub dataset_id: DatasetId,
@@ -40,6 +41,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             api_base_url: "http://127.0.0.1:8080".to_string(),
+            application_url: None,
             dev_token: "dev-local-token".to_string(),
             user_id: UserId::from("demo_user"),
             dataset_id: DatasetId::from("demo"),
@@ -100,7 +102,10 @@ pub(crate) enum ReviewPhase {
 
 #[derive(Debug)]
 pub(crate) enum UiMessage {
-    SessionLoaded(Result<UserAccount, String>),
+    SessionLoaded {
+        request_id: u64,
+        result: Result<UserAccount, String>,
+    },
     LogoutFinished(Result<(), String>),
     GithubLoginUrl(Result<String, String>),
     DatasetList(Result<Vec<DatasetSummary>, String>),
@@ -151,9 +156,13 @@ pub(crate) enum UiMessage {
 }
 
 pub(crate) enum UiCommand {
-    Session,
+    Session {
+        request_id: u64,
+    },
     Logout,
-    GithubLogin,
+    GithubLogin {
+        return_to: Option<String>,
+    },
     DatasetList,
     CreateDataset {
         dataset_id: DatasetId,
@@ -390,6 +399,8 @@ pub(crate) struct SetupState {
 pub(crate) struct AuthState {
     pub account: Option<UserAccount>,
     pub checked: bool,
+    pub session_request_id: u64,
+    pub active_session_request_id: Option<u64>,
 }
 
 pub(crate) struct DatasetState {
@@ -594,6 +605,8 @@ impl LabelloApp {
             auth: AuthState {
                 account: None,
                 checked: true,
+                session_request_id: 0,
+                active_session_request_id: None,
             },
             datasets: DatasetState::new(),
             admin_tools: AdminToolsState::default(),
