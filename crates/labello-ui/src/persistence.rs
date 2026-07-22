@@ -1,10 +1,4 @@
-use std::{
-    collections::VecDeque,
-    future::Future,
-    pin::Pin,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, future::Future, pin::Pin, rc::Rc};
 
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AnnotationVersion, Assignment, AssignmentId, AssignmentKind,
@@ -12,6 +6,7 @@ use labello_domain::{
     Timestamp, UserId,
 };
 use serde::{Deserialize, Serialize};
+use web_time::{Duration, Instant};
 
 const PREFERENCE_VERSION: u32 = 2;
 const DRAFT_VERSION: u32 = 2;
@@ -1188,7 +1183,7 @@ impl crate::app::LabelloApp {
                         self.recompute_modified_annotations();
                         self.edit_generation = self.edit_generation.wrapping_add(1);
                         self.save_status = crate::app::SaveStatus::Dirty;
-                        self.last_edit_at = Some(std::time::Instant::now());
+                        self.last_edit_at = Some(Instant::now());
                     }
                     WorkDraftPayload::Review(draft) => {
                         if let Some(target) = draft.target_annotation

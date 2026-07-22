@@ -1,14 +1,11 @@
-use std::{
-    future::Future,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{future::Future, rc::Rc};
 
 use eframe::egui;
 use labello_client::{
     AuthMode, HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest,
     SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
+use web_time::{Duration, Instant};
 
 use crate::app::{
     AppView, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage, RequestIdentity, SaveStatus,

@@ -3,7 +3,6 @@ use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::mpsc,
-    time::{Duration, Instant},
 };
 
 use eframe::egui::{self, TextureHandle};
@@ -19,6 +18,7 @@ use labello_domain::{
     PrelabelConfigId, PrelabelSuggestion, ReviewRecord, SkeletonGeometry, TaskDefinition, TaskId,
     TaskStatus, TutorialContent, UserAccount, UserId,
 };
+use web_time::{Duration, Instant};
 
 use crate::{
     canvas::CanvasState,

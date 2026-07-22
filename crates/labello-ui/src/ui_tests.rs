@@ -2,7 +2,6 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -28,6 +27,7 @@ use labello_domain::{
     SkeletonSpec, SnapshotFileEntry, TaskDefinition, TaskId, TaskStatus, TutorialContent,
     UserAccount, UserId,
 };
+use web_time::{Duration, Instant};
 
 use crate::app::{
     AppConfig, AppView, Drawer, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, LayoutMode,
