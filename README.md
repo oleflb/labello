@@ -196,6 +196,9 @@ labello-domain
 The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
 
+`dev/egui-mcp-inspector` is a standalone native development tool outside the
+main workspace. It reuses `labello-ui` with deterministic demo state.
+
 ## Development
 
 Run the workspace checks from the repository root:
@@ -216,6 +219,23 @@ trunk build --release
 The output is written to `apps/labello-wasm/dist`. The API health endpoint is
 `GET /health`.
 
+### GUI Inspection
+
+On Linux, install [egui-mcp](https://github.com/dijdzv/egui-mcp) and run the
+native inspector from the repository root:
+
+```sh
+cargo install egui-mcp-server
+cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+```
+
+The repository's `opencode.json` configures the `egui` MCP server. Restart
+OpenCode after changing that configuration. The inspector exposes the shared
+egui accessibility tree but does not connect to the Labello API; use Chromium
+to validate actual WASM startup, browser behavior, and responsive rendering.
+See the [inspector README](dev/egui-mcp-inspector/README.md) for current
+compatibility limitations.
+
 ## Production Notes
 
 - Terminate TLS in front of both the UI and API.
@@ -234,7 +254,8 @@ The output is written to `apps/labello-wasm/dist`. The API health endpoint is
   not operational.
 - Prelabel configuration exists, but model execution currently returns
   placeholder suggestions.
-- There is no native desktop client or browser end-to-end test suite.
+- There is no native desktop client or browser end-to-end test suite; the
+  native inspector is a development tool using demo state only.
 - Ingest jobs and some caches are process-local and do not survive restarts.
 
 The broader product requirements and planned behavior are documented in

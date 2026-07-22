@@ -1,0 +1,11 @@
+[package]
+name = "labello-egui-mcp-inspector"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+labello-ui = { path = "../../crates/labello-ui" }

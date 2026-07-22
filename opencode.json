@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "egui": {
+      "type": "local",
+      "command": ["bash", "dev/egui-mcp-inspector/serve-mcp.sh"],
+      "enabled": true,
+      "environment": {
+        "EGUI_MCP_APP_NAME": "labello-egui-mcp-inspector"
+      }
+    }
+  }
+}
