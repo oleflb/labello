@@ -2,8 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("HTTP request failed")]
+    Http(reqwest::Error),
 
     #[error("url error: {0}")]
     Url(#[from] url::ParseError),
@@ -19,3 +19,24 @@ pub enum ClientError {
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
+
+impl From<reqwest::Error> for ClientError {
+    fn from(error: reqwest::Error) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let connect = error.is_connect();
+        #[cfg(target_arch = "wasm32")]
+        let connect = false;
+        tracing::error!(
+            event = "http.client.failed",
+            outcome = "transport_error",
+            timeout = error.is_timeout(),
+            connect,
+            request = error.is_request(),
+            body = error.is_body(),
+            decode = error.is_decode(),
+            status = error.status().map(|status| status.as_u16()),
+            "HTTP request failed"
+        );
+        Self::Http(error)
+    }
+}

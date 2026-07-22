@@ -115,10 +115,13 @@ impl ApiState {
         dataset_id: &DatasetId,
     ) -> Result<Arc<DatasetRepository>, IdValidationError> {
         dataset_id.validate_path_segment()?;
-        let mut repositories = self
-            .repositories
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut repositories = self.repositories.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                event = "repository.lock_poisoned",
+                "repository cache lock recovered after panic"
+            );
+            poisoned.into_inner()
+        });
         Ok(repositories
             .entry(dataset_id.clone())
             .or_insert_with(|| {

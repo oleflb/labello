@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    extract::{DefaultBodyLimit, MatchedPath, Multipart, Path, Query, State},
+    http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -17,7 +17,13 @@ use labello_domain::{
     EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, PrelabelConfig, ReviewWorkflow,
     TaskDefinition, TaskStatus,
 };
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower::ServiceBuilder;
+use tower_http::{
+    cors::CorsLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
+    trace::TraceLayer,
+};
+use tracing::Span;
 
 use crate::{
     ApiState,
@@ -35,6 +41,72 @@ const MAX_INGEST_REPORT_DETAILS: usize = 100;
 
 pub fn router(state: ApiState) -> Router {
     let browser_origins = state.browser_origins().to_vec();
+    let cors = if browser_origins.is_empty() {
+        None
+    } else {
+        let origins = browser_origins
+            .iter()
+            .map(|origin| {
+                HeaderValue::from_str(origin)
+                    .expect("browser origins are validated when API state is configured")
+            })
+            .collect::<Vec<_>>();
+        Some(
+            CorsLayer::new()
+                .allow_credentials(true)
+                .allow_origin(origins)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::HeaderName::from_static("x-dev-token"),
+                    header::HeaderName::from_static("x-user-id"),
+                    header::HeaderName::from_static("x-user-role"),
+                ])
+                .expose_headers([
+                    header::HeaderName::from_static("x-image-width"),
+                    header::HeaderName::from_static("x-image-height"),
+                    header::HeaderName::from_static("x-request-id"),
+                ]),
+        )
+    };
+    let trace = TraceLayer::new_for_http()
+        .make_span_with(|request: &Request<Body>| {
+            let route = request
+                .extensions()
+                .get::<MatchedPath>()
+                .map(MatchedPath::as_str)
+                .unwrap_or("<unmatched>");
+            let request_id = request
+                .extensions()
+                .get::<RequestId>()
+                .and_then(|request_id| request_id.header_value().to_str().ok())
+                .unwrap_or("<missing>");
+            tracing::info_span!(
+                "http.request",
+                request_id,
+                method = %request.method(),
+                route
+            )
+        })
+        .on_request(())
+        .on_response(
+            |response: &Response<Body>, latency: Duration, _span: &Span| {
+                tracing::info!(
+                    event = "http.request.completed",
+                    status = response.status().as_u16(),
+                    latency_ms = latency.as_millis() as u64,
+                    "request completed"
+                );
+            },
+        )
+        .on_body_chunk(())
+        .on_eos(())
+        .on_failure(());
+    let middleware = ServiceBuilder::new()
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(trace)
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .option_layer(cors);
     let app = Router::new()
         .route("/health", get(health))
         .route("/me", get(me))
@@ -147,35 +219,8 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::prelabel_suggestions),
         )
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
-        .layer(TraceLayer::new_for_http())
         .with_state(state);
-    if browser_origins.is_empty() {
-        app
-    } else {
-        let origins = browser_origins
-            .iter()
-            .map(|origin| {
-                HeaderValue::from_str(origin)
-                    .expect("browser origins are validated when API state is configured")
-            })
-            .collect::<Vec<_>>();
-        app.layer(
-            CorsLayer::new()
-                .allow_credentials(true)
-                .allow_origin(origins)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    header::HeaderName::from_static("x-dev-token"),
-                    header::HeaderName::from_static("x-user-id"),
-                    header::HeaderName::from_static("x-user-role"),
-                ])
-                .expose_headers([
-                    header::HeaderName::from_static("x-image-width"),
-                    header::HeaderName::from_static("x-image-height"),
-                ]),
-        )
-    }
+    app.layer(middleware)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -186,13 +231,26 @@ async fn me(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::UserAccount>> {
-    Ok(Json(current_account(&state, &headers)?))
+    let auth_mode = if session_token(&headers).is_some() {
+        "session"
+    } else {
+        "development"
+    };
+    let account = current_account(&state, &headers)?;
+    tracing::info!(
+        event = "auth.completed",
+        auth_mode,
+        user_id = %account.user_id,
+        "authentication completed"
+    );
+    Ok(Json(account))
 }
 
 async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {
     if let Some(token) = session_token(&headers) {
         state.server_store.delete_session(&token)?;
     }
+    tracing::info!(event = "auth.session.deleted", "session deleted");
     let cookie = crate::session::expired_session_cookie(state.session_cookie_secure());
     Ok((
         [(
@@ -312,6 +370,14 @@ async fn set_dataset_roles(
     }
     metadata.updated_at = labello_domain::now();
     repo.save_dataset(&metadata).await?;
+    tracing::info!(
+        event = "dataset.roles.updated",
+        dataset_id = %dataset_id,
+        actor_user_id = %actor.user_id,
+        target_user_id = %request.user_id,
+        role_count = roles.len(),
+        "dataset roles updated"
+    );
     Ok(Json(DatasetUser {
         account,
         roles: roles.into_iter().collect(),
@@ -350,6 +416,12 @@ async fn create_dataset(
         assigned_by: None,
     });
     repo.initialize(metadata.clone()).await?;
+    tracing::info!(
+        event = "dataset.created",
+        dataset_id = %metadata.dataset_id,
+        actor_user_id = %actor.user_id,
+        "dataset created"
+    );
     Ok(Json(metadata))
 }
 
@@ -380,28 +452,68 @@ async fn list_datasets(
                 source,
             })?
     {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
+        let file_type = match entry.file_type().await {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(
+                    event = "dataset.entry.skipped",
+                    error_kind = %error.kind(),
+                    "could not inspect dataset entry"
+                );
+                continue;
+            }
         };
         if !file_type.is_dir() {
             continue;
         }
         let dataset_id = DatasetId::from(entry.file_name().to_string_lossy().to_string());
-        let Ok(repo) = state.repo(&dataset_id) else {
-            continue;
+        let repo = match state.repo(&dataset_id) {
+            Ok(repo) => repo,
+            Err(_) => {
+                tracing::warn!(
+                    event = "dataset.entry.skipped",
+                    dataset_id = %dataset_id,
+                    error_kind = "invalid_id",
+                    "invalid dataset directory ignored"
+                );
+                continue;
+            }
         };
-        let Ok(metadata) = repo.load_dataset_config().await else {
-            continue;
+        let metadata = match repo.load_dataset_config().await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    event = "dataset.entry.skipped",
+                    dataset_id = %dataset_id,
+                    error_kind = error.kind(),
+                    diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
+                    "unreadable dataset ignored"
+                );
+                continue;
+            }
         };
         let roles = actor_roles(&metadata, &actor);
         if roles.is_empty() && !state.is_bootstrap_admin(&actor.user_id) {
             continue;
         }
+        let total_images = match repo.image_count().await {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(
+                    event = "dataset.image_count.failed",
+                    dataset_id = %dataset_id,
+                    error_kind = error.kind(),
+                    diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
+                    "could not count dataset images"
+                );
+                0
+            }
+        };
         summaries.push(DatasetSummary {
             dataset_id: metadata.dataset_id,
             name: metadata.name,
             roles,
-            total_images: repo.image_count().await.unwrap_or_default(),
+            total_images,
         });
     }
     Ok(Json(summaries))
@@ -454,6 +566,15 @@ async fn update_dataset_config(
     metadata.prelabel_configs = request.prelabel_configs;
     metadata.updated_at = labello_domain::now();
     repo.save_dataset(&metadata).await?;
+    tracing::info!(
+        event = "dataset.configuration.updated",
+        dataset_id = %dataset_id,
+        actor_user_id = %actor.user_id,
+        task_count = metadata.tasks.len(),
+        class_count = metadata.label_classes.len(),
+        image_root_count = metadata.image_roots.len(),
+        "dataset configuration updated"
+    );
     Ok(Json(config_response(metadata)))
 }
 
@@ -466,7 +587,27 @@ async fn ingest_dataset(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    Ok(Json(storage_ingest_to_client(repo.ingest_images().await?)))
+    tracing::info!(
+        event = "ingest.started",
+        dataset_id = %dataset_id,
+        actor_user_id = %actor.user_id,
+        mode = "synchronous",
+        "dataset ingest started"
+    );
+    let started = std::time::Instant::now();
+    let report = storage_ingest_to_client(repo.ingest_images().await?);
+    tracing::info!(
+        event = "ingest.completed",
+        dataset_id = %dataset_id,
+        mode = "synchronous",
+        latency_ms = started.elapsed().as_millis() as u64,
+        discovered_files = report.discovered_files,
+        new_images = report.new_images,
+        duplicate_files = report.duplicate_files.len(),
+        unreadable_files = report.unreadable_files.len(),
+        "dataset ingest completed"
+    );
+    Ok(Json(report))
 }
 
 async fn start_ingest_job(
@@ -486,20 +627,66 @@ async fn start_ingest_job(
         error: None,
     };
     state.put_ingest_job(job.clone()).await;
+    tracing::info!(
+        event = "ingest.started",
+        dataset_id = %dataset_id,
+        job_id = %job.job_id,
+        actor_user_id = %actor.user_id,
+        mode = "background",
+        "dataset ingest started"
+    );
 
     let state_for_job = state.clone();
     let job_for_task = job.clone();
     let repo_for_job = repo.clone();
+    let started = std::time::Instant::now();
+    let ingest_task = tokio::spawn(async move { repo_for_job.ingest_images().await });
     tokio::spawn(async move {
         let mut finished = job_for_task;
-        match repo_for_job.ingest_images().await {
-            Ok(report) => {
+        match ingest_task.await {
+            Ok(Ok(report)) => {
                 finished.status = IngestJobStatus::Completed;
-                finished.report = Some(storage_ingest_to_client(report));
+                let report = storage_ingest_to_client(report);
+                tracing::info!(
+                    event = "ingest.completed",
+                    dataset_id = %finished.dataset_id,
+                    job_id = %finished.job_id,
+                    mode = "background",
+                    latency_ms = started.elapsed().as_millis() as u64,
+                    discovered_files = report.discovered_files,
+                    new_images = report.new_images,
+                    duplicate_files = report.duplicate_files.len(),
+                    unreadable_files = report.unreadable_files.len(),
+                    "dataset ingest completed"
+                );
+                finished.report = Some(report);
+            }
+            Ok(Err(error)) => {
+                finished.status = IngestJobStatus::Failed;
+                finished.error = Some("ingest failed".to_string());
+                tracing::error!(
+                    event = "ingest.failed",
+                    dataset_id = %finished.dataset_id,
+                    job_id = %finished.job_id,
+                    error_kind = error.kind(),
+                    diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
+                    latency_ms = started.elapsed().as_millis() as u64,
+                    "dataset ingest failed"
+                );
             }
             Err(error) => {
                 finished.status = IngestJobStatus::Failed;
-                finished.error = Some(error.to_string());
+                finished.error = Some("ingest task failed".to_string());
+                tracing::error!(
+                    event = "ingest.failed",
+                    dataset_id = %finished.dataset_id,
+                    job_id = %finished.job_id,
+                    error_kind = "background_task",
+                    cancelled = error.is_cancelled(),
+                    panic = error.is_panic(),
+                    latency_ms = started.elapsed().as_millis() as u64,
+                    "dataset ingest task failed"
+                );
             }
         }
         state_for_job.put_ingest_job(finished).await;
@@ -599,7 +786,17 @@ async fn upload_images(
     } else {
         labello_storage::IngestReport::default()
     };
-    Ok(Json(storage_ingest_to_client(report)))
+    let report = storage_ingest_to_client(report);
+    tracing::info!(
+        event = "upload.completed",
+        dataset_id = %dataset_id,
+        actor_user_id = %actor.user_id,
+        written_files,
+        ingest_requested = query.ingest,
+        new_images = report.new_images,
+        "image upload completed"
+    );
+    Ok(Json(report))
 }
 
 async fn create_snapshot(
@@ -611,7 +808,15 @@ async fn create_snapshot(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    Ok(Json(repo.create_snapshot().await?))
+    let snapshot = repo.create_snapshot().await?;
+    tracing::info!(
+        event = "snapshot.created",
+        dataset_id = %dataset_id,
+        actor_user_id = %actor.user_id,
+        snapshot_id = %snapshot.snapshot_id,
+        "dataset snapshot created"
+    );
+    Ok(Json(snapshot))
 }
 
 async fn list_snapshots(

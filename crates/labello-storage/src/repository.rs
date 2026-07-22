@@ -159,8 +159,14 @@ impl DatasetRepository {
             Ok(manifest)
         }
         .await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_dir_all(&temporary).await;
+        if result.is_err()
+            && let Err(error) = tokio::fs::remove_dir_all(&temporary).await
+        {
+            tracing::warn!(
+                event = "snapshot.cleanup.failed",
+                error_kind = %error.kind(),
+                "could not remove incomplete snapshot"
+            );
         }
         result
     }
@@ -433,6 +439,13 @@ impl DatasetRepository {
         }
         let state = rebuild_state(image_id.clone(), &events)?;
         if cached.is_some() || !events.is_empty() {
+            tracing::warn!(
+                event = "image_state.cache.rebuilt",
+                image_id = %image_id,
+                cached = cached.is_some(),
+                event_sequence,
+                "image state cache rebuilt from events"
+            );
             write_json_atomic(&path, &state).await?;
         }
         Ok(state)

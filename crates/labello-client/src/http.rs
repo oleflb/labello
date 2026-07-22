@@ -5,10 +5,16 @@ use labello_domain::{
     ReviewRecord, TaskDefinition, UserAccount, UserId,
 };
 use reqwest::{Method, RequestBuilder, Response, header::CONTENT_TYPE};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use url::Url;
 
 const STATS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    error: String,
+}
 
 use crate::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
@@ -19,7 +25,7 @@ use crate::{
     ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum AuthMode {
     #[default]
     Anonymous,
@@ -92,17 +98,61 @@ impl HttpLabelloApi {
         Ok(request)
     }
 
-    async fn json<T: DeserializeOwned>(response: Response) -> ClientResult<T> {
+    async fn ensure_success(response: Response) -> ClientResult<Response> {
         let status = response.status();
         if status.is_success() {
-            Ok(response.json().await?)
-        } else {
-            let message = response.text().await.unwrap_or_else(|_| status.to_string());
-            Err(ClientError::Api {
-                status: status.as_u16(),
-                message,
-            })
+            return Ok(response);
         }
+        let request_id = response_request_id(&response);
+        let body = response.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<ErrorBody>(&body)
+            .ok()
+            .map(|body| body.error)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| {
+                if body.trim().is_empty() {
+                    status.to_string()
+                } else {
+                    body
+                }
+            });
+        let message = match &request_id {
+            Some(request_id) => format!("{message} (request ID: {request_id})"),
+            None => message,
+        };
+        if status.is_server_error() {
+            tracing::error!(
+                event = "http.client.failed",
+                outcome = "api_error",
+                status = status.as_u16(),
+                request_id = request_id.as_deref().unwrap_or("<missing>"),
+                "API request failed"
+            );
+        } else if status == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::debug!(
+                event = "http.client.rejected",
+                outcome = "api_error",
+                status = status.as_u16(),
+                request_id = request_id.as_deref().unwrap_or("<missing>"),
+                "API request requires authentication"
+            );
+        } else {
+            tracing::warn!(
+                event = "http.client.rejected",
+                outcome = "api_error",
+                status = status.as_u16(),
+                request_id = request_id.as_deref().unwrap_or("<missing>"),
+                "API request was rejected"
+            );
+        }
+        Err(ClientError::Api {
+            status: status.as_u16(),
+            message,
+        })
+    }
+
+    async fn json<T: DeserializeOwned>(response: Response) -> ClientResult<T> {
+        Ok(Self::ensure_success(response).await?.json().await?)
     }
 
     async fn send_json<T: DeserializeOwned, B: Serialize + ?Sized>(
@@ -264,13 +314,7 @@ impl DatasetApi for HttpLabelloApi {
                 )?
                 .send()
                 .await?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(ClientError::Api {
-                    status: status.as_u16(),
-                    message: response.text().await.unwrap_or_else(|_| status.to_string()),
-                });
-            }
+            let response = Self::ensure_success(response).await?;
             let media_type = response
                 .headers()
                 .get(CONTENT_TYPE)
@@ -430,14 +474,7 @@ impl ImageApi for HttpLabelloApi {
                 )?
                 .send()
                 .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let message = response.text().await.unwrap_or_else(|_| status.to_string());
-                return Err(ClientError::Api {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+            let response = Self::ensure_success(response).await?;
             let media_type = response
                 .headers()
                 .get(CONTENT_TYPE)
@@ -468,14 +505,7 @@ impl ImageApi for HttpLabelloApi {
                 )?
                 .send()
                 .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let message = response.text().await.unwrap_or_else(|_| status.to_string());
-                return Err(ClientError::Api {
-                    status: status.as_u16(),
-                    message,
-                });
-            }
+            let response = Self::ensure_success(response).await?;
             let width = preview_dimension(response.headers(), "x-image-width")?;
             let height = preview_dimension(response.headers(), "x-image-height")?;
             Ok(ImagePreview {
@@ -873,17 +903,17 @@ impl AuthApi for HttpLabelloApi {
     fn logout<'a>(&'a self) -> crate::ApiFuture<'a, ()> {
         Box::pin(async move {
             let response = self.request(Method::POST, "/logout")?.send().await?;
-            if response.status().is_success() {
-                Ok(())
-            } else {
-                let status = response.status();
-                Err(ClientError::Api {
-                    status: status.as_u16(),
-                    message: response.text().await.unwrap_or_else(|_| status.to_string()),
-                })
-            }
+            Self::ensure_success(response).await.map(|_| ())
         })
     }
+}
+
+fn response_request_id(response: &Response) -> Option<String> {
+    response
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 impl UserApi for HttpLabelloApi {

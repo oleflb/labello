@@ -50,12 +50,35 @@ pub(crate) async fn assign_next(
             .reclaim_assignment(&actor.user_id, &assignment_id, &query.task_id, kind.clone())
             .await?
     {
+        tracing::debug!(
+            event = "assignment.reclaimed",
+            dataset_id = %dataset_id,
+            user_id = %actor.user_id,
+            assignment_id = %assignment.assignment_id,
+            "assignment reclaimed"
+        );
         return Ok(Json(Some(assignment)));
     }
-    Ok(Json(
-        repo.assign_next_image(&actor.user_id, &query.task_id, kind)
-            .await?,
-    ))
+    let assignment = repo
+        .assign_next_image(&actor.user_id, &query.task_id, kind)
+        .await?;
+    if let Some(assignment) = &assignment {
+        tracing::debug!(
+            event = "assignment.claimed",
+            dataset_id = %dataset_id,
+            user_id = %actor.user_id,
+            assignment_id = %assignment.assignment_id,
+            "assignment claimed"
+        );
+    } else {
+        tracing::debug!(
+            event = "assignment.unavailable",
+            dataset_id = %dataset_id,
+            user_id = %actor.user_id,
+            "no assignment available"
+        );
+    }
+    Ok(Json(assignment))
 }
 
 pub(crate) async fn release_assignment(
@@ -67,16 +90,23 @@ pub(crate) async fn release_assignment(
     request.image_id.validate_path_segment()?;
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
-    Ok(Json(
-        repo.release_assignment(
+    let assignment = repo
+        .release_assignment(
             &actor.user_id,
             &request.assignment_id,
             &request.image_id,
             &request.task_id,
             request.kind,
         )
-        .await?,
-    ))
+        .await?;
+    tracing::debug!(
+        event = "assignment.released",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "assignment released"
+    );
+    Ok(Json(assignment))
 }
 
 pub(crate) async fn complete_assignment(
@@ -93,16 +123,23 @@ pub(crate) async fn complete_assignment(
     }
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
-    Ok(Json(
-        repo.complete_assignment(
+    let assignment = repo
+        .complete_assignment(
             &actor.user_id,
             &request.assignment_id,
             &request.image_id,
             &request.task_id,
             request.kind,
         )
-        .await?,
-    ))
+        .await?;
+    tracing::debug!(
+        event = "assignment.completed",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "assignment completed"
+    );
+    Ok(Json(assignment))
 }
 
 pub(crate) async fn get_image_state(
@@ -273,8 +310,10 @@ pub(crate) async fn apply_annotation_batch(
         }
         validate_payload(&metadata, &image_id, payload)?;
     }
-    Ok(Json(
-        repo.apply_annotation_batch(
+    let mutation_count = request.payloads.len();
+    let complete = request.complete;
+    let image_state = repo
+        .apply_annotation_batch(
             &actor.user_id,
             AssignmentContext {
                 assignment_id: &assignment.assignment_id,
@@ -285,8 +324,16 @@ pub(crate) async fn apply_annotation_batch(
             request.payloads,
             request.complete,
         )
-        .await?,
-    ))
+        .await?;
+    tracing::debug!(
+        event = "annotation.batch.saved",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        mutation_count,
+        complete,
+        "annotation batch saved"
+    );
+    Ok(Json(image_state))
 }
 
 pub(crate) async fn append_admin_repair_event(
@@ -398,8 +445,8 @@ pub(crate) async fn record_review(
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Review)?;
-    Ok(Json(
-        repo.record_review_for_assignment(
+    let image_state = repo
+        .record_review_for_assignment(
             &actor.user_id,
             AssignmentContext {
                 assignment_id: &assignment.assignment_id,
@@ -409,8 +456,15 @@ pub(crate) async fn record_review(
             },
             review,
         )
-        .await?,
-    ))
+        .await?;
+    tracing::debug!(
+        event = "review.recorded",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "review recorded"
+    );
+    Ok(Json(image_state))
 }
 
 pub(crate) async fn record_correction(
@@ -427,8 +481,8 @@ pub(crate) async fn record_correction(
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Reviewer)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Review)?;
-    Ok(Json(
-        repo.correct_review_annotation(
+    let event = repo
+        .correct_review_annotation(
             &actor.user_id,
             AssignmentContext {
                 assignment_id: &assignment.assignment_id,
@@ -442,8 +496,15 @@ pub(crate) async fn record_correction(
             request.geometry,
             request.reason,
         )
-        .await?,
-    ))
+        .await?;
+    tracing::debug!(
+        event = "correction.recorded",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "review correction recorded"
+    );
+    Ok(Json(event))
 }
 
 pub(crate) async fn record_adjudication(
@@ -505,6 +566,13 @@ pub(crate) async fn record_adjudication(
             true,
         )
         .await?;
+    tracing::debug!(
+        event = "adjudication.recorded",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "adjudication recorded"
+    );
     Ok(Json(
         events
             .into_iter()
@@ -562,7 +630,16 @@ pub(crate) async fn offline_sync(
         }
     }
     let repo = state.repo(&dataset_id)?;
-    Ok(Json(repo.sync_offline_events(request).await?))
+    let result = repo.sync_offline_events(request).await?;
+    tracing::info!(
+        event = "offline_sync.completed",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        merged_events = result.merged_events,
+        conflict_count = result.conflicts.len(),
+        "offline synchronization completed"
+    );
+    Ok(Json(result))
 }
 
 pub(crate) async fn stats(

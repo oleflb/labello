@@ -1551,6 +1551,10 @@ impl crate::app::LabelloApp {
     }
 
     fn storage_failure(&mut self, error: String) {
+        tracing::warn!(
+            event = "browser_storage.failed",
+            "browser persistence operation failed"
+        );
         self.runtime.storage_error = Some(format!("Browser storage failed: {error}"));
     }
 }

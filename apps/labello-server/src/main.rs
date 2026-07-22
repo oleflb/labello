@@ -5,7 +5,9 @@ use labello_api::{ApiState, GithubOAuthConfig, router};
 use labello_domain::UserId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+mod logging;
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerConfig {
     bind: String,
@@ -17,14 +19,14 @@ struct ServerConfig {
     github_oauth: Option<GithubOAuthFileConfig>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DevelopmentAuthConfig {
     enabled: bool,
     token: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GithubOAuthFileConfig {
     client_id: String,
@@ -54,9 +56,7 @@ impl Default for ServerConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    logging::init()?;
 
     let mut config = load_or_create_config()?;
     if let Some(root) = std::env::var_os("LABELLO_DATASETS_ROOT") {
@@ -78,12 +78,41 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bind: SocketAddr = config.bind.parse().context("invalid server bind address")?;
+    let development_auth_enabled = config.development_auth.enabled;
+    let github_oauth_enabled = config.github_oauth.is_some();
+    let session_cookie_secure = config.session_cookie_secure;
+    let browser_origin_count = config.browser_origins.len();
+    let bootstrap_admin_count = config.bootstrap_admins.len();
     let state = build_state(config)?;
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!(%bind, "labello server listening");
-    axum::serve(listener, router(state)).await?;
+    tracing::info!(
+        event = "server.started",
+        version = env!("CARGO_PKG_VERSION"),
+        %bind,
+        development_auth_enabled,
+        github_oauth_enabled,
+        session_cookie_secure,
+        browser_origin_count,
+        bootstrap_admin_count,
+        "labello server listening"
+    );
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!(event = "server.stopped", "labello server stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!(event = "server.shutdown.started", "shutdown requested"),
+        Err(error) => tracing::error!(
+            event = "server.shutdown.signal_failed",
+            error = %error,
+            "could not install shutdown signal handler"
+        ),
+    }
 }
 
 fn load_or_create_config() -> anyhow::Result<ServerConfig> {
@@ -159,13 +188,15 @@ token = "unused"
             .replace("browserOrigins", "allowedOrigins")
             .replace("developmentAuth", "devAuth");
         let error = toml::from_str::<ServerConfig>(&old)
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
         assert!(error.contains("unknown field"), "{error}");
 
         let missing = CONFIG.replace("sessionCookieSecure = true\n", "");
         let error = toml::from_str::<ServerConfig>(&missing)
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
         assert!(
             error.contains("missing field `sessionCookieSecure`"),
@@ -180,7 +211,8 @@ token = "unused"
             "token = \"unused\"\ndefaultUserId = \"admin\"\ndefaultRole = \"data_admin\"",
         );
         let error = toml::from_str::<ServerConfig>(&old)
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
         assert!(error.contains("unknown field"), "{error}");
     }

@@ -19,7 +19,7 @@ impl Default for GithubOAuthEndpoints {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubOAuthConfig {
     pub client_id: String,
@@ -40,12 +40,12 @@ impl GithubOAuthConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct GithubTokenResponse {
     access_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct GithubUserResponse {
     id: u64,
     login: String,

@@ -14,12 +14,24 @@ pub fn actor_from_headers(state: &ApiState, headers: &HeaderMap) -> ApiResult<Ac
         });
     }
     if !state.dev_auth_enabled() {
+        tracing::debug!(
+            event = "auth.denied",
+            auth_mode = "session",
+            reason = "login_required",
+            "authentication required"
+        );
         return Err(ApiError::Unauthorized("login required".to_string()));
     }
     if let Some(expected) = state.dev_auth_token() {
         let provided = header(headers, "x-dev-token")
             .ok_or_else(|| ApiError::Unauthorized("missing x-dev-token header".to_string()))?;
         if provided != expected {
+            tracing::warn!(
+                event = "auth.denied",
+                auth_mode = "development",
+                reason = "invalid_token",
+                "development authentication denied"
+            );
             return Err(ApiError::Unauthorized(
                 "invalid x-dev-token header".to_string(),
             ));
@@ -80,9 +92,18 @@ pub fn ensure_dataset_role(
         &metadata.role_assignments,
         &metadata.dataset_id,
         &actor.user_id,
-        role,
+        role.clone(),
     )
-    .map_err(|error| ApiError::Unauthorized(error.to_string()))
+    .map_err(|error| {
+        tracing::warn!(
+            event = "authorization.denied",
+            user_id = %actor.user_id,
+            dataset_id = %metadata.dataset_id,
+            required_role = %role,
+            "dataset role required"
+        );
+        ApiError::Unauthorized(error.to_string())
+    })
 }
 
 pub fn has_dataset_role(metadata: &DatasetMetadata, user_id: &UserId, role: &DatasetRole) -> bool {
@@ -102,6 +123,13 @@ pub fn ensure_any_dataset_role(metadata: &DatasetMetadata, actor: &Actor) -> Api
     if allowed {
         Ok(())
     } else {
+        tracing::warn!(
+            event = "authorization.denied",
+            user_id = %actor.user_id,
+            dataset_id = %metadata.dataset_id,
+            reason = "no_dataset_role",
+            "dataset access denied"
+        );
         Err(ApiError::Unauthorized(format!(
             "user {} has no role for dataset {}",
             actor.user_id, metadata.dataset_id
@@ -117,6 +145,13 @@ pub fn ensure_bootstrap_admin(
     if state.is_bootstrap_admin(&actor.user_id) {
         Ok(())
     } else {
+        tracing::warn!(
+            event = "authorization.denied",
+            user_id = %actor.user_id,
+            reason = "bootstrap_admin_required",
+            action,
+            "bootstrap administrator access denied"
+        );
         Err(ApiError::Unauthorized(format!(
             "user {} cannot {action}",
             actor.user_id

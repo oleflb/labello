@@ -62,6 +62,38 @@ pub enum StorageError {
     BackgroundTask(String),
 }
 
+impl StorageError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "storage_io",
+            Self::Json { .. } => "storage_json",
+            Self::TomlDecode { .. } => "storage_toml_decode",
+            Self::TomlEncode { .. } => "storage_toml_encode",
+            Self::Image { .. } => "storage_image",
+            Self::Domain(_) => "storage_domain",
+            Self::NotFound(_) => "storage_not_found",
+            Self::AlreadyExists(_) => "storage_already_exists",
+            Self::OutsideDatasetRoot(_) => "storage_outside_dataset_root",
+            Self::Unauthorized(_) => "storage_unauthorized",
+            Self::InvalidAssignment(_) => "storage_invalid_assignment",
+            Self::InvalidCorrection(_) => "storage_invalid_correction",
+            Self::AssignmentConflict(_) => "storage_assignment_conflict",
+            Self::BackgroundTask(_) => "storage_background_task",
+        }
+    }
+
+    pub fn safe_diagnostic(&self) -> Option<String> {
+        match self {
+            Self::Io { source, .. } => Some(format!("{}: {source}", source.kind())),
+            Self::Json { source, .. } => Some(source.to_string()),
+            Self::TomlDecode { source, .. } => Some(source.message().to_string()),
+            Self::TomlEncode { source, .. } => Some(source.to_string()),
+            Self::Image { source, .. } => Some(source.to_string()),
+            _ => None,
+        }
+    }
+}
+
 pub type StorageResult<T> = Result<T, StorageError>;
 
 pub(crate) trait PathIo<T> {

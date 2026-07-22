@@ -21,6 +21,7 @@ pub(crate) async fn github_login(
         .ok_or_else(|| ApiError::BadRequest("github oauth is not configured".to_string()))?;
     let return_to = validate_return_to(&state, query.return_to.as_deref())?;
     let flow = state.server_store.create_oauth_flow(return_to)?;
+    tracing::info!(event = "auth.oauth.started", "GitHub OAuth flow started");
     let mut response = Redirect::temporary(&config.authorization_url(&flow.state)?).into_response();
     response.headers_mut().append(
         SET_COOKIE,
@@ -58,6 +59,11 @@ pub(crate) async fn github_callback(
         .await?,
     )?;
     let token = state.create_session(account.user_id.clone())?;
+    tracing::info!(
+        event = "auth.oauth.completed",
+        user_id = %account.user_id,
+        "GitHub OAuth login completed"
+    );
     let mut response = Redirect::to(&return_to).into_response();
     response.headers_mut().append(
         SET_COOKIE,

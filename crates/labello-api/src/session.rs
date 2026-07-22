@@ -62,7 +62,14 @@ impl ServerStore {
         };
         let (data, load_error) = match loaded {
             Ok(data) => (data, None),
-            Err(error) => (StoreData::default(), Some(error)),
+            Err(error) => {
+                tracing::error!(
+                    event = "auth.store.load_failed",
+                    error_kind = "invalid_or_unreadable",
+                    "could not load authentication store"
+                );
+                (StoreData::default(), Some(error))
+            }
         };
         Self {
             path: Arc::new(path),
@@ -197,9 +204,13 @@ impl ServerStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, StoreData> {
-        self.data
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.data.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                event = "auth.store.lock_poisoned",
+                "authentication store lock recovered after panic"
+            );
+            poisoned.into_inner()
+        })
     }
 
     fn save(&self, data: &StoreData) -> ApiResult<()> {

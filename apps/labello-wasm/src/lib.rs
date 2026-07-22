@@ -6,9 +6,28 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn start() {
+    let mut logging = tracing_wasm::WASMLayerConfigBuilder::new();
+    logging
+        .set_report_logs_in_timings(false)
+        .set_console_config(tracing_wasm::ConsoleConfig::ReportWithoutConsoleColor)
+        .set_max_level(if cfg!(debug_assertions) {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::WARN
+        });
+    tracing_wasm::set_as_global_default_with_config(logging.build());
     console_error_panic_hook::set_once();
+    tracing::info!(
+        event = "wasm.started",
+        version = env!("CARGO_PKG_VERSION"),
+        "Labello WASM starting"
+    );
     wasm_bindgen_futures::spawn_local(async {
         if let Err(error) = run().await {
+            tracing::error!(
+                event = "wasm.startup.failed",
+                "Labello WASM failed to start"
+            );
             web_sys::console::error_1(&error);
             show_startup_error(&error);
         }

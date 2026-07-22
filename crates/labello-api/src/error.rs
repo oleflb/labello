@@ -41,7 +41,54 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match &self {
+        let status = self.status();
+        let error_kind = self.kind();
+        if status.is_server_error() {
+            match &self {
+                ApiError::Storage(error) => tracing::error!(
+                    event = "api.error",
+                    error_kind,
+                    diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
+                    "request failed"
+                ),
+                ApiError::Http(error) => tracing::error!(
+                    event = "api.error",
+                    error_kind,
+                    timeout = error.is_timeout(),
+                    connect = error.is_connect(),
+                    upstream_status = error.status().map(|status| status.as_u16()),
+                    "request failed"
+                ),
+                ApiError::Json(error) => tracing::error!(
+                    event = "api.error",
+                    error_kind,
+                    line = error.line(),
+                    column = error.column(),
+                    "request failed"
+                ),
+                _ => tracing::error!(event = "api.error", error_kind, "request failed"),
+            }
+        } else {
+            tracing::debug!(
+                event = "api.request.rejected",
+                error_kind,
+                status = status.as_u16(),
+                "request rejected"
+            );
+        }
+        (
+            status,
+            Json(ErrorBody {
+                error: self.public_message(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+impl ApiError {
+    fn status(&self) -> StatusCode {
+        match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::InvalidId(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
@@ -69,14 +116,42 @@ impl IntoResponse for ApiError {
             | ApiError::Http(_)
             | ApiError::Internal(_)
             | ApiError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (
-            status,
-            Json(ErrorBody {
-                error: self.to_string(),
-            }),
-        )
-            .into_response()
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::Unauthorized(_) => "unauthorized",
+            Self::NotFound(_) => "not_found",
+            Self::InvalidId(_) => "invalid_id",
+            Self::Storage(error) => error.kind(),
+            Self::Http(_) => "http_client",
+            Self::Internal(_) => "internal",
+            Self::Json(_) => "serialization",
+        }
+    }
+
+    fn public_message(&self) -> String {
+        match self {
+            Self::Storage(labello_storage::StorageError::NotFound(_)) => "not found".to_string(),
+            Self::Storage(labello_storage::StorageError::AlreadyExists(_)) => {
+                "already exists".to_string()
+            }
+            Self::Storage(labello_storage::StorageError::OutsideDatasetRoot(_)) => {
+                "path is outside the dataset root".to_string()
+            }
+            Self::Storage(labello_storage::StorageError::Unauthorized(_)) => {
+                "unauthorized".to_string()
+            }
+            Self::Storage(labello_storage::StorageError::InvalidAssignment(message))
+            | Self::Storage(labello_storage::StorageError::InvalidCorrection(message))
+            | Self::Storage(labello_storage::StorageError::AssignmentConflict(message)) => {
+                message.clone()
+            }
+            error if error.status().is_server_error() => "internal server error".to_string(),
+            error => error.to_string(),
+        }
     }
 }
 

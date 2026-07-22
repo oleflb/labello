@@ -56,6 +56,10 @@ impl DatasetRepository {
                 .await
                 .with_path(&scan_root)?
             {
+                tracing::warn!(
+                    event = "ingest.root.unreadable",
+                    "configured image root does not exist"
+                );
                 report
                     .unreadable_files
                     .push(self.relative_path_lossy(&scan_root));
@@ -65,7 +69,16 @@ impl DatasetRepository {
 
             for entry in WalkDir::new(&scan_root)
                 .into_iter()
-                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry
+                        .inspect_err(|_| {
+                            tracing::warn!(
+                                event = "ingest.traversal.failed",
+                                "could not traverse an image directory entry"
+                            );
+                        })
+                        .ok()
+                })
                 .filter(|e| e.file_type().is_file())
             {
                 let path = entry.path().to_path_buf();
@@ -115,7 +128,13 @@ impl DatasetRepository {
                             report.new_images += 1;
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "ingest.image.unreadable",
+                            error_kind = error.kind(),
+                            diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
+                            "could not read image"
+                        );
                         preserve_paths.insert(relative_path.clone());
                         report.unreadable_files.push(relative_path);
                     }
