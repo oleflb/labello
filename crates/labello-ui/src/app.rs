@@ -1098,11 +1098,18 @@ impl LabelloApp {
     }
 
     pub(crate) fn submit_and_advance(&mut self) {
-        if self.view != AppView::Annotate || self.loading.saving || self.assignment.is_none() {
+        if self.view != AppView::Annotate
+            || self.loading.saving
+            || (self.assignment.is_none() && self.runtime.api.is_some())
+        {
             return;
         }
         if let Some(issue) = self.submission_issue() {
             self.runtime.error = Some(issue);
+            return;
+        }
+        if self.runtime.api.is_none() {
+            self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
         self.pending_transition = Some(PendingTransition::NextAssignment);
@@ -1110,7 +1117,11 @@ impl LabelloApp {
     }
 
     pub(crate) fn skip_assignment(&mut self) {
-        if self.assignment.is_none() || self.loading.saving {
+        if self.loading.saving || (self.assignment.is_none() && self.runtime.api.is_some()) {
+            return;
+        }
+        if self.runtime.api.is_none() {
+            self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
         self.pending_transition = Some(PendingTransition::NextAssignment);

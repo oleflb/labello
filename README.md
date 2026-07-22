@@ -221,20 +221,20 @@ The output is written to `apps/labello-wasm/dist`. The API health endpoint is
 
 ### GUI Inspection
 
-On Linux, install [egui-mcp](https://github.com/dijdzv/egui-mcp) and run the
+Install [egui_mcp](https://github.com/rerun-io/kittest_inspector) and run the
 native inspector from the repository root:
 
 ```sh
-cargo install egui-mcp-server
-cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+cargo install egui_mcp --locked
+EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
 The repository's `opencode.json` configures the `egui` MCP server. Restart
 OpenCode after changing that configuration. The inspector exposes the shared
-egui accessibility tree but does not connect to the Labello API; use Chromium
+egui accessibility tree and accepts inspection input after attaching, but does
+not connect to the Labello API; use Chromium
 to validate actual WASM startup, browser behavior, and responsive rendering.
-See the [inspector README](dev/egui-mcp-inspector/README.md) for current
-compatibility limitations.
+See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
 ## Production Notes
 

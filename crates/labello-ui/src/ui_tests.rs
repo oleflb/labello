@@ -1009,6 +1009,29 @@ fn setup_recommends_a_single_continue_work_action() {
 }
 
 #[test]
+fn demo_submit_and_skip_advance_images() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 780.0))
+        .build_eframe(|_| LabelloApp::default());
+    assert_eq!(
+        harness.state().current.as_ref().unwrap().image.file_name,
+        "demo_1.jpg"
+    );
+
+    click(&mut harness, "Submit & next");
+    assert_eq!(
+        harness.state().current.as_ref().unwrap().image.file_name,
+        "demo_2.jpg"
+    );
+
+    click(&mut harness, "Skip");
+    assert_eq!(
+        harness.state().current.as_ref().unwrap().image.file_name,
+        "demo_3.jpg"
+    );
+}
+
+#[test]
 fn skip_releases_then_claims_another_assignment() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());

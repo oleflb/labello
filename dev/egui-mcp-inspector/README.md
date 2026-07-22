@@ -1,22 +1,17 @@
 # Labello egui MCP Inspector
 
-This standalone development app exposes Labello's deterministic demo UI to
-`egui-mcp-server` through Linux AT-SPI. It is intentionally outside the main
-Cargo workspace and does not connect to the Labello API.
+This standalone development app exposes Labello's deterministic demo UI through
+eframe's inspection protocol. It is intentionally outside the main Cargo
+workspace and does not connect to the Labello API.
 
 Run it from the repository root:
 
 ```sh
-cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+cargo install egui_mcp --locked
+EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
 Restart OpenCode after changing the repository's `opencode.json`. With the
-inspector running, the `egui` MCP tools can inspect the accessibility tree.
-
-`serve-mcp.sh` temporarily enables the AT-SPI screen-reader flag required by
-AccessKit 0.24 and restores its previous disabled state when the server exits.
-
-`egui-mcp-client` is not embedded because version 0.0.5 depends on egui 0.33,
-while Labello uses egui 0.35. Use external screenshots for visual comparison.
-That server version also parses AccessKit node IDs as `u64`, while AccessKit
-0.24 publishes `u128` IDs, so element-addressed MCP actions currently fail.
+inspector running, call the MCP `attach` tool, then inspect or drive the UI.
+Inspection binds only to `127.0.0.1:5719` by default and has no authentication;
+do not expose that port to the network.

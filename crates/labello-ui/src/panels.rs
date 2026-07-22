@@ -120,7 +120,7 @@ impl LabelloApp {
         if !self.work_view() {
             return;
         }
-        let ready = self.assignment.is_some()
+        let ready = (self.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
             && self.pending_transition.is_none();
@@ -174,7 +174,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
-        let ready = self.assignment.is_some()
+        let ready = (self.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
             && self.pending_transition.is_none();
@@ -265,7 +265,10 @@ impl LabelloApp {
         }
         ui.separator();
         ui.label(RichText::new("Assignment").strong());
-        if self.assignment.is_some() {
+        if self.runtime.api.is_none() {
+            ui.label("Demo image");
+            ui.small("Local demo state; changes are not persisted.");
+        } else if self.assignment.is_some() {
             ui.label("Active assignment");
             ui.small("Reserved for you until you submit or skip it.");
         } else if self.loading.image {

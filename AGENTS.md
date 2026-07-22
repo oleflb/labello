@@ -139,14 +139,14 @@ Use each tool for the behavior it can actually validate:
 Run the native inspector from the repository root:
 
 ```sh
-cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
 The inspector uses deterministic demo state and does not connect to the Labello
 API. Keep it isolated from production code. Restart OpenCode after changing
 `opencode.json` so the `egui` MCP server configuration reloads.
 
-See `dev/egui-mcp-inspector/README.md` for current compatibility limitations.
+See `dev/egui-mcp-inspector/README.md` for setup details.
 The inspector does not prove browser networking, cookies, persistence, or
 WebAssembly behavior.
 
