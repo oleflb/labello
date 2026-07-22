@@ -1546,6 +1546,18 @@ impl LabelloApp {
                 ctx.request_repaint();
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(spawn) = &self.runtime.native_task_spawner {
+                spawn(Box::pin(async move {
+                    let _ = tx.send(future.await);
+                    if let Some(ctx) = repaint_ctx {
+                        ctx.request_repaint();
+                    }
+                }));
+                return;
+            }
+        }
         #[cfg(all(not(target_arch = "wasm32"), test))]
         {
             let _ = tx.send(poll_ready(future));

@@ -3,6 +3,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -34,6 +40,51 @@ use crate::app::{
     RequestIdentity, SaveStatus, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_task_spawner_delivers_live_messages() {
+    let mut app = LabelloApp::default();
+    let scheduled = Rc::new(RefCell::new(None));
+    let scheduled_for_spawner = scheduled.clone();
+    app.set_native_task_spawner(move |future| {
+        *scheduled_for_spawner.borrow_mut() = Some(future);
+    });
+    let request = RequestIdentity {
+        auth_epoch: 0,
+        workspace_epoch: 0,
+        request_id: 1,
+        dataset_id: None,
+    };
+
+    app.spawn_message(request.clone(), async move {
+        UiMessage::RequestFailed {
+            request,
+            error: "scheduled".to_string(),
+        }
+    });
+
+    let task = scheduled
+        .borrow_mut()
+        .take()
+        .expect("native task was not scheduled");
+    poll_ready_task(task);
+    let message = app.runtime.rx.try_recv().unwrap();
+    assert!(matches!(
+        message,
+        UiMessage::RequestFailed { error, .. } if error == "scheduled"
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_ready_task(mut future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(())
+    ));
+}
 
 #[test]
 fn setup_create_open_and_admin_workflows_use_live_commands() {

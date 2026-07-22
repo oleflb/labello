@@ -4,6 +4,8 @@ use std::{
     rc::Rc,
     sync::mpsc,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{future::Future, pin::Pin};
 
 use eframe::egui::{self, TextureHandle};
 use labello_client::{
@@ -512,7 +514,12 @@ pub(crate) struct RuntimeState {
     pub storage_error: Option<String>,
     pub notice: Option<String>,
     pub persistence: crate::persistence::PersistenceState,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub native_task_spawner: Option<NativeTaskSpawner>,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+type NativeTaskSpawner = Rc<dyn Fn(Pin<Box<dyn Future<Output = ()> + 'static>>) + 'static>;
 
 impl RuntimeState {
     fn new() -> Self {
@@ -528,6 +535,8 @@ impl RuntimeState {
             storage_error: None,
             notice: None,
             persistence: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_task_spawner: None,
         }
     }
 }
@@ -860,6 +869,14 @@ impl LabelloApp {
         app.queue.clear();
         app.rebuild_http_api();
         app
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_native_task_spawner(
+        &mut self,
+        spawner: impl Fn(Pin<Box<dyn Future<Output = ()> + 'static>>) + 'static,
+    ) {
+        self.runtime.native_task_spawner = Some(Rc::new(spawner));
     }
 
     pub(crate) fn selected_task(&self) -> Option<&TaskDefinition> {

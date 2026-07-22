@@ -197,7 +197,8 @@ The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
 
 `dev/egui-mcp-inspector` is a standalone native development tool outside the
-main workspace. It reuses `labello-ui` with deterministic demo state.
+main workspace. It reuses `labello-ui` with deterministic demo state by default
+and has an opt-in live mode for local development servers.
 
 ## Development
 
@@ -229,11 +230,19 @@ cargo install egui_mcp --locked
 EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
+To inspect the native UI against a running local server, use development
+authentication and start the inspector in live mode:
+
+```sh
+EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --live
+```
+
 The repository's `opencode.json` configures the `egui` MCP server. Restart
 OpenCode after changing that configuration. The inspector exposes the shared
-egui accessibility tree and accepts inspection input after attaching, but does
-not connect to the Labello API; use Chromium
-to validate actual WASM startup, browser behavior, and responsive rendering.
+egui accessibility tree and accepts inspection input after attaching. Live
+mode can mutate real server data and is limited to development authentication;
+use a disposable development dataset. Use Chromium to validate actual WASM
+startup, browser behavior, cookies, and responsive rendering.
 See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
 ## Production Notes
@@ -254,8 +263,9 @@ See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
   not operational.
 - Prelabel configuration exists, but model execution currently returns
   placeholder suggestions.
-- There is no native desktop client or browser end-to-end test suite; the
-  native inspector is a development tool using demo state only.
+- There is no supported native desktop client or browser end-to-end test suite;
+  the native inspector is a development tool and its live mode omits
+  browser-only functionality.
 - Ingest jobs and some caches are process-local and do not survive restarts.
 
 The broader product requirements and planned behavior are documented in
