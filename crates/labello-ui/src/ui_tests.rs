@@ -739,6 +739,52 @@ fn keybindings_are_editable_and_persisted() {
 }
 
 #[test]
+fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = LabelloApp::default();
+    app.runtime.api = Some(api);
+    app.open_shortcut_settings();
+    app.shortcut_settings
+        .draft
+        .as_mut()
+        .unwrap()
+        .bindings
+        .get_mut(&labello_domain::UserAction::NextImage)
+        .unwrap()
+        .key = "Enter".to_string();
+    let draft = app.shortcut_settings.draft.clone();
+
+    app.request_keybindings_save();
+    let UiCommand::SaveKeybindings { request, .. } =
+        app.runtime.commands.pop_back().expect("save command")
+    else {
+        panic!("expected keybinding save command");
+    };
+    app.runtime
+        .tx
+        .send(UiMessage::KeybindingsSaved {
+            request,
+            result: Err("settings unavailable".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+
+    assert_eq!(app.shortcut_settings.draft, draft);
+    assert_eq!(
+        app.shortcut_settings.error.as_deref(),
+        Some("settings unavailable")
+    );
+    let harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 780.0))
+        .build_eframe(move |_| app);
+    assert!(
+        harness
+            .query_by_label("Could not save shortcuts: settings unavailable")
+            .is_some()
+    );
+}
+
+#[test]
 fn shortcut_settings_cancel_discards_the_draft() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
@@ -783,6 +829,43 @@ fn shortcut_settings_lock_editing_while_saving() {
             .unwrap_or_else(|| panic!("missing {label}"));
         assert!(control.accesskit_node().is_disabled(), "{label} is enabled");
     }
+}
+
+#[test]
+fn draft_recovery_modal_blocks_background_controls() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1500.0, 780.0))
+        .build_eframe(|_| LabelloApp::default());
+    let settings = harness
+        .query_all_by_label_contains("Settings")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("settings button")
+        .rect()
+        .center();
+    let metadata = SpyApi::new().metadata();
+    let identity = crate::persistence::StorageIdentity::new(
+        &harness.state().config.api_base_url,
+        harness.state().config.user_id.clone(),
+    )
+    .unwrap();
+    let draft = crate::persistence::AdminDraft::new(
+        &identity,
+        metadata.dataset_id.clone(),
+        &metadata,
+        &metadata,
+    );
+    harness.state_mut().runtime.persistence.recovery =
+        Some(crate::persistence::DraftRecovery::Admin(
+            Box::new(draft),
+            crate::persistence::DraftValidation::Valid,
+        ));
+    harness.step();
+    assert!(harness.query_by_label("Unsaved admin draft").is_some());
+
+    click_at(&mut harness, settings);
+
+    assert!(!harness.state().show_settings);
+    assert!(harness.state().runtime.persistence.recovery.is_some());
 }
 
 #[test]
@@ -1155,6 +1238,7 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_dataset_list();
     assert!(!app.loading.datasets);
+    assert!(app.datasets.summaries_error.is_some());
 
     saturate_command_queue(&mut app);
     app.setup.create_dataset_id = "queued-dataset".to_string();
@@ -1165,6 +1249,7 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_admin_dataset();
     assert!(!app.loading.admin);
+    assert!(app.admin_tools.load_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_admin_save();
@@ -1206,12 +1291,14 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_keybindings_save();
     assert!(!app.loading.keybindings);
+    assert!(app.shortcut_settings.error.is_some());
 
     app.view = AppView::Stats;
     saturate_command_queue(&mut app);
     app.request_stats();
     assert!(!app.loading.stats);
     assert!(app.datasets.active_stats_request.is_none());
+    assert!(app.datasets.stats_error.is_some());
 
     saturate_command_queue(&mut app);
     let session_request = test_request(&app, 90_001, None);
@@ -1455,6 +1542,166 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
         .expect("compact API URL field should retain its accessible label");
     assert!(compact_api_url.rect().height() <= 25.0);
     assert!(compact_api_url.rect().right() <= 390.5);
+}
+
+#[test]
+fn api_url_focus_loss_does_not_reconnect_and_enter_commits() {
+    let app = LabelloApp {
+        view: AppView::Setup,
+        ..Default::default()
+    };
+    let original_url = app.config.api_base_url.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 780.0))
+        .build_eframe(move |_| app);
+    let input = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
+        .next()
+        .expect("API URL field")
+        .rect()
+        .center();
+    click_at(&mut harness, input);
+    harness.state_mut().setup.api_base_url_draft = "not a URL".to_string();
+    harness.step();
+    let auth_epoch = harness.state().auth_epoch;
+
+    let datasets = harness.get_by_label("Datasets").rect().center();
+    click_at(&mut harness, datasets);
+    assert_eq!(harness.state().config.api_base_url, original_url);
+    assert_eq!(harness.state().auth_epoch, auth_epoch);
+    assert!(harness.query_by_label("Reconnect").is_some());
+
+    let input = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
+        .next()
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, input);
+    harness.key_press(egui::Key::Enter);
+    harness.step();
+    assert_eq!(harness.state().config.api_base_url, "not a URL");
+    assert!(harness.state().auth_epoch > auth_epoch);
+}
+
+#[test]
+fn dataset_states_distinguish_loading_and_stale_refresh_failure() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+    let summaries = harness.state().datasets.summaries.clone();
+
+    harness.state_mut().datasets.summaries.clear();
+    harness.state_mut().loading.datasets = true;
+    harness.step();
+    assert!(harness.query_by_label("Loading datasets...").is_some());
+    assert!(
+        harness
+            .query_by_label("No accessible datasets yet.")
+            .is_none()
+    );
+
+    harness.state_mut().loading.datasets = false;
+    harness.state_mut().datasets.summaries_error = Some("initial failure".to_string());
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Could not load datasets: initial failure")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("No accessible datasets yet.")
+            .is_none()
+    );
+
+    harness.state_mut().datasets.summaries = summaries.clone();
+    harness.state_mut().request_dataset_list();
+    let UiCommand::DatasetList { request } = harness
+        .state_mut()
+        .runtime
+        .commands
+        .pop_back()
+        .expect("dataset list command")
+    else {
+        panic!("expected dataset list command");
+    };
+    harness
+        .state_mut()
+        .runtime
+        .tx
+        .send(UiMessage::DatasetList {
+            request,
+            result: Err("dataset service unavailable".to_string()),
+        })
+        .unwrap();
+    harness
+        .state_mut()
+        .process_messages(&egui::Context::default());
+    harness.step();
+
+    assert_eq!(harness.state().datasets.summaries, summaries);
+    assert!(
+        harness
+            .query_by_label("Showing saved results. Refresh failed: dataset service unavailable")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Continue with Demo Dataset")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Retry").is_some());
+}
+
+#[test]
+fn failed_admin_navigation_stays_in_admin_with_page_retry() {
+    let api = Rc::new(SpyApi::new());
+    let metadata = api.metadata();
+    let mut app = base_live_app(api);
+    app.auth.options_checked = true;
+    app.auth.checked = true;
+    app.datasets.metadata = Some(metadata.clone());
+    let total_images = metadata.images.len();
+    app.datasets.summaries = vec![DatasetSummary {
+        dataset_id: metadata.dataset_id,
+        name: metadata.name,
+        roles: vec![DatasetRole::DataAdmin],
+        total_images,
+    }];
+
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Admin));
+    assert_eq!(app.view, AppView::Admin);
+    let UiCommand::LoadAdmin { request, .. } =
+        app.runtime.commands.pop_back().expect("admin load command")
+    else {
+        panic!("expected admin load command");
+    };
+    app.runtime
+        .tx
+        .send(UiMessage::AdminLoaded {
+            request,
+            result: Box::new(Err("admin service unavailable".to_string())),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert_eq!(app.view, AppView::Admin);
+    assert_eq!(
+        app.admin_tools.load_error.as_deref(),
+        Some("admin service unavailable")
+    );
+
+    let harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 780.0))
+        .build_eframe(move |_| app);
+    assert!(harness.query_by_label("Dataset Admin").is_some());
+    assert!(
+        harness
+            .query_by_label("Admin load failed: admin service unavailable")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Retry admin load").is_some());
+    assert!(harness.query_by_label("Retry image load").is_none());
 }
 
 #[test]
@@ -2801,6 +3048,35 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 }
 
 #[test]
+fn stats_initial_failure_hides_zero_metrics_but_refresh_failure_keeps_data() {
+    let mut app = LabelloApp {
+        view: AppView::Stats,
+        ..Default::default()
+    };
+    app.datasets.stats_error = Some("statistics unavailable".to_string());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 780.0))
+        .build_eframe(move |_| app);
+
+    assert!(
+        harness
+            .query_by_label("Statistics refresh failed: statistics unavailable")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Metric Images").is_none());
+
+    harness.state_mut().datasets.stats = stats(12);
+    harness.state_mut().datasets.last_stats_completion = Some(Instant::now());
+    harness.step();
+    assert!(harness.query_by_label("Metric Images").is_some());
+    assert!(
+        harness
+            .query_by_label("Statistics refresh failed: statistics unavailable")
+            .is_some()
+    );
+}
+
+#[test]
 fn command_and_message_budgets_preserve_frame_responsiveness() {
     let api = Rc::new(SpyApi::new());
     let mut app = base_live_app(api);
@@ -2981,7 +3257,9 @@ fn loaded_admin_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Admin");
-    step_until(&mut harness, 8, |app| app.view == AppView::Admin);
+    step_until(&mut harness, 8, |app| {
+        app.view == AppView::Admin && app.datasets.admin_config.is_some() && !app.loading.admin
+    });
     harness
 }
 

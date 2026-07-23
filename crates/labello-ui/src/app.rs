@@ -605,6 +605,7 @@ pub(crate) struct LoadingState {
 
 pub(crate) struct AdminToolsState {
     pub dataset_id: Option<DatasetId>,
+    pub load_error: Option<String>,
     pub image_query: ImageExplorerQuery,
     pub image_search: String,
     pub image_task: Option<TaskId>,
@@ -621,6 +622,7 @@ impl Default for AdminToolsState {
     fn default() -> Self {
         Self {
             dataset_id: None,
+            load_error: None,
             image_query: ImageExplorerQuery {
                 page: 1,
                 page_size: 25,
@@ -640,6 +642,7 @@ impl Default for AdminToolsState {
 }
 
 pub(crate) struct SetupState {
+    pub api_base_url_draft: String,
     pub create_dataset_id: String,
     pub create_dataset_name: String,
     pub started: bool,
@@ -657,6 +660,7 @@ pub(crate) struct AuthState {
 
 pub(crate) struct DatasetState {
     pub summaries: Vec<DatasetSummary>,
+    pub summaries_error: Option<String>,
     pub metadata: Option<DatasetMetadata>,
     pub admin_config: Option<DatasetMetadata>,
     pub admin_baseline: Option<DatasetMetadata>,
@@ -675,6 +679,7 @@ impl DatasetState {
     fn new() -> Self {
         Self {
             summaries: Vec::new(),
+            summaries_error: None,
             metadata: None,
             admin_config: None,
             admin_baseline: None,
@@ -738,6 +743,7 @@ pub struct WorkState {
 pub(crate) struct ShortcutSettingsState {
     pub(crate) draft: Option<KeybindingSet>,
     pub(crate) baseline: Option<KeybindingSet>,
+    pub(crate) error: Option<String>,
     pub(crate) search: String,
     pub(crate) recording: Option<labello_domain::UserAction>,
     pub(crate) confirm_discard: bool,
@@ -849,6 +855,7 @@ impl LabelloApp {
         }
         let current = Some(demo_image(1));
         let setup = SetupState {
+            api_base_url_draft: config.api_base_url.clone(),
             create_dataset_id: config.dataset_id.to_string(),
             create_dataset_name: "Demo Dataset".to_string(),
             started: true,
@@ -1836,6 +1843,7 @@ impl LabelloApp {
         draft.normalize();
         self.shortcut_settings.baseline = Some(draft.clone());
         self.shortcut_settings.draft = Some(draft);
+        self.shortcut_settings.error = None;
         self.shortcut_settings.recording = None;
         self.shortcut_settings.confirm_discard = false;
         self.show_settings = true;

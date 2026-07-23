@@ -16,6 +16,7 @@ impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
         let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
         let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
+        let load_error = self.admin_tools.load_error.clone();
         let user_count = self.datasets.users.len();
         let image_count = self
             .admin_tools
@@ -45,47 +46,91 @@ impl LabelloApp {
                     ui.spinner();
                 }
                 ui.label(
-                    RichText::new(if config_dirty {
-                        "Configuration changes staged"
-                    } else if permissions_dirty {
-                        "Permission changes staged"
-                    } else {
-                        "Admin config saved"
-                    })
-                    .color(if config_dirty || permissions_dirty {
-                        theme::AMBER
-                    } else {
-                        theme::TEAL
-                    })
+                    RichText::new(
+                        if self.loading.admin && self.datasets.admin_config.is_none() {
+                            "Loading admin config"
+                        } else if load_error.is_some() {
+                            if self.datasets.admin_config.is_some() {
+                                "Admin refresh failed"
+                            } else {
+                                "Admin config unavailable"
+                            }
+                        } else if config_dirty {
+                            "Configuration changes staged"
+                        } else if permissions_dirty {
+                            "Permission changes staged"
+                        } else {
+                            "Admin config saved"
+                        },
+                    )
+                    .color(
+                        if self.loading.admin
+                            || load_error.is_some()
+                            || config_dirty
+                            || permissions_dirty
+                        {
+                            theme::AMBER
+                        } else {
+                            theme::TEAL
+                        },
+                    )
                     .strong(),
                 );
+                if self.datasets.admin_config.is_some()
+                    && ui
+                        .add_enabled(
+                            !config_dirty && !permissions_dirty,
+                            egui::Button::new("Reload"),
+                        )
+                        .on_hover_text(if config_dirty || permissions_dirty {
+                            "Discard or save staged changes before reloading."
+                        } else {
+                            "Reload configuration from the server."
+                        })
+                        .clicked()
+                {
+                    self.request_admin_dataset();
+                }
+            });
+            if self.datasets.admin_config.is_some() {
+                ui.add_space(8.0);
+                ui.columns(3, |columns| {
+                    admin_metric(&mut columns[0], "Users", user_count.to_string());
+                    admin_metric(&mut columns[1], "Indexed images", image_count);
+                    admin_metric(
+                        &mut columns[2],
+                        "Active workflows",
+                        workflow_count.to_string(),
+                    );
+                });
+            }
+        });
+        ui.add_space(8.0);
+        if let Some(error) = load_error {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(theme::RED, format!("Admin load failed: {error}"));
                 if ui
-                    .add_enabled(
-                        !config_dirty && !permissions_dirty,
-                        egui::Button::new("Reload"),
-                    )
-                    .on_hover_text(if config_dirty || permissions_dirty {
-                        "Discard or save staged changes before reloading."
-                    } else {
-                        "Reload configuration from the server."
-                    })
+                    .add_enabled(!self.loading.admin, egui::Button::new("Retry admin load"))
                     .clicked()
                 {
                     self.request_admin_dataset();
                 }
             });
-            ui.add_space(8.0);
-            ui.columns(3, |columns| {
-                admin_metric(&mut columns[0], "Users", user_count.to_string());
-                admin_metric(&mut columns[1], "Indexed images", image_count);
-                admin_metric(
-                    &mut columns[2],
-                    "Active workflows",
-                    workflow_count.to_string(),
-                );
-            });
-        });
-        ui.add_space(8.0);
+        }
+        if self.datasets.admin_config.is_none() {
+            if self.loading.admin {
+                theme::card_frame().show(ui, |ui| {
+                    ui.spinner();
+                    ui.label("Loading admin configuration...");
+                });
+            } else if self.admin_tools.load_error.is_none() {
+                ui.label(RichText::new("Admin config is not loaded.").color(theme::MUTED));
+                if ui.button("Load admin config").clicked() {
+                    self.request_admin_dataset();
+                }
+            }
+            return;
+        }
         self.people_section(ui);
         self.images_section(ui);
         self.snapshots_section(ui);
@@ -96,10 +141,6 @@ impl LabelloApp {
         let uploading_now = self.loading.uploading;
         let upload_progress = self.loading.upload_progress.clone();
         let Some(config) = self.datasets.admin_config.as_mut() else {
-            ui.label(RichText::new("Admin config is not loaded.").color(theme::MUTED));
-            if ui.button("Load admin config").clicked() {
-                self.request_admin_dataset();
-            }
             return;
         };
 
@@ -726,6 +767,14 @@ impl LabelloApp {
             theme::card_frame().show(ui, |ui| {
                 ui.label("Loading statistics...");
             });
+            return;
+        }
+        if self.datasets.last_stats_completion.is_none() {
+            if self.datasets.stats_error.is_none() {
+                theme::card_frame().show(ui, |ui| {
+                    ui.label("Statistics have not loaded.");
+                });
+            }
             return;
         }
         if let Some(completed) = self.datasets.last_stats_completion {

@@ -93,6 +93,7 @@ impl LabelloApp {
                         Err(error) => {
                             self.auth.account = None;
                             self.datasets.summaries.clear();
+                            self.datasets.summaries_error = None;
                             if show_error {
                                 self.runtime.error = Some(error);
                             } else {
@@ -107,6 +108,7 @@ impl LabelloApp {
                         Ok(()) => {
                             self.auth.account = None;
                             self.datasets.summaries.clear();
+                            self.datasets.summaries_error = None;
                             self.datasets.metadata = None;
                             self.datasets.admin_config = None;
                             self.datasets.admin_baseline = None;
@@ -132,10 +134,14 @@ impl LabelloApp {
                     match result {
                         Ok(datasets) => {
                             self.datasets.summaries = datasets;
+                            self.datasets.summaries_error = None;
                             self.runtime.error = None;
                             self.reopen_previous_workspace();
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.datasets.summaries_error = Some(error.clone());
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::DatasetCreated { result, .. } => match *result {
@@ -187,6 +193,7 @@ impl LabelloApp {
                                 self.admin_tools = Default::default();
                                 self.admin_tools.dataset_id = Some(self.config.dataset_id.clone());
                             }
+                            self.admin_tools.load_error = None;
                             self.view = AppView::Admin;
                             self.runtime.error = None;
                             self.request_admin_draft_load();
@@ -197,7 +204,10 @@ impl LabelloApp {
                                 self.request_snapshots();
                             }
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.admin_tools.load_error = Some(error.clone());
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::AdminSaved { result, .. } => match *result {
@@ -613,6 +623,7 @@ impl LabelloApp {
                     match result {
                         Ok(keybindings) => {
                             self.keybindings = keybindings;
+                            self.shortcut_settings.error = None;
                             if self.show_settings {
                                 self.shortcut_settings.baseline = Some(self.keybindings.clone());
                                 self.shortcut_settings.draft = Some(self.keybindings.clone());
@@ -620,7 +631,10 @@ impl LabelloApp {
                             self.runtime.notice = Some("Keyboard shortcuts saved".to_string());
                             self.runtime.error = None;
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.shortcut_settings.error = Some(error.clone());
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::RequestFailed { error, .. } => {
@@ -1047,11 +1061,18 @@ impl LabelloApp {
             }
             UiCommand::Logout { .. } => self.loading.logout = false,
             UiCommand::GithubLogin { .. } => {}
-            UiCommand::DatasetList { .. } => self.loading.datasets = false,
+            UiCommand::DatasetList { .. } => {
+                self.loading.datasets = false;
+                self.datasets.summaries_error = Some(error.to_string());
+            }
             UiCommand::CreateDataset { .. } | UiCommand::LoadDataset { .. } => {
                 self.loading.dataset = false
             }
-            UiCommand::LoadAdmin { .. } | UiCommand::SaveAdmin { .. } => self.loading.admin = false,
+            UiCommand::LoadAdmin { .. } => {
+                self.loading.admin = false;
+                self.admin_tools.load_error = Some(error.to_string());
+            }
+            UiCommand::SaveAdmin { .. } => self.loading.admin = false,
             UiCommand::SaveDatasetRoles { .. } => self.loading.roles_user = None,
             UiCommand::LoadImages { .. } => self.loading.images = false,
             UiCommand::LoadSnapshots { .. } => self.loading.snapshots = false,
@@ -1066,8 +1087,12 @@ impl LabelloApp {
             UiCommand::Stats { .. } => {
                 self.loading.stats = false;
                 self.datasets.active_stats_request = None;
+                self.datasets.stats_error = Some(error.to_string());
             }
-            UiCommand::SaveKeybindings { .. } => self.loading.keybindings = false,
+            UiCommand::SaveKeybindings { .. } => {
+                self.loading.keybindings = false;
+                self.shortcut_settings.error = Some(error.to_string());
+            }
             UiCommand::ClaimAssignment { operation_id, .. }
             | UiCommand::ReloadAssignment { operation_id, .. } => {
                 if self.active_load_id == Some(*operation_id) {
@@ -1191,6 +1216,7 @@ impl LabelloApp {
             return;
         }
         self.loading.datasets = true;
+        self.datasets.summaries_error = None;
         let request = self.request_identity(None);
         self.queue_command(UiCommand::DatasetList { request });
     }
@@ -1234,10 +1260,24 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_admin_dataset(&mut self) {
+        self.view = AppView::Admin;
+        if self
+            .datasets
+            .admin_config
+            .as_ref()
+            .is_some_and(|config| config.dataset_id != self.config.dataset_id)
+        {
+            self.datasets.admin_config = None;
+            self.datasets.admin_baseline = None;
+            self.datasets.users.clear();
+            self.datasets.users_baseline.clear();
+            self.admin_tools = Default::default();
+        }
         if self.loading.admin || self.runtime.api.is_none() {
             return;
         }
         self.loading.admin = true;
+        self.admin_tools.load_error = None;
         let request = self.request_identity(Some(self.config.dataset_id.clone()));
         self.queue_command(UiCommand::LoadAdmin {
             request,
@@ -1433,6 +1473,7 @@ impl LabelloApp {
         let request = self.request_identity(Some(dataset_id.clone()));
         self.datasets.stats_request_id = request.request_id;
         self.loading.stats = true;
+        self.datasets.stats_error = None;
         self.datasets.last_stats_attempt = Some(Instant::now());
         self.datasets.active_stats_request = Some((request.request_id, dataset_id.clone()));
         self.queue_command(UiCommand::Stats {
@@ -1451,10 +1492,12 @@ impl LabelloApp {
             .clone()
             .unwrap_or_else(|| self.keybindings.clone());
         if let Err(error) = keybindings.validate() {
+            self.shortcut_settings.error = Some(error.to_string());
             self.runtime.error = Some(error.to_string());
             return;
         }
         self.loading.keybindings = true;
+        self.shortcut_settings.error = None;
         let request = self.request_identity(Some(self.config.dataset_id.clone()));
         self.queue_command(UiCommand::SaveKeybindings {
             request,

@@ -1310,14 +1310,9 @@ impl LabelloApp {
                 ("Unsaved admin draft", draft.updated_at, validation)
             }
         };
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .max_width((ctx.content_rect().width() - 24.0).max(240.0))
-            .max_height((ctx.content_rect().height() - 24.0).max(240.0))
-            .constrain_to(ctx.content_rect())
-            .show(ctx, |ui| {
+        egui::Modal::new(egui::Id::new("draft-recovery-modal")).show(ctx, |ui| {
+                ui.set_max_width((ctx.content_rect().width() - 48.0).clamp(240.0, 560.0));
+                ui.heading(title);
                 ui.label(format!(
                     "Saved {}",
                     timestamp.format("%Y-%m-%d %H:%M:%S UTC")
@@ -1498,6 +1493,9 @@ impl LabelloApp {
                 RichText::new("Choose an action, then press its new key combination.")
                     .color(theme::MUTED),
             );
+            if let Some(error) = &self.shortcut_settings.error {
+                ui.colored_label(theme::RED, format!("Could not save shortcuts: {error}"));
+            }
             ui.add_space(6.0);
             let search_label = ui.label("Search actions");
             ui.add(
@@ -1683,6 +1681,7 @@ impl LabelloApp {
                 self.show_settings = false;
                 self.shortcut_settings.draft = None;
                 self.shortcut_settings.baseline = None;
+                self.shortcut_settings.error = None;
             }
         }
         if self.shortcut_settings.confirm_discard {
@@ -1697,6 +1696,7 @@ impl LabelloApp {
                         self.shortcut_settings.confirm_discard = false;
                         self.shortcut_settings.draft = None;
                         self.shortcut_settings.baseline = None;
+                        self.shortcut_settings.error = None;
                         self.show_settings = false;
                     }
                 });

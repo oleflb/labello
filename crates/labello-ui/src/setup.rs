@@ -49,12 +49,20 @@ impl LabelloApp {
             form_row(ui, "API URL", |ui| {
                 let response = ui.add_sized(
                     [ui.available_width(), 24.0],
-                    egui::TextEdit::singleline(&mut self.config.api_base_url),
+                    egui::TextEdit::singleline(&mut self.setup.api_base_url_draft),
                 );
-                reconnect = response.lost_focus();
+                reconnect =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                 response.on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.")
             });
-            if reconnect {
+            reconnect |= ui
+                .add_enabled(
+                    self.setup.api_base_url_draft != self.config.api_base_url,
+                    egui::Button::new("Reconnect").min_size(egui::vec2(96.0, 44.0)),
+                )
+                .clicked();
+            if reconnect && self.setup.api_base_url_draft != self.config.api_base_url {
+                self.config.api_base_url = self.setup.api_base_url_draft.clone();
                 self.rebuild_http_api();
                 self.auth.options_checked = false;
                 self.auth.checked = false;
@@ -112,10 +120,35 @@ impl LabelloApp {
                     self.request_dataset_list();
                 }
             });
-            if self.auth.account.is_some() && self.datasets.summaries.is_empty() {
-                ui.label(RichText::new("No accessible datasets yet.").color(theme::MUTED));
-            } else if self.auth.account.is_none() {
+            let signed_in = self.auth.account.is_some();
+            let has_datasets = !self.datasets.summaries.is_empty();
+            let summaries_error = self.datasets.summaries_error.clone();
+            if !signed_in {
                 ui.label(RichText::new("Sign in to view datasets.").color(theme::MUTED));
+            } else if self.loading.datasets && !has_datasets {
+                ui.label(RichText::new("Loading datasets...").color(theme::MUTED));
+            } else if let Some(error) = summaries_error.as_ref()
+                && !has_datasets
+            {
+                ui.colored_label(theme::RED, format!("Could not load datasets: {error}"));
+                if ui.button("Retry").clicked() {
+                    self.request_dataset_list();
+                }
+            } else if !has_datasets {
+                ui.label(RichText::new("No accessible datasets yet.").color(theme::MUTED));
+            }
+            if let Some(error) = summaries_error
+                && has_datasets
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        theme::AMBER,
+                        format!("Showing saved results. Refresh failed: {error}"),
+                    );
+                    if ui.button("Retry").clicked() {
+                        self.request_dataset_list();
+                    }
+                });
             }
             let datasets = self.datasets.summaries.clone();
             if let Some(dataset) = self.recommended_dataset()
