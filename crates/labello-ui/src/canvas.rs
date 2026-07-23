@@ -1271,7 +1271,7 @@ fn clamp_pan(viewport: Rect, fitted_image: Rect, zoom: f32, pan: Vec2) -> Vec2 {
     if !valid_rect(viewport) || !valid_rect(fitted_image) {
         return Vec2::ZERO;
     }
-    let overflow = ((fitted_image.size() * zoom - viewport.size()) * 0.5).max(Vec2::ZERO);
+    let overflow = fitted_image.size() * ((zoom.max(MIN_ZOOM) - MIN_ZOOM) * 0.5);
     vec2(
         finite_or(pan.x, 0.0).clamp(-overflow.x, overflow.x),
         finite_or(pan.y, 0.0).clamp(-overflow.y, overflow.y),
@@ -1763,17 +1763,17 @@ mod tests {
     }
 
     #[test]
-    fn pan_clamps_only_on_axes_with_actual_image_overflow() {
+    fn pan_clamps_to_the_fitted_image_footprint() {
         let viewport = Rect::from_min_size(pos2(100.0, 200.0), vec2(400.0, 300.0));
         let fitted = fitted_image_rect(viewport, [800, 200]);
         assert_eq!(fitted.size(), vec2(400.0, 100.0));
         assert_eq!(
             clamp_pan(viewport, fitted, 2.0, vec2(999.0, -999.0)),
-            vec2(200.0, 0.0)
+            vec2(200.0, -50.0)
         );
         assert_eq!(
             clamp_pan(viewport, fitted, 4.0, vec2(-999.0, 999.0)),
-            vec2(-600.0, 50.0)
+            vec2(-600.0, 150.0)
         );
     }
 
@@ -1792,7 +1792,7 @@ mod tests {
         let resized = Rect::from_min_size(Pos2::ZERO, vec2(300.0, 500.0));
         let resized_fit = fitted_image_rect(resized, [800, 400]);
         state.clamp_to_viewport(resized, resized_fit);
-        assert_eq!(state.pan, vec2(150.0, 0.0));
+        assert_eq!(state.pan, vec2(150.0, 75.0));
     }
 
     #[test]
@@ -1816,6 +1816,36 @@ mod tests {
         state.fit_view();
         assert_eq!(state.zoom(), 1.0);
         assert_eq!(state.pan, Vec2::ZERO);
+    }
+
+    #[test]
+    fn zoom_keeps_pointer_anchor_across_letterboxed_viewport_edges() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+        for (image_size, focus_at_edge) in [
+            ([400, 100], pos2(viewport.center().x, viewport.top() + 50.0)),
+            (
+                [100, 300],
+                pos2(viewport.left() + 100.0, viewport.center().y),
+            ),
+        ] {
+            let fitted = fitted_image_rect(viewport, image_size);
+            let mut state = CanvasState {
+                zoom: 2.0,
+                ..Default::default()
+            };
+            let before = screen_to_normalized(
+                transformed_image_rect(fitted, state.zoom, state.pan),
+                focus_at_edge,
+            );
+
+            set_zoom_around(&mut state, viewport, fitted, focus_at_edge, 4.0);
+
+            let after = screen_to_normalized(
+                transformed_image_rect(fitted, state.zoom, state.pan),
+                focus_at_edge,
+            );
+            assert!(before.distance(after) < 0.000_01, "{image_size:?}");
+        }
     }
 
     #[test]
