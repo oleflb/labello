@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 mod logging;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerConfig {
     bind: String,
@@ -19,14 +19,14 @@ struct ServerConfig {
     github_oauth: Option<GithubOAuthFileConfig>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DevelopmentAuthConfig {
     enabled: bool,
     token: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GithubOAuthFileConfig {
     client_id: String,
@@ -180,6 +180,28 @@ token = "unused"
         let config: ServerConfig = toml::from_str(CONFIG).unwrap();
         assert_eq!(config.browser_origins, ["https://app.example.com"]);
         assert!(!config.development_auth.enabled);
+    }
+
+    #[test]
+    fn example_config_matches_defaults_and_documents_oauth() {
+        const EXAMPLE: &str = include_str!("../../../labello.server.example.toml");
+
+        let config: ServerConfig = toml::from_str(EXAMPLE).unwrap();
+        assert_eq!(config, ServerConfig::default());
+
+        let with_oauth = EXAMPLE
+            .replace("# [githubOauth]", "[githubOauth]")
+            .replace("# clientId", "clientId")
+            .replace("# clientSecret", "clientSecret")
+            .replace("# redirectUri", "redirectUri");
+        let config: ServerConfig = toml::from_str(&with_oauth).unwrap();
+        let github = config.github_oauth.unwrap();
+        assert_eq!(github.client_id, "your-github-client-id");
+        assert_eq!(github.client_secret, "your-github-client-secret");
+        assert_eq!(
+            github.redirect_uri,
+            "https://api.example.com/auth/github/callback"
+        );
     }
 
     #[test]

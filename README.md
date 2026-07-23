@@ -60,6 +60,14 @@ http://127.0.0.1:8081/?api=http://127.0.0.1:9000
 
 ## Server Configuration
 
+The server creates `labello.server.toml` with local development defaults on its
+first start. A tracked configuration containing every supported setting is
+available at [`labello.server.example.toml`](labello.server.example.toml).
+
+See the complete [server configuration reference](docs/configuration.md) for
+all TOML keys, defaults, validation rules, environment overrides, OAuth setup,
+and production guidance.
+
 The default configuration is:
 
 ```toml

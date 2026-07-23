@@ -1,0 +1,21 @@
+# Copy this file to labello.server.toml and adjust it for your environment.
+# The uncommented values are Labello's defaults.
+
+bind = "127.0.0.1:8080"
+datasetsRoot = "datasets"
+bootstrapAdmins = ["admin"]
+browserOrigins = [
+    "http://127.0.0.1:8081",
+    "http://localhost:8081",
+]
+sessionCookieSecure = false
+
+[developmentAuth]
+enabled = true
+token = "dev-local-token"
+
+# GitHub OAuth is disabled by default. Uncomment the complete section to enable it.
+# [githubOauth]
+# clientId = "your-github-client-id"
+# clientSecret = "your-github-client-secret"
+# redirectUri = "https://api.example.com/auth/github/callback"
