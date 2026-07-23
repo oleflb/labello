@@ -63,6 +63,8 @@ pub struct AssignNextRequest {
     pub kind: Option<AssignmentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_id: Option<AssignmentId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_image_ids: Vec<ImageId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,4 +258,40 @@ pub struct SnapshotFile {
 #[serde(rename_all = "camelCase")]
 pub struct OfflineSyncEnvelope {
     pub request: OfflineSyncRequest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assign_next_request_uses_camel_case_json() {
+        let request = AssignNextRequest {
+            task_id: TaskId::from("bounding_box:person"),
+            kind: Some(AssignmentKind::Annotation),
+            assignment_id: Some(AssignmentId::from("asn_1")),
+            excluded_image_ids: vec![ImageId::from("img_1")],
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "taskId": "bounding_box:person",
+                "kind": "annotation",
+                "assignmentId": "asn_1",
+                "excludedImageIds": ["img_1"]
+            })
+        );
+    }
+
+    #[test]
+    fn assign_next_request_defaults_to_no_exclusions() {
+        let request: AssignNextRequest = serde_json::from_value(serde_json::json!({
+            "taskId": "bounding_box:person",
+            "kind": "annotation"
+        }))
+        .unwrap();
+
+        assert!(request.excluded_image_ids.is_empty());
+    }
 }

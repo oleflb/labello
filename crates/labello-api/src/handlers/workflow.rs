@@ -37,17 +37,36 @@ fn default_preview_max() -> u32 {
 pub(crate) async fn assign_next(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
-    Query(query): Query<AssignNextRequest>,
     headers: HeaderMap,
+    Json(mut request): Json<AssignNextRequest>,
 ) -> ApiResult<Json<Option<labello_domain::Assignment>>> {
+    request.task_id.validate_path_segment()?;
+    if let Some(assignment_id) = &request.assignment_id {
+        assignment_id.validate_path_segment()?;
+    }
+    for image_id in &request.excluded_image_ids {
+        image_id.validate_path_segment()?;
+    }
+    request.excluded_image_ids.sort();
+    request.excluded_image_ids.dedup();
+    if request.excluded_image_ids.len() > 3 {
+        return Err(ApiError::BadRequest(
+            "at most 3 image IDs may be excluded".to_string(),
+        ));
+    }
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
-    let kind = query
+    let kind = request
         .kind
         .unwrap_or(labello_domain::AssignmentKind::Annotation);
-    if let Some(assignment_id) = query.assignment_id
+    if let Some(assignment_id) = request.assignment_id
         && let Some(assignment) = repo
-            .reclaim_assignment(&actor.user_id, &assignment_id, &query.task_id, kind.clone())
+            .reclaim_assignment(
+                &actor.user_id,
+                &assignment_id,
+                &request.task_id,
+                kind.clone(),
+            )
             .await?
     {
         tracing::debug!(
@@ -60,7 +79,12 @@ pub(crate) async fn assign_next(
         return Ok(Json(Some(assignment)));
     }
     let assignment = repo
-        .assign_next_image(&actor.user_id, &query.task_id, kind)
+        .assign_next_image_excluding(
+            &actor.user_id,
+            &request.task_id,
+            kind,
+            &request.excluded_image_ids,
+        )
         .await?;
     if let Some(assignment) = &assignment {
         tracing::debug!(

@@ -382,12 +382,11 @@ impl ImageApi for HttpLabelloApi {
         request: AssignNextRequest,
     ) -> crate::ApiFuture<'a, Option<Assignment>> {
         Box::pin(async move {
-            let response = self
-                .request(Method::POST, &format!("/datasets/{dataset_id}/images/next"))?
-                .query(&request)
-                .send()
-                .await?;
-            Self::json(response).await
+            Self::send_json(
+                self.request(Method::POST, &format!("/datasets/{dataset_id}/images/next"))?,
+                &request,
+            )
+            .await
         })
     }
 

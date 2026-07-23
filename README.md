@@ -52,10 +52,13 @@ default user `admin` and token `dev-local-token`. The `admin` user is allowed
 to create the first dataset.
 
 The client normally connects to port `8080` on the same hostname used to open
-the UI. Override this with the `api` query parameter when needed:
+the UI. Override this with the `api` query parameter when needed. The annotation
+client prepares two upcoming assignments by default; set `queueSize=1` to hold
+only one upcoming assignment. Values are clamped to `1..=2`, so a browser holds
+at most the current assignment and two prepared assignments.
 
 ```text
-http://127.0.0.1:8081/?api=http://127.0.0.1:9000
+http://127.0.0.1:8081/?api=http://127.0.0.1:9000&queueSize=1
 ```
 
 ## Server Configuration

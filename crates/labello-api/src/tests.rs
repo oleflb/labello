@@ -1213,7 +1213,7 @@ async fn config_rejects_enabling_independent_agreement() {
 }
 
 #[tokio::test]
-async fn assign_next_uses_camel_case_query() {
+async fn assign_next_uses_camel_case_json_body() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));
     create_dataset(&app).await;
@@ -1244,10 +1244,18 @@ async fn assign_next_uses_camel_case_query() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind=annotation")
+                .uri("/datasets/ds/images/next")
                 .header("x-user-id", "admin")
                 .header("x-user-role", "data_admin")
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taskId": "bounding_box:pixel",
+                        "kind": "annotation",
+                        "excludedImageIds": []
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1258,19 +1266,106 @@ async fn assign_next_uses_camel_case_query() {
     assert_eq!(assignment["taskId"], "bounding_box:pixel");
     assert!(assignment["expiresAt"].is_string());
 
-    let stale_snake_case = app
+    let stale_query = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/datasets/ds/images/next?task_id=bounding_box%3Apixel&kind=annotation")
+                .uri("/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind=annotation")
                 .header("x-user-id", "admin")
                 .header("x-user-role", "data_admin")
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(stale_snake_case.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(stale_query.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn assign_next_honors_exact_reclaim_then_exclusions() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "first.png", &png_bytes(2, 2)).await;
+    upload_test_image(&app, "second.png", &png_bytes(3, 2)).await;
+
+    let first = claim_assignment(&app, "admin", "annotation").await;
+    let exact = claim_assignment_with_body(
+        &app,
+        "admin",
+        json!({
+            "taskId": "bounding_box:pixel",
+            "kind": "annotation",
+            "assignmentId": first["assignmentId"],
+            "excludedImageIds": [first["imageId"]]
+        }),
+    )
+    .await;
+    assert_eq!(exact.status(), StatusCode::OK);
+    let exact: serde_json::Value =
+        serde_json::from_slice(&to_bytes(exact.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(exact["assignmentId"], first["assignmentId"]);
+
+    assert_eq!(
+        post_assignment_action(&app, "admin", "release", &first)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let different = claim_assignment_with_body(
+        &app,
+        "admin",
+        json!({
+            "taskId": "bounding_box:pixel",
+            "kind": "annotation",
+            "excludedImageIds": [first["imageId"]]
+        }),
+    )
+    .await;
+    assert_eq!(different.status(), StatusCode::OK);
+    let different: serde_json::Value =
+        serde_json::from_slice(&to_bytes(different.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_ne!(different["imageId"], first["imageId"]);
+}
+
+#[tokio::test]
+async fn assign_next_rejects_invalid_ids_and_too_many_exclusions() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+
+    for request in [
+        json!({
+            "taskId": "bounding_box:pixel",
+            "kind": "annotation",
+            "excludedImageIds": ["img_1", "img_2", "img_3", "img_4"]
+        }),
+        json!({
+            "taskId": "bounding_box:pixel",
+            "kind": "annotation",
+            "excludedImageIds": ["../image"]
+        }),
+        json!({
+            "taskId": "../task",
+            "kind": "annotation"
+        }),
+        json!({
+            "taskId": "bounding_box:pixel",
+            "kind": "annotation",
+            "assignmentId": "../assignment"
+        }),
+    ] {
+        assert_eq!(
+            claim_assignment_with_body(&app, "admin", request)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 #[tokio::test]
@@ -2477,31 +2572,46 @@ async fn claim_assignment_for_task(
     kind: &str,
     task_id: &str,
 ) -> serde_json::Value {
+    let response = claim_assignment_with_body(
+        app,
+        user_id,
+        json!({
+            "taskId": task_id,
+            "kind": kind,
+            "excludedImageIds": []
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn claim_assignment_with_body(
+    app: &axum::Router,
+    user_id: &str,
+    request: serde_json::Value,
+) -> axum::response::Response {
+    let kind = request["kind"].as_str().unwrap_or("annotation");
     let role = match kind {
         "annotation" => "annotator",
         "review" => "reviewer",
         "adjudication" => "adjudicator",
         _ => unreachable!(),
     };
-    let response = app
-        .clone()
+    app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/datasets/ds/images/next?taskId={}&kind={kind}",
-                    urlencoding::encode(task_id)
-                ))
+                .uri("/datasets/ds/images/next")
                 .header("x-user-id", user_id)
                 .header("x-user-role", role)
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
                 .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&body).unwrap()
+        .unwrap()
 }
 
 async fn post_test_correction(

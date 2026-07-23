@@ -12,16 +12,23 @@ use labello_domain::{
 };
 
 use crate::{
-    app::{AppView, LabelloApp, LoadedImage, ReviewPhase, SaveStatus, UiCommand, UiMessage},
+    app::{
+        AppView, IMAGE_QUEUE_SIZE, LabelloApp, LoadedImage, ReviewPhase, SaveStatus, UiCommand,
+        UiMessage,
+    },
     queue::QueuedImage,
 };
 
 impl LabelloApp {
     pub(crate) fn clear_current_image(&mut self) {
+        self.release_prepared_assignments();
         if let Some(request_id) = self.active_load_id {
             self.runtime.active_requests.remove(&request_id);
         }
         if let Some(request_id) = self.active_operation_id {
+            self.runtime.active_requests.remove(&request_id);
+        }
+        if let Some(request_id) = self.active_prefetch_id {
             self.runtime.active_requests.remove(&request_id);
         }
         self.assignment = None;
@@ -43,12 +50,14 @@ impl LabelloApp {
         self.correction_draft = None;
         self.canvas.fit_view();
         self.active_load_id = None;
+        self.active_prefetch_id = None;
         self.active_operation_id = None;
         self.runtime.persistence.work_ready = None;
         self.reset_work_draft_tracking();
         self.loading.image = false;
         self.loading.saving = false;
         self.queue.set_loading(false);
+        self.queue.clear();
     }
 
     pub(crate) fn start_workflow_command(&self, api: Rc<dyn LabelloApi>, command: UiCommand) {
@@ -61,6 +70,7 @@ impl LabelloApp {
                 prelabel_config_ids,
                 kind,
                 reclaim_assignment_id,
+                excluded_image_ids,
             } => self.spawn_message(request.clone(), async move {
                 let assignment = match api
                     .assign_next_image(
@@ -69,6 +79,7 @@ impl LabelloApp {
                             task_id,
                             kind: Some(kind.clone()),
                             assignment_id: reclaim_assignment_id,
+                            excluded_image_ids,
                         },
                     )
                     .await
@@ -107,6 +118,75 @@ impl LabelloApp {
                     assignment: Some(assignment),
                     result: Box::new(result),
                 }
+            }),
+            UiCommand::PrefetchAssignment {
+                request,
+                operation_id,
+                dataset_id,
+                task_id,
+                prelabel_config_ids,
+                excluded_image_ids,
+            } => self.spawn_message(request.clone(), async move {
+                let assignment = match api
+                    .assign_next_image(
+                        &dataset_id,
+                        AssignNextRequest {
+                            task_id,
+                            kind: Some(AssignmentKind::Annotation),
+                            assignment_id: None,
+                            excluded_image_ids,
+                        },
+                    )
+                    .await
+                {
+                    Ok(assignment) => assignment,
+                    Err(error) => {
+                        return UiMessage::PrefetchLoaded {
+                            request,
+                            operation_id,
+                            result: Box::new(Err(error.to_string())),
+                        };
+                    }
+                };
+                let Some(assignment) = assignment else {
+                    return UiMessage::PrefetchLoaded {
+                        request,
+                        operation_id,
+                        result: Box::new(Ok(None)),
+                    };
+                };
+                let result = load_image(
+                    api.clone(),
+                    dataset_id.clone(),
+                    assignment.clone(),
+                    prelabel_config_ids,
+                    true,
+                )
+                .await
+                .map(Some)
+                .map_err(|error| error.to_string());
+                if result.is_err() {
+                    let _ = api
+                        .release_assignment(&dataset_id, assignment_action(&assignment))
+                        .await;
+                }
+                UiMessage::PrefetchLoaded {
+                    request,
+                    operation_id,
+                    result: Box::new(result),
+                }
+            }),
+            UiCommand::ReleaseReservation {
+                request,
+                dataset_id,
+                assignment,
+            } => self.spawn_message(request.clone(), async move {
+                let result = api
+                    .release_assignment(&dataset_id, assignment_action(&assignment))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                UiMessage::ReservationReleased { request, result }
             }),
             UiCommand::ReloadAssignment {
                 request,
@@ -278,6 +358,7 @@ impl LabelloApp {
         }
         let operation_id = self.begin_load();
         let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        let excluded_image_ids = self.assignment_exclusions();
         self.queue_command(UiCommand::ClaimAssignment {
             request,
             operation_id,
@@ -290,7 +371,96 @@ impl LabelloApp {
             },
             kind,
             reclaim_assignment_id: self.runtime.persistence.expected_assignment.clone(),
+            excluded_image_ids,
         });
+    }
+
+    pub(crate) fn request_prefetch(&mut self) {
+        if self.view != AppView::Annotate
+            || self.assignment.is_none()
+            || self.queue.is_loading()
+            || self.queue.len() >= self.queue.queue_size()
+            || self.runtime.api.is_none()
+        {
+            return;
+        }
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let operation_id = self.next_operation();
+        self.active_prefetch_id = Some(operation_id);
+        self.queue.set_loading(true);
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        let excluded_image_ids = self.assignment_exclusions();
+        self.queue_command(UiCommand::PrefetchAssignment {
+            request,
+            operation_id,
+            dataset_id: self.config.dataset_id.clone(),
+            task_id: task.task_id,
+            prelabel_config_ids: task.prelabel_config_ids,
+            excluded_image_ids,
+        });
+    }
+
+    fn assignment_exclusions(&self) -> Vec<labello_domain::ImageId> {
+        let mut excluded = self
+            .assignment
+            .as_ref()
+            .map(|assignment| vec![assignment.image_id.clone()])
+            .unwrap_or_default();
+        for image_id in self.queue.prepared_image_ids() {
+            if !excluded.contains(&image_id) {
+                excluded.push(image_id);
+            }
+        }
+        if let Some(image_id) = self.one_shot_excluded_image_id.clone()
+            && !excluded.contains(&image_id)
+        {
+            excluded.push(image_id);
+        }
+        excluded.truncate(IMAGE_QUEUE_SIZE + 1);
+        excluded
+    }
+
+    pub(crate) fn release_prepared_assignments(&mut self) {
+        if self.runtime.api.is_none() {
+            self.queue.clear();
+            return;
+        }
+        for assignment in self.queue.drain_prepared_assignments() {
+            self.release_reservation(self.config.dataset_id.clone(), assignment);
+        }
+    }
+
+    pub(crate) fn release_reservation(
+        &mut self,
+        dataset_id: labello_domain::DatasetId,
+        assignment: Assignment,
+    ) {
+        let Some(api) = self.runtime.api.clone() else {
+            return;
+        };
+        let operation_id = self.next_operation();
+        let request = self.operation_identity(operation_id, dataset_id.clone());
+        self.runtime.active_requests.insert(request.request_id);
+        self.start_workflow_command(
+            api,
+            UiCommand::ReleaseReservation {
+                request,
+                dataset_id,
+                assignment,
+            },
+        );
+    }
+
+    pub(crate) fn retry_prefetch_if_due(&mut self, ctx: &egui::Context) {
+        if self.queue.retry_due() {
+            self.queue.clear_failure();
+            self.request_prefetch();
+        }
+        if let Some(delay) = self.queue.retry_after() {
+            ctx.request_repaint_after(delay);
+        }
     }
 
     pub(crate) fn retry_assignment_load(&mut self) {
@@ -522,7 +692,6 @@ impl LabelloApp {
         let operation_id = self.next_operation();
         self.active_load_id = Some(operation_id);
         self.loading.image = true;
-        self.queue.set_loading(true);
         operation_id
     }
 

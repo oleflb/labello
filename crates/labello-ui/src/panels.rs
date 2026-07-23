@@ -293,6 +293,24 @@ impl LabelloApp {
         } else if self.assignment.is_some() {
             ui.label("Active assignment");
             ui.small("Reserved for you until you submit or skip it.");
+            if self.view == AppView::Annotate {
+                let status = if self.queue.failed() {
+                    "Prepared queue refill failed; retrying".to_string()
+                } else if self.queue.is_loading() {
+                    format!(
+                        "Prepared queue: {} of {} ready, loading next",
+                        self.queue.len(),
+                        self.queue.queue_size()
+                    )
+                } else {
+                    format!(
+                        "Prepared queue: {} of {} ready",
+                        self.queue.len(),
+                        self.queue.queue_size()
+                    )
+                };
+                ui.small(status);
+            }
         } else if self.loading.image {
             ui.spinner();
             ui.label("Claiming work...");
@@ -970,6 +988,9 @@ impl LabelloApp {
         let discards_edits = pending == PendingTransition::NextAssignment
             && self.view == AppView::Annotate
             && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry);
+        if pending == PendingTransition::NextAssignment && !discards_edits {
+            return;
+        }
         egui::Modal::new(egui::Id::new("assignment-transition-modal")).show(ctx, |ui| {
             ui.set_max_width((ctx.content_rect().width() - 48.0).clamp(240.0, 560.0));
             ui.heading(if discards_edits {

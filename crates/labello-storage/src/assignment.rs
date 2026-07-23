@@ -78,6 +78,17 @@ impl DatasetRepository {
         task_id: &TaskId,
         kind: AssignmentKind,
     ) -> StorageResult<Option<Assignment>> {
+        self.assign_next_image_excluding(user_id, task_id, kind, &[])
+            .await
+    }
+
+    pub async fn assign_next_image_excluding(
+        &self,
+        user_id: &UserId,
+        task_id: &TaskId,
+        kind: AssignmentKind,
+        excluded_image_ids: &[ImageId],
+    ) -> StorageResult<Option<Assignment>> {
         let metadata = self.load_dataset().await?;
         let required_role = match kind {
             AssignmentKind::Annotation => DatasetRole::Annotator,
@@ -119,6 +130,9 @@ impl DatasetRepository {
         }
 
         for image_id in metadata.images.keys() {
+            if excluded_image_ids.contains(image_id) {
+                continue;
+            }
             let lock = self.image_lock(image_id);
             let _guard = lock.lock().await;
             let state = self.load_image_state(image_id).await?;
@@ -1773,6 +1787,38 @@ mod tests {
             .unwrap();
         assert_eq!(reclaimed.image_id, first.image_id);
         assert_ne!(reclaimed.assignment_id, first.assignment_id);
+    }
+
+    #[tokio::test]
+    async fn released_image_can_be_excluded_from_the_next_claim() {
+        let (_temp, repo, task_id, users) = annotation_repo(2, &["worker"]).await;
+        let first = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.release_assignment(
+            &users[0],
+            &first.assignment_id,
+            &first.image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+
+        let next = repo
+            .assign_next_image_excluding(
+                &users[0],
+                &task_id,
+                AssignmentKind::Annotation,
+                std::slice::from_ref(&first.image_id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(next.image_id, first.image_id);
     }
 
     #[tokio::test]

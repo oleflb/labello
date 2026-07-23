@@ -97,8 +97,16 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
         dev_token: String::new(),
         user_id: labello_domain::UserId::from(param(&params, "user", "admin")),
         dataset_id: labello_domain::DatasetId::from(param(&params, "dataset", "demo")),
-        queue_size: labello_ui::IMAGE_QUEUE_SIZE,
+        queue_size: queue_size(params.get("queueSize").as_deref()),
     })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn queue_size(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(labello_ui::IMAGE_QUEUE_SIZE)
+        .clamp(1, labello_ui::IMAGE_QUEUE_SIZE)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -116,7 +124,7 @@ pub fn native_placeholder() {}
 
 #[cfg(test)]
 mod tests {
-    use super::default_api_url;
+    use super::{default_api_url, queue_size};
 
     #[test]
     fn default_api_uses_the_application_origin_host() {
@@ -124,5 +132,15 @@ mod tests {
             default_api_url("https:", "labello.example"),
             "https://labello.example:8080"
         );
+    }
+
+    #[test]
+    fn queue_size_defaults_and_clamps_to_two_upcoming_assignments() {
+        assert_eq!(queue_size(None), 2);
+        assert_eq!(queue_size(Some("invalid")), 2);
+        assert_eq!(queue_size(Some("0")), 1);
+        assert_eq!(queue_size(Some("1")), 1);
+        assert_eq!(queue_size(Some("2")), 2);
+        assert_eq!(queue_size(Some("99")), 2);
     }
 }

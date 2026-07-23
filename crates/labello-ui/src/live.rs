@@ -50,6 +50,20 @@ impl LabelloApp {
             if let Some(request) = message.request().cloned()
                 && !self.finish_request(&request, requires_current_dataset)
             {
+                if let Some(dataset_id) = request.dataset_id {
+                    match message {
+                        UiMessage::PrefetchLoaded { result, .. } => {
+                            if let Ok(Some(loaded)) = *result {
+                                self.release_reservation(dataset_id, loaded.assignment);
+                            }
+                        }
+                        UiMessage::ImageLoaded {
+                            assignment: Some(assignment),
+                            ..
+                        } => self.release_reservation(dataset_id, assignment),
+                        _ => {}
+                    }
+                }
                 continue;
             }
             match message {
@@ -270,9 +284,9 @@ impl LabelloApp {
                     }
                     self.active_load_id = None;
                     self.loading.image = false;
-                    self.queue.set_loading(false);
                     match *result {
                         Ok(Some(loaded)) => {
+                            self.one_shot_excluded_image_id = None;
                             self.runtime.error = None;
                             self.runtime.notice = None;
                             if let Some(expected) =
@@ -288,6 +302,7 @@ impl LabelloApp {
                             self.apply_loaded_image(ctx, loaded);
                         }
                         Ok(None) => {
+                            self.one_shot_excluded_image_id = None;
                             self.runtime.persistence.expected_assignment = None;
                             self.assignment = None;
                             self.runtime.error = None;
@@ -306,10 +321,71 @@ impl LabelloApp {
                             );
                         }
                         Err(error) => {
+                            if assignment.is_some() {
+                                self.one_shot_excluded_image_id = None;
+                            }
                             self.runtime.persistence.expected_assignment = None;
                             self.assignment = assignment;
                             self.runtime.error = Some(error);
                         }
+                    }
+                }
+                UiMessage::PrefetchLoaded {
+                    request: _,
+                    operation_id,
+                    result,
+                } => {
+                    if self.active_prefetch_id != Some(operation_id) {
+                        continue;
+                    }
+                    self.active_prefetch_id = None;
+                    self.queue.set_loading(false);
+                    match *result {
+                        Ok(Some(loaded))
+                            if loaded.assignment.kind
+                                == labello_domain::AssignmentKind::Annotation
+                                && loaded.assignment.status
+                                    == labello_domain::AssignmentStatus::Active
+                                && loaded.assignment.expires_at.is_none_or(|expires_at| {
+                                    expires_at > labello_domain::now()
+                                })
+                                && self.assignment.as_ref().is_some_and(|current| {
+                                    current.task_id == loaded.assignment.task_id
+                                        && current.image_id != loaded.assignment.image_id
+                                })
+                                && !self
+                                    .queue
+                                    .prepared_image_ids()
+                                    .contains(&loaded.assignment.image_id) =>
+                        {
+                            self.one_shot_excluded_image_id = None;
+                            self.queue.clear_failure();
+                            self.queue.push_prepared(loaded);
+                            self.request_prefetch();
+                        }
+                        Ok(Some(loaded)) => {
+                            self.one_shot_excluded_image_id = None;
+                            self.release_reservation(
+                                self.config.dataset_id.clone(),
+                                loaded.assignment,
+                            );
+                        }
+                        Ok(None) => {
+                            self.one_shot_excluded_image_id = None;
+                            self.queue.clear_failure();
+                        }
+                        Err(_) => {
+                            self.queue.mark_failed();
+                            ctx.request_repaint_after(Duration::from_secs(1));
+                        }
+                    }
+                }
+                UiMessage::ReservationReleased { result, .. } => {
+                    if result.is_err() {
+                        self.runtime.notice = Some(
+                            "A prepared assignment could not be released; its lease will expire."
+                                .to_string(),
+                        );
                     }
                 }
                 UiMessage::SaveFinished {
@@ -346,10 +422,7 @@ impl LabelloApp {
                             self.runtime.error = None;
                             self.request_stats();
                             if completed {
-                                self.clear_current_image();
-                                if let Some(transition) = self.pending_transition.take() {
-                                    self.execute_transition(transition);
-                                }
+                                self.finish_annotation_transition(ctx, None);
                             }
                         }
                         Err(error) => {
@@ -378,14 +451,15 @@ impl LabelloApp {
                     self.loading.saving = false;
                     match result {
                         Ok(()) => {
+                            let released_image_id = self
+                                .assignment
+                                .as_ref()
+                                .map(|assignment| assignment.image_id.clone());
                             if let Some(assignment) = self.assignment.clone() {
                                 self.clear_current_work_draft(&assignment);
                             }
                             self.runtime.error = None;
-                            self.clear_current_image();
-                            if let Some(transition) = self.pending_transition.take() {
-                                self.execute_transition(transition);
-                            }
+                            self.finish_annotation_transition(ctx, released_image_id);
                         }
                         Err(error) => {
                             self.pending_transition = None;
@@ -930,9 +1004,16 @@ impl LabelloApp {
                 if self.active_load_id == Some(*operation_id) {
                     self.active_load_id = None;
                     self.loading.image = false;
-                    self.queue.set_loading(false);
                 }
             }
+            UiCommand::PrefetchAssignment { operation_id, .. } => {
+                if self.active_prefetch_id == Some(*operation_id) {
+                    self.active_prefetch_id = None;
+                    self.queue.set_loading(false);
+                    self.queue.mark_failed();
+                }
+            }
+            UiCommand::ReleaseReservation { .. } => {}
             UiCommand::SaveAnnotations { operation_id, .. }
             | UiCommand::ReleaseAssignment { operation_id, .. }
             | UiCommand::Review { operation_id, .. }
@@ -941,6 +1022,7 @@ impl LabelloApp {
                 if self.active_operation_id == Some(*operation_id) {
                     self.active_operation_id = None;
                     self.loading.saving = false;
+                    self.pending_transition = None;
                     if matches!(command, UiCommand::SaveAnnotations { .. }) {
                         self.save_status = SaveStatus::Retry;
                     }
@@ -1014,8 +1096,11 @@ impl LabelloApp {
         self.loading.creating_snapshot = false;
         self.loading.snapshot_file = None;
         self.active_load_id = None;
+        self.active_prefetch_id = None;
         self.active_operation_id = None;
         self.queue.set_loading(false);
+        self.release_prepared_assignments();
+        self.one_shot_excluded_image_id = None;
         if self.save_status == SaveStatus::Saving {
             self.save_status = SaveStatus::Retry;
         }
@@ -1455,6 +1540,9 @@ impl LabelloApp {
         self.modified_annotations.clear();
         self.accepted_prelabels.clear();
         self.selected_annotation = None;
+        self.active_skeleton = None;
+        self.skeleton_keypoint_index = 0;
+        self.next_keypoint_hidden = false;
         self.review_index = 0;
         self.review_rejected = false;
         self.correction_draft = None;
@@ -1463,6 +1551,8 @@ impl LabelloApp {
         self.last_edit_at = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.canvas.fit_view();
+        self.runtime.persistence.work_ready = None;
         self.current_texture = loaded.color_image.map(|image| {
             ctx.load_texture(
                 format!("image-{image_id}"),
@@ -1489,6 +1579,39 @@ impl LabelloApp {
             self.renew_assignment_from_state(&state);
         }
         self.request_work_draft_load();
+        self.request_prefetch();
+    }
+
+    fn finish_annotation_transition(
+        &mut self,
+        ctx: &egui::Context,
+        released_image_id: Option<labello_domain::ImageId>,
+    ) {
+        let transition = self.pending_transition.take();
+        if self.view == AppView::Annotate
+            && transition == Some(crate::app::PendingTransition::NextAssignment)
+        {
+            self.one_shot_excluded_image_id = released_image_id;
+            while let Some(loaded) = self.queue.pop_prepared() {
+                if loaded.assignment.status == labello_domain::AssignmentStatus::Active
+                    && loaded
+                        .assignment
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > labello_domain::now())
+                {
+                    self.apply_loaded_image(ctx, loaded);
+                    return;
+                }
+            }
+            self.clear_current_image();
+            self.request_next_image();
+            return;
+        }
+        if let Some(transition) = transition {
+            self.execute_transition(transition);
+        } else {
+            self.clear_current_image();
+        }
     }
 
     fn apply_state(&mut self, state: labello_domain::ImageState) {

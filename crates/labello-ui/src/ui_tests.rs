@@ -544,7 +544,7 @@ fn image_load_failure_shows_retry_and_loads_image() {
     click(&mut harness, "Retry image load");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert!(api.counts().get_image_preview >= 2);
-    assert_eq!(api.counts().assign_next_image, 1);
+    assert_eq!(api.counts().assign_next_image, 2);
 }
 
 #[test]
@@ -773,6 +773,9 @@ fn right_arrow_submits_and_claims_a_different_image() {
         .image_id
         .clone();
 
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let next = harness.state().queue.prepared_image_ids()[0].clone();
+    let previews_before = api.counts().get_image_preview;
     harness.key_press(egui::Key::ArrowRight);
     step_until(&mut harness, 16, |app| {
         app.assignment
@@ -782,12 +785,146 @@ fn right_arrow_submits_and_claims_a_different_image() {
 
     assert_eq!(api.counts().complete_assignment, 1);
     assert_eq!(api.counts().release_assignment, 0);
+    assert_eq!(harness.state().assignment.as_ref().unwrap().image_id, next);
+    assert_eq!(api.counts().get_image_preview, previews_before);
+    assert!(!harness.state().loading.image);
+    assert!(harness.state().current_texture.is_some());
+}
+
+#[test]
+fn annotation_prefetch_fills_two_without_blocking_the_current_image() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+
+    assert_eq!(harness.state().queue.queue_size(), 2);
+    assert!(!harness.state().loading.image);
+    assert!(
+        harness
+            .query_by_label("Prepared queue: 2 of 2 ready")
+            .is_some()
+    );
+    let exclusions = api.exclusions();
+    assert!(exclusions.iter().all(|excluded| excluded.len() <= 3));
+    assert_eq!(exclusions[0], Vec::<ImageId>::new());
+    assert_eq!(exclusions[1].len(), 1);
+    assert_eq!(exclusions[2].len(), 2);
+}
+
+#[test]
+fn empty_prepared_queue_falls_back_to_blocking_load() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    harness.state_mut().queue.clear();
+
+    click(&mut harness, "Submit & next");
+    harness.step();
+    assert!(harness.state().loading.image);
+    assert!(harness.state().current.is_none());
+    harness.step();
+    assert!(harness.state().current.is_some());
+}
+
+#[test]
+fn submit_failure_preserves_current_and_prepared_queue() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let current = harness
+        .state()
+        .assignment
+        .as_ref()
+        .unwrap()
+        .image_id
+        .clone();
+    let queued = harness.state().queue.prepared_image_ids();
+    api.fail_next_batch();
+
+    click(&mut harness, "Submit & next");
+    step_until(&mut harness, 8, |app| !app.loading.saving);
+
+    assert_eq!(
+        harness.state().assignment.as_ref().unwrap().image_id,
+        current
+    );
+    assert_eq!(harness.state().queue.prepared_image_ids(), queued);
+}
+
+#[test]
+fn stale_prefetch_response_cannot_enter_the_queue() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let loaded = harness.state_mut().queue.pop_prepared().unwrap();
+    harness.state_mut().queue.clear();
+    let operation_id = 90_001;
+    let request = test_request(harness.state(), operation_id, Some("demo"));
+    harness.state_mut().active_prefetch_id = Some(operation_id);
+    harness
+        .state_mut()
+        .runtime
+        .active_requests
+        .insert(operation_id);
+    harness.state_mut().begin_workspace_epoch();
+    harness
+        .state()
+        .runtime
+        .tx
+        .send(UiMessage::PrefetchLoaded {
+            request,
+            operation_id,
+            result: Box::new(Ok(Some(loaded))),
+        })
+        .unwrap();
+
+    harness
+        .state_mut()
+        .process_messages(&egui::Context::default());
+    assert!(harness.state().queue.is_empty());
+    step_until(&mut harness, 8, |_| api.counts().release_assignment > 0);
+}
+
+#[test]
+fn stale_blocking_claim_releases_its_assignment() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let assignment = harness.state_mut().queue.pop_prepared().unwrap().assignment;
+    harness.state_mut().queue.clear();
+    let operation_id = 90_002;
+    let request = test_request(harness.state(), operation_id, Some("demo"));
+    harness.state_mut().active_load_id = Some(operation_id);
+    harness
+        .state_mut()
+        .runtime
+        .active_requests
+        .insert(operation_id);
+    harness.state_mut().begin_workspace_epoch();
+    harness
+        .state()
+        .runtime
+        .tx
+        .send(UiMessage::ImageLoaded {
+            request,
+            operation_id,
+            assignment: Some(assignment),
+            result: Box::new(Err("stale load".to_string())),
+        })
+        .unwrap();
+
+    harness
+        .state_mut()
+        .process_messages(&egui::Context::default());
+    step_until(&mut harness, 8, |_| api.counts().release_assignment > 0);
 }
 
 #[test]
 fn save_keeps_the_same_assignment_active() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let claims_before = api.counts().assign_next_image;
     click(&mut harness, "Accept");
     let assignment_id = harness
         .state()
@@ -809,7 +946,7 @@ fn save_keeps_the_same_assignment_active() {
         Some(&assignment_id)
     );
     assert_eq!(api.counts().complete_assignment, 0);
-    assert_eq!(api.counts().assign_next_image, 1);
+    assert_eq!(api.counts().assign_next_image, claims_before);
 }
 
 #[test]
@@ -911,11 +1048,12 @@ fn a_full_command_queue_cannot_strand_save_loading() {
         );
     }
 
-    harness.state_mut().request_save(false);
+    harness.state_mut().submit_and_advance();
 
     assert!(!harness.state().loading.saving);
     assert_eq!(harness.state().active_operation_id, None);
     assert_eq!(harness.state().save_status, SaveStatus::Retry);
+    assert!(harness.state().pending_transition.is_none());
 }
 
 #[test]
@@ -1019,9 +1157,10 @@ fn queue_saturation_rolls_back_claim_release_review_and_adjudication() {
     let mut harness = loaded_work_harness(api);
 
     saturate_command_queue(harness.state_mut());
-    harness.state_mut().request_release();
+    harness.state_mut().skip_assignment();
     assert!(!harness.state().loading.saving);
     assert!(harness.state().active_operation_id.is_none());
+    assert!(harness.state().pending_transition.is_none());
 
     harness.state_mut().clear_current_image();
     saturate_command_queue(harness.state_mut());
@@ -1259,6 +1398,12 @@ fn demo_submit_and_skip_advance_images() {
         harness.state().current.as_ref().unwrap().image.file_name,
         "demo_3.jpg"
     );
+
+    click(&mut harness, "Skip");
+    assert_eq!(
+        harness.state().current.as_ref().unwrap().image.file_name,
+        "demo_4.jpg"
+    );
 }
 
 #[test]
@@ -1273,7 +1418,14 @@ fn skip_releases_then_claims_another_assignment() {
         .image_id
         .clone();
 
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let previews_before = api.counts().get_image_preview;
     click(&mut harness, "Skip");
+    assert!(
+        harness
+            .query_by_label("Switch active assignment?")
+            .is_none()
+    );
     step_until(&mut harness, 16, |app| {
         app.assignment
             .as_ref()
@@ -1282,7 +1434,29 @@ fn skip_releases_then_claims_another_assignment() {
 
     assert_eq!(api.counts().release_assignment, 1);
     assert_eq!(api.counts().complete_assignment, 0);
-    assert_eq!(api.counts().assign_next_image, 2);
+    assert_eq!(api.counts().get_image_preview, previews_before);
+    assert!(api.exclusions().last().unwrap().contains(&original));
+}
+
+#[test]
+fn failed_refill_keeps_the_one_shot_image_excluded() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    harness.state_mut().queue.pop_prepared();
+    let skipped = ImageId::from("img_skipped");
+    harness.state_mut().one_shot_excluded_image_id = Some(skipped.clone());
+    api.fail_next_preview();
+
+    harness.state_mut().request_prefetch();
+    harness.step();
+    step_until(&mut harness, 16, |app| app.queue.failed());
+
+    assert_eq!(
+        harness.state().one_shot_excluded_image_id.as_ref(),
+        Some(&skipped)
+    );
+    assert!(api.exclusions().last().unwrap().contains(&skipped));
 }
 
 #[test]
@@ -1300,12 +1474,25 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
             .is_some()
     );
     assert!(harness.query_by_label("Discard edits and skip").is_some());
+    assert!(
+        harness
+            .query_by_label("Switch active assignment?")
+            .is_none()
+    );
     assert!(!harness.state().loading.saving);
+
+    let batches = api.counts().annotation_batch;
+    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().autosave_if_due();
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert!(!harness.state().loading.saving);
+    assert_eq!(api.counts().annotation_batch, batches);
 
     click_accesskit_button(&mut harness, "Cancel");
     assert!(harness.state().pending_transition.is_none());
     assert_eq!(api.counts().release_assignment, 0);
 
+    harness.state_mut().last_edit_at = Some(Instant::now());
     click(&mut harness, "Skip");
     click_accesskit_button(&mut harness, "Discard edits and skip");
     step_until(&mut harness, 16, |_| api.counts().release_assignment == 1);
@@ -1728,7 +1915,7 @@ fn settings_and_transition_modals_are_viewport_constrained() {
 
         harness.state_mut().show_settings = false;
         harness.state_mut().pending_transition =
-            Some(crate::app::PendingTransition::NextAssignment);
+            Some(crate::app::PendingTransition::View(AppView::Review));
         harness.step();
         for label in ["Release and switch", "Cancel"] {
             assert_control_inside(
@@ -1802,6 +1989,11 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert_eq!(counts.rebuild_image, 0);
 
     click(&mut harness, "Submit & next");
+    assert!(
+        harness
+            .query_by_label("Switch active assignment?")
+            .is_none()
+    );
     step_until(&mut harness, 10, |app| {
         app.current
             .as_ref()
@@ -1834,6 +2026,11 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     // Rejecting an object records the object decision and the task-level
     // correction outcome that closes the review assignment.
     assert_eq!(api.counts().record_review, 3);
+    step_until(&mut harness, 10, |app| {
+        app.assignment
+            .as_ref()
+            .is_some_and(|assignment| api.has_active_assignment(&assignment.assignment_id))
+    });
 
     click(&mut harness, "Adjudicate");
     assert!(
@@ -2844,8 +3041,24 @@ impl SpyApi {
         self.state.borrow_mut().fail_next_correction = true;
     }
 
+    fn fail_next_batch(&self) {
+        self.state.borrow_mut().fail_next_batch = true;
+    }
+
     fn last_correction(&self) -> Option<CorrectionRequest> {
         self.state.borrow().last_correction.clone()
+    }
+
+    fn exclusions(&self) -> Vec<Vec<ImageId>> {
+        self.state.borrow().exclusions.clone()
+    }
+
+    fn has_active_assignment(&self, assignment_id: &AssignmentId) -> bool {
+        self.state
+            .borrow()
+            .active_assignments
+            .iter()
+            .any(|assignment| &assignment.assignment_id == assignment_id)
     }
 }
 
@@ -2891,7 +3104,9 @@ struct SpyState {
     events: Vec<EventPayload>,
     fail_next_preview: bool,
     no_assignment: bool,
-    active_assignment: Option<Assignment>,
+    active_assignments: Vec<Assignment>,
+    exclusions: Vec<Vec<ImageId>>,
+    completed_images: BTreeSet<ImageId>,
     summary_roles: Vec<DatasetRole>,
     users: Vec<DatasetUser>,
     fail_me: bool,
@@ -2899,6 +3114,7 @@ struct SpyState {
     last_oauth_return_to: Option<String>,
     snapshots: Vec<DatasetSnapshot>,
     fail_next_correction: bool,
+    fail_next_batch: bool,
     last_correction: Option<CorrectionRequest>,
 }
 
@@ -2946,7 +3162,11 @@ impl SpyState {
         metadata
             .images
             .insert(image_2.image_id.clone(), image_2.clone());
-        let states = [image_1, image_2]
+        let image_3 = image_record("img_3", "three.png", 1024, 768);
+        metadata
+            .images
+            .insert(image_3.image_id.clone(), image_3.clone());
+        let states = [image_1, image_2, image_3]
             .into_iter()
             .map(|image| (image.image_id.clone(), ImageState::new(image.image_id)))
             .collect();
@@ -2989,7 +3209,9 @@ impl SpyState {
             events: Vec::new(),
             fail_next_preview: false,
             no_assignment: false,
-            active_assignment: None,
+            active_assignments: Vec::new(),
+            exclusions: Vec::new(),
+            completed_images: BTreeSet::new(),
             summary_roles: vec![
                 DatasetRole::DataAdmin,
                 DatasetRole::Annotator,
@@ -3002,6 +3224,7 @@ impl SpyState {
             last_oauth_return_to: None,
             snapshots: Vec::new(),
             fail_next_correction: false,
+            fail_next_batch: false,
             last_correction: None,
         }
     }
@@ -3232,24 +3455,37 @@ impl ImageApi for SpyApi {
     ) -> ApiFuture<'a, Option<Assignment>> {
         let mut state = self.state.borrow_mut();
         state.counts.assign_next_image += 1;
+        state.exclusions.push(request.excluded_image_ids.clone());
         if state.no_assignment {
             return ready(Ok(None));
         }
         let kind = request.kind.unwrap_or(AssignmentKind::Annotation);
-        if let Some(active) = state.active_assignment.as_ref()
-            && active.task_id == request.task_id
-            && active.kind == kind
-        {
+        if let Some(active) = state.active_assignments.iter().find(|active| {
+            request.assignment_id.as_ref() == Some(&active.assignment_id)
+                || (active.task_id == request.task_id
+                    && active.kind == kind
+                    && !request.excluded_image_ids.contains(&active.image_id))
+        }) {
             return ready(Ok(Some(active.clone())));
         }
-        let image_id = state
-            .metadata
-            .images
-            .keys()
-            .nth(state.next_image % state.metadata.images.len())
-            .cloned()
-            .unwrap();
-        state.next_image += 1;
+        let image_ids = state.metadata.images.keys().cloned().collect::<Vec<_>>();
+        let image_id = (0..image_ids.len()).find_map(|offset| {
+            let image_id = image_ids[(state.next_image + offset) % image_ids.len()].clone();
+            (!request.excluded_image_ids.contains(&image_id)
+                && (kind != AssignmentKind::Annotation
+                    || !state.completed_images.contains(&image_id))
+                && !state
+                    .active_assignments
+                    .iter()
+                    .any(|assignment| assignment.image_id == image_id))
+            .then_some(image_id)
+        });
+        let Some(image_id) = image_id else {
+            return ready(Ok(None));
+        };
+        if kind == AssignmentKind::Annotation {
+            state.next_image += 1;
+        }
         let assignment = Assignment {
             assignment_id: AssignmentId::generate(),
             image_id,
@@ -3261,7 +3497,7 @@ impl ImageApi for SpyApi {
             created_at: now(),
             updated_at: now(),
         };
-        state.active_assignment = Some(assignment.clone());
+        state.active_assignments.push(assignment.clone());
         ready(Ok(Some(assignment)))
     }
 
@@ -3272,13 +3508,14 @@ impl ImageApi for SpyApi {
     ) -> ApiFuture<'a, Assignment> {
         let mut state = self.state.borrow_mut();
         state.counts.release_assignment += 1;
-        let Some(mut assignment) = state.active_assignment.take() else {
+        let Some(position) = state
+            .active_assignments
+            .iter()
+            .position(|assignment| assignment_matches(assignment, &request))
+        else {
             return ready(Err(ClientError::Demo("no active assignment".to_string())));
         };
-        if !assignment_matches(&assignment, &request) {
-            state.active_assignment = Some(assignment);
-            return ready(Err(ClientError::Demo("stale assignment".to_string())));
-        }
+        let mut assignment = state.active_assignments.remove(position);
         assignment.status = AssignmentStatus::Cancelled;
         assignment.updated_at = now();
         ready(Ok(assignment))
@@ -3291,13 +3528,14 @@ impl ImageApi for SpyApi {
     ) -> ApiFuture<'a, Assignment> {
         let mut state = self.state.borrow_mut();
         state.counts.complete_assignment += 1;
-        let Some(mut assignment) = state.active_assignment.take() else {
+        let Some(position) = state
+            .active_assignments
+            .iter()
+            .position(|assignment| assignment_matches(assignment, &request))
+        else {
             return ready(Err(ClientError::Demo("no active assignment".to_string())));
         };
-        if !assignment_matches(&assignment, &request) {
-            state.active_assignment = Some(assignment);
-            return ready(Err(ClientError::Demo("stale assignment".to_string())));
-        }
+        let mut assignment = state.active_assignments.remove(position);
         assignment.status = AssignmentStatus::Completed;
         assignment.updated_at = now();
         ready(Ok(assignment))
@@ -3409,9 +3647,9 @@ impl AnnotationApi for SpyApi {
         if !self
             .state
             .borrow()
-            .active_assignment
-            .as_ref()
-            .is_some_and(|active| assignment_matches(active, &assignment))
+            .active_assignments
+            .iter()
+            .any(|active| assignment_matches(active, &assignment))
         {
             return ready(Err(ClientError::Demo("stale assignment".to_string())));
         }
@@ -3424,7 +3662,7 @@ impl AnnotationApi for SpyApi {
             .or_insert_with(|| ImageState::new(assignment.image_id.clone()));
         let event = EventLogEntry::new(
             image_state.current_sequence + 1,
-            assignment.image_id,
+            assignment.image_id.clone(),
             UserId::from("admin"),
             DatasetRole::Annotator,
             now(),
@@ -3443,13 +3681,19 @@ impl AnnotationApi for SpyApi {
         if !self
             .state
             .borrow()
-            .active_assignment
-            .as_ref()
-            .is_some_and(|active| assignment_matches(active, &assignment))
+            .active_assignments
+            .iter()
+            .any(|active| assignment_matches(active, &assignment))
         {
             return ready(Err(ClientError::Demo("stale assignment".to_string())));
         }
         let mut state = self.state.borrow_mut();
+        if state.fail_next_batch {
+            state.fail_next_batch = false;
+            return ready(Err(ClientError::Demo(
+                "annotation batch failed".to_string(),
+            )));
+        }
         state.counts.annotation_batch += 1;
         let complete = request.complete;
         if complete {
@@ -3478,8 +3722,15 @@ impl AnnotationApi for SpyApi {
             .cloned()
             .unwrap_or_else(|| ImageState::new(assignment.image_id.clone()));
         if complete {
-            state.active_assignment = None;
-        } else if let Some(renewed) = state.active_assignment.as_mut() {
+            state.completed_images.insert(assignment.image_id.clone());
+            state
+                .active_assignments
+                .retain(|active| !assignment_matches(active, &assignment));
+        } else if let Some(renewed) = state
+            .active_assignments
+            .iter_mut()
+            .find(|active| assignment_matches(active, &assignment))
+        {
             renewed.updated_at = now();
             renewed.expires_at = Some(now() + chrono::Duration::minutes(15));
             result
@@ -3525,16 +3776,20 @@ impl ReviewApi for SpyApi {
         if !self
             .state
             .borrow()
-            .active_assignment
-            .as_ref()
-            .is_some_and(|active| assignment_matches(active, &assignment))
+            .active_assignments
+            .iter()
+            .any(|active| assignment_matches(active, &assignment))
         {
             return ready(Err(ClientError::Demo("stale assignment".to_string())));
         }
         let complete = matches!(&review.target, labello_domain::ReviewTarget::Task { .. });
         let mut state = self.state.borrow_mut();
         state.counts.record_review += 1;
-        let mut renewed = state.active_assignment.clone();
+        let mut renewed = state
+            .active_assignments
+            .iter()
+            .find(|active| assignment_matches(active, &assignment))
+            .cloned();
         if !complete && let Some(assignment) = renewed.as_mut() {
             assignment.updated_at = now();
             assignment.expires_at = Some(now() + chrono::Duration::minutes(15));
@@ -3552,17 +3807,28 @@ impl ReviewApi for SpyApi {
             EventPayload::ReviewRecorded { review },
         );
         image_state.apply_event(&event).unwrap();
-        if let Some(renewed) = renewed.clone() {
+        if !complete && let Some(renewed) = renewed.clone() {
             image_state
                 .assignments
                 .retain(|existing| existing.assignment_id != renewed.assignment_id);
             image_state.assignments.push(renewed);
+        } else if complete {
+            image_state
+                .assignments
+                .retain(|existing| existing.assignment_id != assignment.assignment_id);
         }
         let result = image_state.clone();
         if complete {
-            state.active_assignment = None;
-        } else {
-            state.active_assignment = renewed;
+            state
+                .active_assignments
+                .retain(|active| !assignment_matches(active, &assignment));
+        } else if let Some(renewed) = renewed
+            && let Some(active) = state
+                .active_assignments
+                .iter_mut()
+                .find(|active| active.assignment_id == renewed.assignment_id)
+        {
+            *active = renewed;
         }
         ready(Ok(result))
     }
@@ -3580,7 +3846,9 @@ impl ReviewApi for SpyApi {
             state.fail_next_correction = false;
             return ready(Err(ClientError::Demo("correction conflict".to_string())));
         }
-        state.active_assignment = None;
+        state
+            .active_assignments
+            .retain(|active| active.image_id != *image_id);
         ready(Ok(EventLogEntry::new(
             1,
             image_id.clone(),
@@ -3638,9 +3906,9 @@ impl AdjudicationApi for SpyApi {
         if !self
             .state
             .borrow()
-            .active_assignment
-            .as_ref()
-            .is_some_and(|active| assignment_matches(active, &assignment))
+            .active_assignments
+            .iter()
+            .any(|active| assignment_matches(active, &assignment))
         {
             return ready(Err(ClientError::Demo("stale assignment".to_string())));
         }
@@ -3652,14 +3920,16 @@ impl AdjudicationApi for SpyApi {
             .or_insert_with(|| ImageState::new(assignment.image_id.clone()));
         let event = EventLogEntry::new(
             image_state.current_sequence + 1,
-            assignment.image_id,
+            assignment.image_id.clone(),
             UserId::from("admin"),
             DatasetRole::Adjudicator,
             now(),
             EventPayload::AdjudicationRecorded { adjudication },
         );
         image_state.apply_event(&event).unwrap();
-        state.active_assignment = None;
+        state
+            .active_assignments
+            .retain(|active| !assignment_matches(active, &assignment));
         ready(Ok(event))
     }
 }

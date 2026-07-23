@@ -28,7 +28,7 @@ use crate::{
     theme,
 };
 
-pub const IMAGE_QUEUE_SIZE: usize = 8;
+pub const IMAGE_QUEUE_SIZE: usize = 2;
 const MAX_HISTORY_OPERATIONS: usize = 256;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -197,6 +197,15 @@ pub(crate) enum UiMessage {
         assignment: Option<Assignment>,
         result: Box<Result<Option<LoadedImage>, String>>,
     },
+    PrefetchLoaded {
+        request: RequestIdentity,
+        operation_id: u64,
+        result: Box<Result<Option<LoadedImage>, String>>,
+    },
+    ReservationReleased {
+        request: RequestIdentity,
+        result: Result<(), String>,
+    },
     SaveFinished {
         request: RequestIdentity,
         operation_id: u64,
@@ -339,6 +348,20 @@ pub(crate) enum UiCommand {
         prelabel_config_ids: Vec<PrelabelConfigId>,
         kind: AssignmentKind,
         reclaim_assignment_id: Option<AssignmentId>,
+        excluded_image_ids: Vec<ImageId>,
+    },
+    PrefetchAssignment {
+        request: RequestIdentity,
+        operation_id: u64,
+        dataset_id: DatasetId,
+        task_id: TaskId,
+        prelabel_config_ids: Vec<PrelabelConfigId>,
+        excluded_image_ids: Vec<ImageId>,
+    },
+    ReleaseReservation {
+        request: RequestIdentity,
+        dataset_id: DatasetId,
+        assignment: Assignment,
     },
     ReloadAssignment {
         request: RequestIdentity,
@@ -410,6 +433,8 @@ impl UiCommand {
             | Self::Stats { request, .. }
             | Self::SaveKeybindings { request, .. }
             | Self::ClaimAssignment { request, .. }
+            | Self::PrefetchAssignment { request, .. }
+            | Self::ReleaseReservation { request, .. }
             | Self::ReloadAssignment { request, .. }
             | Self::SaveAnnotations { request, .. }
             | Self::ReleaseAssignment { request, .. }
@@ -437,6 +462,8 @@ impl UiMessage {
             | Self::SnapshotCreated { request, .. }
             | Self::SnapshotDownloaded { request, .. }
             | Self::ImageLoaded { request, .. }
+            | Self::PrefetchLoaded { request, .. }
+            | Self::ReservationReleased { request, .. }
             | Self::SaveFinished { request, .. }
             | Self::ReleaseFinished { request, .. }
             | Self::ReviewFinished { request, .. }
@@ -465,7 +492,7 @@ pub(crate) struct LoadedAdmin {
     pub users: Vec<DatasetUser>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct LoadedImage {
     pub assignment: Assignment,
     pub queued: QueuedImage,
@@ -686,7 +713,10 @@ pub struct WorkState {
     pub(crate) show_settings: bool,
     pub(crate) next_operation_id: u64,
     pub(crate) active_load_id: Option<u64>,
+    pub(crate) active_prefetch_id: Option<u64>,
     pub(crate) active_operation_id: Option<u64>,
+    pub(crate) one_shot_excluded_image_id: Option<ImageId>,
+    pub(crate) next_demo_image_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -795,11 +825,11 @@ impl LabelloApp {
             prelabel_config_ids: vec![],
             enabled: true,
         }];
-        let mut queue = ImageQueue::new(IMAGE_QUEUE_SIZE);
-        for index in 1..=IMAGE_QUEUE_SIZE {
+        let mut queue = ImageQueue::new(config.queue_size);
+        for index in 2..=queue.queue_size() + 1 {
             queue.push_if_room(demo_image(index));
         }
-        let current = queue.pop_next();
+        let current = Some(demo_image(1));
         let setup = SetupState {
             create_dataset_id: config.dataset_id.to_string(),
             create_dataset_name: "Demo Dataset".to_string(),
@@ -841,7 +871,10 @@ impl LabelloApp {
             show_settings: false,
             next_operation_id: 0,
             active_load_id: None,
+            active_prefetch_id: None,
             active_operation_id: None,
+            one_shot_excluded_image_id: None,
+            next_demo_image_index: config.queue_size.clamp(1, IMAGE_QUEUE_SIZE) + 2,
         };
         Self {
             runtime: RuntimeState::new(),
@@ -1363,10 +1396,10 @@ impl LabelloApp {
     }
 
     pub(crate) fn replenish_demo_queue(&mut self) {
-        let next_index = self.queue.len() + 1;
         while self.queue.len() < self.queue.queue_size() {
-            let image_number = next_index + self.queue.len();
-            self.queue.push_if_room(demo_image(image_number));
+            let image = demo_image(self.next_demo_image_index);
+            self.queue.push_if_room(image);
+            self.next_demo_image_index += 1;
         }
         self.queue.set_loading(false);
     }
@@ -1766,6 +1799,7 @@ impl LabelloApp {
     pub(crate) fn autosave_if_due(&mut self) {
         if self.save_status == SaveStatus::Dirty
             && !self.loading.saving
+            && self.pending_transition.is_none()
             && !self.canvas.is_dragging()
             && self
                 .last_edit_at
@@ -1927,6 +1961,10 @@ impl eframe::App for LabelloApp {
             self.theme_applied = true;
         }
         self.process_messages(ui.ctx());
+        self.retry_prefetch_if_due(ui.ctx());
+        if self.queue.remove_expired() {
+            self.request_prefetch();
+        }
         self.sync_review_selection();
         self.start_next_persistence_command();
         self.start_setup_load();
