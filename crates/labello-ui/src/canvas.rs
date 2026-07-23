@@ -1,7 +1,7 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, f32::consts::PI};
 
 use egui::{
-    Button, Color32, CornerRadius, Key, Label, PointerButton, Pos2, Rect, Response, Sense, Stroke,
+    Color32, CornerRadius, Key, Mesh, PointerButton, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use labello_domain::{
@@ -15,9 +15,8 @@ const ZOOM_STEP: f32 = 1.25;
 const MIN_BOX_SIZE: f32 = 0.001;
 const HANDLE_HIT_RADIUS: f32 = 12.0;
 const HANDLE_SIZE: f32 = 8.0;
-const CONTROL_BAR_HEIGHT: f32 = 52.0;
-const CONTROL_HEIGHT: f32 = 44.0;
-const CONTROL_GAP: f32 = 4.0;
+const VIEWPORT_CORNER_RADIUS: u8 = 18;
+const CORNER_MASK_SEGMENTS: u32 = 8;
 const FOCUS_MARGIN: f32 = 1.35;
 const MIN_FOCUS_SPAN: f32 = 0.04;
 const DOUBLE_CLICK_DELAY: f64 = 0.3;
@@ -313,10 +312,10 @@ pub fn show_canvas(
 /// argument is required.
 ///
 /// A plain wheel or pinch zooms around the pointer. Middle-button drag,
-/// space+primary drag, and a two-finger translation pan. The visible controls
-/// and a double-click reset or adjust the view. A single pointer or stylus keeps
-/// its annotation behavior: it moves or resizes a selected box, creates a box
-/// with the bounding-box tool, or places a skeleton keypoint.
+/// space+primary drag, and a two-finger translation pan. A double-click resets
+/// the view. A single pointer or stylus keeps its annotation behavior: it moves
+/// or resizes a selected box, creates a box with the bounding-box tool, or places
+/// a skeleton keypoint.
 #[allow(clippy::too_many_arguments)]
 pub fn show_canvas_interactive(
     ui: &mut Ui,
@@ -361,11 +360,7 @@ pub fn show_canvas_configured(
     let editable = interaction.editable;
     let available = ui.available_size().max(vec2(1.0, 1.0));
     let (viewport, _) = ui.allocate_exact_size(available, Sense::hover());
-    let controls = control_bar_rect(viewport);
-    let interaction_rect = Rect::from_min_max(
-        pos2(viewport.left(), controls.bottom()),
-        viewport.right_bottom(),
-    );
+    let interaction_rect = viewport;
     if !editable {
         state.cancel_drag();
     }
@@ -392,7 +387,6 @@ pub fn show_canvas_configured(
             skeleton_edges,
             prelabels,
         );
-        show_view_controls(ui, controls, state);
         return None;
     }
     let fitted_image = fitted_image_rect(interaction_rect, image_size);
@@ -465,7 +459,6 @@ pub fn show_canvas_configured(
         interaction,
         view_consumed,
     );
-    show_view_controls(ui, controls, state);
     state.clamp_to_viewport(interaction_rect, fitted_image);
     action
 }
@@ -489,7 +482,7 @@ fn paint_canvas(
     let painter = ui.painter_at(viewport);
     painter.rect_filled(
         viewport,
-        CornerRadius::same(18),
+        CornerRadius::same(VIEWPORT_CORNER_RADIUS),
         Color32::from_rgb(18, 23, 34),
     );
     if let Some(texture) = texture {
@@ -607,12 +600,62 @@ fn paint_canvas(
     if let Some(bbox) = draft_box {
         paint_draft_box(&painter, image_rect, bbox);
     }
+    painter.add(rounded_corner_mask(viewport, ui.visuals().panel_fill));
     painter.rect_stroke(
         viewport,
-        CornerRadius::same(18),
+        CornerRadius::same(VIEWPORT_CORNER_RADIUS),
         Stroke::new(1.0, Color32::from_rgb(70, 82, 105)),
         StrokeKind::Inside,
     );
+}
+
+fn rounded_corner_mask(viewport: Rect, color: Color32) -> Mesh {
+    let radius = f32::from(VIEWPORT_CORNER_RADIUS)
+        .min(viewport.width() * 0.5)
+        .min(viewport.height() * 0.5);
+    let mut mesh = Mesh::default();
+    if radius <= 0.0 {
+        return mesh;
+    }
+
+    let corners = [
+        (
+            viewport.left_top(),
+            viewport.left_top() + vec2(radius, radius),
+            PI,
+            PI * 1.5,
+        ),
+        (
+            viewport.right_top(),
+            viewport.right_top() + vec2(-radius, radius),
+            PI * 1.5,
+            PI * 2.0,
+        ),
+        (
+            viewport.right_bottom(),
+            viewport.right_bottom() - vec2(radius, radius),
+            0.0,
+            PI * 0.5,
+        ),
+        (
+            viewport.left_bottom(),
+            viewport.left_bottom() + vec2(radius, -radius),
+            PI * 0.5,
+            PI,
+        ),
+    ];
+    for (outer, center, start, end) in corners {
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(outer, color);
+        for step in 0..=CORNER_MASK_SEGMENTS {
+            let angle = start + (end - start) * step as f32 / CORNER_MASK_SEGMENTS as f32;
+            mesh.colored_vertex(center + vec2(angle.cos(), angle.sin()) * radius, color);
+        }
+        for step in 0..CORNER_MASK_SEGMENTS {
+            mesh.add_triangle(base, base + step + 1, base + step + 2);
+        }
+    }
+    mesh
 }
 
 fn paint_existing_box(painter: &egui::Painter, image_rect: Rect, bbox: BoundingBox) {
@@ -708,75 +751,6 @@ fn paint_dashed_segment(painter: &egui::Painter, start: Pos2, end: Pos2, color: 
         }
         offset = next;
     }
-}
-
-fn control_bar_rect(viewport: Rect) -> Rect {
-    Rect::from_min_max(
-        viewport.min,
-        pos2(
-            viewport.right(),
-            (viewport.top() + CONTROL_BAR_HEIGHT).min(viewport.bottom()),
-        ),
-    )
-}
-
-fn show_view_controls(ui: &mut Ui, bar: Rect, state: &mut CanvasState) {
-    ui.painter().rect_filled(
-        bar,
-        CornerRadius::ZERO,
-        Color32::from_rgba_unmultiplied(11, 16, 25, 224),
-    );
-
-    let widths = [44.0, 58.0, 44.0, 52.0];
-    let total_width = widths.iter().sum::<f32>() + CONTROL_GAP * 3.0;
-    let mut left = (bar.center().x - total_width * 0.5).max(bar.left() + 4.0);
-    let top = bar.center().y - CONTROL_HEIGHT * 0.5;
-    let next_rect = |left: &mut f32, width: f32| {
-        let rect = Rect::from_min_size(pos2(*left, top), vec2(width, CONTROL_HEIGHT));
-        *left += width + CONTROL_GAP;
-        rect
-    };
-
-    let zoom_out = ui.put(
-        next_rect(&mut left, widths[0]),
-        Button::new("-").corner_radius(6),
-    );
-    zoom_out.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Zoom out"));
-    if zoom_out.on_hover_text("Zoom out").clicked() {
-        state.zoom_out();
-    }
-
-    let percentage_rect = next_rect(&mut left, widths[1]);
-
-    let zoom_in = ui.put(
-        next_rect(&mut left, widths[2]),
-        Button::new("+").corner_radius(6),
-    );
-    zoom_in.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Zoom in"));
-    if zoom_in.on_hover_text("Zoom in").clicked() {
-        state.zoom_in();
-    }
-
-    let fit = ui.put(
-        next_rect(&mut left, widths[3]),
-        Button::new("Fit").corner_radius(6),
-    );
-    fit.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Fit"));
-    if fit
-        .on_hover_text("Fit and center the image (double-click also fits)")
-        .clicked()
-    {
-        state.fit_view();
-    }
-
-    let percentage = format!("{:.0}%", state.current_zoom() * 100.0);
-    let zoom_label = ui.put(
-        percentage_rect,
-        Label::new(&percentage).sense(Sense::hover()),
-    );
-    zoom_label.widget_info(|| {
-        WidgetInfo::labeled(WidgetType::Label, true, format!("Zoom: {percentage}"))
-    });
 }
 
 fn handle_view_gestures(
@@ -1754,6 +1728,16 @@ mod tests {
     }
 
     #[test]
+    fn rounded_corner_mask_covers_all_viewport_corners() {
+        let viewport = Rect::from_min_size(pos2(10.0, 20.0), vec2(400.0, 300.0));
+        let mask = rounded_corner_mask(viewport, Color32::BLACK);
+
+        assert!(mask.is_valid());
+        assert_eq!(mask.calc_bounds(), viewport);
+        assert_eq!(mask.indices.len(), 4 * CORNER_MASK_SEGMENTS as usize * 3);
+    }
+
+    #[test]
     fn zoom_scales_the_fitted_image_in_a_fixed_viewport() {
         let viewport = Rect::from_min_size(pos2(10.0, 20.0), vec2(400.0, 300.0));
         let fitted = fitted_image_rect(viewport, [800, 200]);
@@ -1967,46 +1951,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zoom_controls_are_accessible_and_change_state() {
-        let mut harness = canvas_harness(false);
-        assert!(harness.query_by_label("Zoom out").is_some());
-        assert!(harness.query_by_label("Zoom: 100%").is_some());
-        assert!(harness.query_by_label("Zoom in").is_some());
-        assert!(harness.query_by_label("Fit").is_some());
-
-        harness.get_by_label("Zoom in").click_accesskit();
-        harness.step();
-        assert_eq!(harness.state().canvas.current_zoom(), ZOOM_STEP);
-        assert!(harness.query_by_label("Zoom: 125%").is_some());
-
-        harness.get_by_label("Zoom out").click_accesskit();
-        harness.step();
-        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
-
-        harness.state_mut().canvas.zoom_in();
-        harness.get_by_label("Fit").click_accesskit();
-        harness.step();
-        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
-    }
-
-    #[test]
-    fn control_bar_is_excluded_from_canvas_hit_testing() {
-        let mut harness = canvas_harness(false);
+    fn canvas_interaction_uses_the_full_available_viewport() {
+        let harness = canvas_harness(false);
         let canvas = harness.get_by_label("Annotation canvas").rect();
-        let control = harness.get_by_label("Zoom: 100%").rect().center();
-        assert!(control.y < canvas.top());
-
-        click_at(&mut harness, pos2(16.0, control.y));
-        assert!(harness.state().actions.is_empty());
-        harness.event(Event::PointerMoved(control));
-        harness.event(Event::MouseWheel {
-            unit: MouseWheelUnit::Point,
-            delta: vec2(0.0, 120.0),
-            phase: TouchPhase::Move,
-            modifiers: Modifiers::NONE,
-        });
-        harness.step();
-        assert_eq!(harness.state().canvas.current_zoom(), MIN_ZOOM);
+        assert_eq!(canvas.size(), vec2(384.0, 284.0));
     }
 
     #[test]
@@ -2028,7 +1976,7 @@ mod tests {
     fn primary_drag_creates_a_normalized_bounding_box() {
         let mut harness = canvas_harness(true);
         let canvas = harness.get_by_label("Annotation canvas").rect();
-        let start = canvas.left_top() + vec2(40.0, 30.0);
+        let start = canvas.center() - vec2(80.0, 40.0);
         let end = start + vec2(120.0, 80.0);
         drag_at(&mut harness, PointerButton::Primary, start, end);
 

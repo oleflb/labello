@@ -1631,13 +1631,6 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             "canvas too short at {width}x{height}: {:?}",
             canvas.rect(),
         );
-        assert_control_inside(
-            &harness,
-            "Fit",
-            egui::accesskit::Role::Button,
-            width,
-            height,
-        );
         if width < 600.0 {
             assert_control_inside(
                 &harness,
