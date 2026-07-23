@@ -1953,10 +1953,19 @@ impl eframe::App for LabelloApp {
                         ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
                     }
                 });
-        } else if self.view == AppView::Admin {
+        } else if self.view == AppView::Admin
+            && (self.datasets.admin_config != self.datasets.admin_baseline
+                || self.datasets.users != self.datasets.users_baseline)
+        {
+            let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+            let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
             egui::Panel::bottom("admin_save_status")
-                .exact_size(if layout == LayoutMode::Compact {
+                .exact_size(if layout != LayoutMode::Compact {
+                    68.0
+                } else if config_dirty && permissions_dirty {
                     164.0
+                } else if config_dirty {
+                    112.0
                 } else {
                     68.0
                 })

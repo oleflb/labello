@@ -199,12 +199,28 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
 fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_admin_harness(api.clone());
+    harness.set_size(egui::vec2(1300.0, 2400.0));
+    harness.step();
     step_until(&mut harness, 12, |app| {
         app.admin_tools.images.is_some() && app.admin_tools.snapshots_loaded
     });
     assert_eq!(api.counts().list_images, 1);
     assert_eq!(api.counts().list_snapshots, 1);
+    assert!(harness.query_by_label("one.png").is_none());
+    click_accesskit_button(&mut harness, "Images");
     assert!(harness.query_by_label("one.png").is_some());
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Search images")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("Pending 1 | Classes: person")
+            .next()
+            .is_some()
+    );
 
     harness.state_mut().admin_tools.image_query.page_size = 1;
     harness.state_mut().admin_tools.image_search = "png".to_string();
@@ -226,6 +242,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     assert_eq!(query.class_id, Some(ClassId::from("person")));
 
     click(&mut harness, "Next images");
+    assert_eq!(api.counts().list_images, 3);
     step_until(&mut harness, 8, |app| {
         app.admin_tools
             .images
@@ -252,6 +269,54 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
             .is_some_and(|error| error.contains("browser build"))
     );
     assert!(harness.state().runtime.error.is_none());
+}
+
+#[test]
+fn admin_classes_and_workflows_use_compact_desktop_editors() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api);
+    harness.set_size(egui::vec2(1300.0, 8000.0));
+    harness.step();
+
+    let class_name_fields = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Name")
+        .collect::<Vec<_>>();
+    let class_id_fields = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "ID")
+        .collect::<Vec<_>>();
+    let class_color_fields = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Color")
+        .collect::<Vec<_>>();
+    let class_description_fields = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Description")
+        .collect::<Vec<_>>();
+    assert_eq!(class_name_fields.len(), 2);
+    for index in 0..class_name_fields.len() {
+        let unit = class_name_fields[index].rect().width();
+        assert!(
+            (class_id_fields[index].rect().width() - unit).abs() <= 2.0,
+            "name={:?} id={:?}",
+            class_name_fields[index].rect(),
+            class_id_fields[index].rect()
+        );
+        assert!((class_color_fields[index].rect().width() - unit).abs() <= 2.0);
+        assert!(class_description_fields[index].rect().width() >= 2.9 * unit);
+    }
+    let person_workflow = "Person boxes | bounding_box | Person | Enabled";
+    let vehicle_workflow = "Vehicle boxes | bounding_box | Vehicle | Enabled";
+    let person = harness.get_by_label(person_workflow).rect();
+    let vehicle = harness.get_by_label(vehicle_workflow).rect();
+    assert!(vehicle.top() - person.top() <= 70.0);
+    assert!(harness.query_by_label("Annotator instructions").is_none());
+
+    click_accesskit_button(&mut harness, person_workflow);
+    assert!(harness.query_by_label("Annotator instructions").is_some());
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Task ID")
+            .next()
+            .is_some()
+    );
 }
 
 #[test]

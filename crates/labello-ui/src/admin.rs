@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, RichText};
+use labello_client::DatasetUser;
 use labello_domain::{
     AgreementMetric, AgreementThreshold, AnnotationType, BrowserAcceleration, ClassId,
     DatasetMetadata, DatasetRole, DatasetRoleAssignment, ImbalanceConfig, KeypointSpec, LabelClass,
@@ -15,26 +16,76 @@ impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
         let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
         let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("Dataset Admin");
-            if self.loading.admin {
-                ui.spinner();
-            }
-            if ui
-                .add_enabled(
-                    !config_dirty && !permissions_dirty,
-                    egui::Button::new("Reload Admin Config"),
-                )
-                .on_hover_text(if config_dirty || permissions_dirty {
-                    "Discard or save staged changes before reloading."
-                } else {
-                    "Reload configuration from the server."
-                })
-                .clicked()
-            {
-                self.request_admin_dataset();
-            }
+        let user_count = self.datasets.users.len();
+        let image_count = self
+            .admin_tools
+            .images
+            .as_ref()
+            .map(|page| page.total_items.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let workflow_count = self
+            .datasets
+            .admin_config
+            .as_ref()
+            .map(|config| config.tasks.iter().filter(|task| task.enabled).count())
+            .unwrap_or_default();
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.vertical(|ui| {
+                    ui.heading("Dataset Admin");
+                    ui.label(
+                        RichText::new(
+                            "Manage access, inspect images, and configure labeling workflows.",
+                        )
+                        .color(theme::MUTED),
+                    );
+                });
+                if self.loading.admin {
+                    ui.spinner();
+                }
+                ui.label(
+                    RichText::new(if config_dirty {
+                        "Configuration changes staged"
+                    } else if permissions_dirty {
+                        "Permission changes staged"
+                    } else {
+                        "Admin config saved"
+                    })
+                    .color(if config_dirty || permissions_dirty {
+                        theme::AMBER
+                    } else {
+                        theme::TEAL
+                    })
+                    .strong(),
+                );
+                if ui
+                    .add_enabled(
+                        !config_dirty && !permissions_dirty,
+                        egui::Button::new("Reload"),
+                    )
+                    .on_hover_text(if config_dirty || permissions_dirty {
+                        "Discard or save staged changes before reloading."
+                    } else {
+                        "Reload configuration from the server."
+                    })
+                    .clicked()
+                {
+                    self.request_admin_dataset();
+                }
+            });
+            ui.add_space(8.0);
+            ui.columns(3, |columns| {
+                admin_metric(&mut columns[0], "Users", user_count.to_string());
+                admin_metric(&mut columns[1], "Indexed images", image_count);
+                admin_metric(
+                    &mut columns[2],
+                    "Active workflows",
+                    workflow_count.to_string(),
+                );
+            });
         });
+        ui.add_space(8.0);
         self.people_section(ui);
         self.images_section(ui);
         self.snapshots_section(ui);
@@ -54,6 +105,8 @@ impl LabelloApp {
 
         let mut ingest = false;
         let mut upload_folder = false;
+        ui.add_space(8.0);
+        ui.heading("Dataset configuration");
         ui.add_enabled_ui(
             !admin_loading && !roles_saving && !uploading_now && !ingesting_now,
             |ui| {
@@ -64,6 +117,7 @@ impl LabelloApp {
                 .color(theme::MUTED),
             );
             theme::card_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.heading("Dataset Details");
                 labeled_text(ui, "Dataset name", &mut config.name)
                     .on_hover_text("Human-readable name stored in labello.dataset.toml.");
@@ -71,6 +125,7 @@ impl LabelloApp {
             });
 
             theme::card_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.heading("Image Roots");
                 edit_string_list(
                     ui,
@@ -126,6 +181,7 @@ impl LabelloApp {
             edit_imbalance(ui, &mut config.imbalance);
             let issues = config_issues(config, &current_user);
             theme::card_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.heading("Validation Summary");
                 if issues.is_empty() {
                     ui.label(RichText::new("Configuration is ready to save.").color(theme::TEAL));
@@ -182,42 +238,34 @@ impl LabelloApp {
             ui.label(
                 RichText::new(if config_dirty {
                     "Unsaved admin changes"
-                } else if permissions_dirty {
+                } else {
                     "Unsaved permission changes"
-                } else {
-                    "Admin config saved"
                 })
-                .color(if config_dirty || permissions_dirty {
-                    theme::AMBER
-                } else {
-                    theme::TEAL
-                })
+                .color(theme::AMBER)
                 .strong(),
             );
-            if ui
-                .add_enabled(
-                    config_dirty && issues.is_empty() && !self.loading.admin,
-                    egui::Button::new("Save Admin Config"),
-                )
-                .on_disabled_hover_text(if issues.is_empty() {
-                    "No staged changes to save."
-                } else {
-                    "Fix validation errors before saving."
-                })
-                .clicked()
-            {
-                self.request_admin_save();
-            }
-            if ui
-                .add_enabled(
-                    config_dirty && !self.loading.admin,
-                    egui::Button::new("Discard staged changes"),
-                )
-                .clicked()
-            {
-                self.datasets.admin_config = self.datasets.admin_baseline.clone();
-                self.clear_admin_draft();
-                self.runtime.notice = Some("Staged admin changes discarded".to_string());
+            if config_dirty {
+                if ui
+                    .add_enabled(
+                        issues.is_empty() && !self.loading.admin,
+                        egui::Button::new("Save Admin Config"),
+                    )
+                    .on_disabled_hover_text("Fix validation errors before saving.")
+                    .clicked()
+                {
+                    self.request_admin_save();
+                }
+                if ui
+                    .add_enabled(
+                        !self.loading.admin,
+                        egui::Button::new("Discard staged changes"),
+                    )
+                    .clicked()
+                {
+                    self.datasets.admin_config = self.datasets.admin_baseline.clone();
+                    self.clear_admin_draft();
+                    self.runtime.notice = Some("Staged admin changes discarded".to_string());
+                }
             }
             if !issues.is_empty() {
                 ui.colored_label(theme::RED, format!("{} validation error(s)", issues.len()));
@@ -230,9 +278,16 @@ impl LabelloApp {
 
     fn people_section(&mut self, ui: &mut egui::Ui) {
         theme::card_frame().show(ui, |ui| {
-            ui.heading("People");
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.heading("People");
+                ui.label(
+                    RichText::new(format!("{} users", self.datasets.users.len()))
+                        .color(theme::BLUE),
+                );
+            });
             ui.label(
-                RichText::new("Dataset access for users who have signed in to this server.")
+                RichText::new("Grant dataset roles to people who have signed in to this server.")
                     .color(theme::MUTED),
             );
             if self.loading.admin && self.datasets.users.is_empty() {
@@ -251,65 +306,56 @@ impl LabelloApp {
             let saving = self.loading.roles_user.clone();
             let mut save_user = None;
             for user in &mut self.datasets.users {
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&user.account.display_name).strong());
-                        if let Some(login) = &user.account.github_login {
-                            ui.small(format!("@{login}"));
-                        }
-                        ui.small(format!("ID: {}", user.account.user_id));
-                    });
-                    for (role, label) in [
-                        (DatasetRole::Annotator, "Annotator"),
-                        (DatasetRole::Reviewer, "Reviewer"),
-                        (DatasetRole::Adjudicator, "Adjudicator"),
-                        (DatasetRole::DataAdmin, "Data admin"),
-                    ] {
-                        let is_admin_role = role == DatasetRole::DataAdmin;
-                        let role_enabled = !admin_loading
-                            && saving.is_none()
-                            && !(is_admin_role
-                                && user.roles.contains(&role)
-                                && (user.account.user_id == current_user || admin_count == 1));
-                        let mut enabled = user.roles.contains(&role);
-                        if ui
-                            .add_enabled(role_enabled, egui::Checkbox::new(&mut enabled, label))
-                            .on_disabled_hover_text(if user.account.user_id == current_user {
-                                "You cannot remove your own data admin role."
-                            } else {
-                                "At least one data admin must remain."
+                ui.add_space(4.0);
+                egui::Frame::new()
+                    .fill(theme::PANEL_ALT)
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        let compact = ui.available_width() < 760.0;
+                        let save_clicked = if compact {
+                            ui.vertical(|ui| {
+                                user_identity(ui, user);
+                                ui.add_space(4.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    user_role_controls(
+                                        ui,
+                                        user,
+                                        &baseline,
+                                        &current_user,
+                                        admin_count,
+                                        admin_loading,
+                                        saving.as_ref(),
+                                    )
+                                })
+                                .inner
                             })
-                            .changed()
-                        {
-                            if enabled {
-                                user.roles.push(role);
-                                user.roles.sort();
-                                user.roles.dedup();
-                            } else {
-                                user.roles.retain(|existing| existing != &role);
-                            }
+                            .inner
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(210.0);
+                                    user_identity(ui, user);
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    user_role_controls(
+                                        ui,
+                                        user,
+                                        &baseline,
+                                        &current_user,
+                                        admin_count,
+                                        admin_loading,
+                                        saving.as_ref(),
+                                    )
+                                })
+                                .inner
+                            })
+                            .inner
+                        };
+                        if save_clicked {
+                            save_user = Some(user.account.user_id.clone());
                         }
-                    }
-                    let dirty = baseline
-                        .iter()
-                        .find(|existing| existing.account.user_id == user.account.user_id)
-                        .is_none_or(|existing| existing.roles != user.roles);
-                    let this_saving = saving.as_ref() == Some(&user.account.user_id);
-                    if ui
-                        .add_enabled(
-                            dirty && saving.is_none() && !admin_loading,
-                            egui::Button::new(if this_saving {
-                                "Saving..."
-                            } else {
-                                "Save permissions"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        save_user = Some(user.account.user_id.clone());
-                    }
-                });
+                    });
             }
             if self.datasets.users.is_empty() && !self.loading.admin {
                 ui.label(
@@ -323,214 +369,271 @@ impl LabelloApp {
     }
 
     fn images_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Images")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Search the indexed images and inspect workflow state.")
-                        .color(theme::MUTED),
-                );
-                let compact_filters = ui.available_width() < 600.0;
-                let mut show_filters = |ui: &mut egui::Ui| {
-                    ui.label("Search");
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.admin_tools.image_search)
-                            .desired_width(ui.available_width().min(320.0)),
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::CollapsingHeader::new("Images")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Search the indexed images and inspect workflow state.")
+                            .color(theme::MUTED),
                     );
+                    let compact_filters = ui.available_width() < 600.0;
+                    let search_label = ui.label("Search images");
+                    let search = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.admin_tools.image_search)
+                                .hint_text("File name or path")
+                                .desired_width(ui.available_width()),
+                        )
+                        .labelled_by(search_label.id);
                     if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         self.admin_tools.image_query.page = 1;
                         self.request_images();
                     }
-
-                    egui::ComboBox::from_id_salt("image-explorer-status")
-                        .selected_text(
-                            self.admin_tools
-                                .image_status
-                                .as_ref()
-                                .map(task_status_label)
-                                .unwrap_or("Any status"),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.admin_tools.image_status,
-                                None,
-                                "Any status",
-                            );
-                            for status in task_statuses() {
-                                let label = task_status_label(&status);
+                    let control_width = if compact_filters {
+                        ui.available_width()
+                    } else {
+                        140.0
+                    };
+                    let mut show_filters = |ui: &mut egui::Ui| {
+                        egui::ComboBox::from_id_salt("image-explorer-status")
+                            .width(control_width)
+                            .selected_text(
+                                self.admin_tools
+                                    .image_status
+                                    .as_ref()
+                                    .map(task_status_label)
+                                    .unwrap_or("Any status"),
+                            )
+                            .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_status,
-                                    Some(status),
-                                    label,
+                                    None,
+                                    "Any status",
                                 );
-                            }
-                        });
+                                for status in task_statuses() {
+                                    let label = task_status_label(&status);
+                                    ui.selectable_value(
+                                        &mut self.admin_tools.image_status,
+                                        Some(status),
+                                        label,
+                                    );
+                                }
+                            });
 
-                    let tasks = self
-                        .datasets
-                        .admin_config
-                        .as_ref()
-                        .map(|config| config.tasks.clone())
-                        .unwrap_or_default();
-                    egui::ComboBox::from_id_salt("image-explorer-task")
-                        .selected_text(
-                            self.admin_tools
-                                .image_task
-                                .as_ref()
-                                .and_then(|task_id| {
-                                    tasks
-                                        .iter()
-                                        .find(|task| &task.task_id == task_id)
-                                        .map(|task| task.name.as_str())
-                                })
-                                .unwrap_or("Any task"),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.admin_tools.image_task, None, "Any task");
-                            for task in &tasks {
+                        let tasks = self
+                            .datasets
+                            .admin_config
+                            .as_ref()
+                            .map(|config| config.tasks.clone())
+                            .unwrap_or_default();
+                        egui::ComboBox::from_id_salt("image-explorer-task")
+                            .width(control_width)
+                            .selected_text(
+                                self.admin_tools
+                                    .image_task
+                                    .as_ref()
+                                    .and_then(|task_id| {
+                                        tasks
+                                            .iter()
+                                            .find(|task| &task.task_id == task_id)
+                                            .map(|task| task.name.as_str())
+                                    })
+                                    .unwrap_or("Any task"),
+                            )
+                            .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_task,
-                                    Some(task.task_id.clone()),
-                                    &task.name,
+                                    None,
+                                    "Any task",
                                 );
-                            }
-                        });
+                                for task in &tasks {
+                                    ui.selectable_value(
+                                        &mut self.admin_tools.image_task,
+                                        Some(task.task_id.clone()),
+                                        &task.name,
+                                    );
+                                }
+                            });
 
-                    let classes = self
-                        .datasets
-                        .admin_config
-                        .as_ref()
-                        .map(|config| config.label_classes.clone())
-                        .unwrap_or_default();
-                    egui::ComboBox::from_id_salt("image-explorer-class")
-                        .selected_text(
-                            self.admin_tools
-                                .image_class
-                                .as_ref()
-                                .and_then(|class_id| {
-                                    classes
-                                        .iter()
-                                        .find(|class| &class.class_id == class_id)
-                                        .map(|class| class.name.as_str())
-                                })
-                                .unwrap_or("Any class"),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.admin_tools.image_class,
-                                None,
-                                "Any class",
-                            );
-                            for class in &classes {
+                        let classes = self
+                            .datasets
+                            .admin_config
+                            .as_ref()
+                            .map(|config| config.label_classes.clone())
+                            .unwrap_or_default();
+                        egui::ComboBox::from_id_salt("image-explorer-class")
+                            .width(control_width)
+                            .selected_text(
+                                self.admin_tools
+                                    .image_class
+                                    .as_ref()
+                                    .and_then(|class_id| {
+                                        classes
+                                            .iter()
+                                            .find(|class| &class.class_id == class_id)
+                                            .map(|class| class.name.as_str())
+                                    })
+                                    .unwrap_or("Any class"),
+                            )
+                            .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_class,
-                                    Some(class.class_id.clone()),
-                                    &class.name,
+                                    None,
+                                    "Any class",
                                 );
+                                for class in &classes {
+                                    ui.selectable_value(
+                                        &mut self.admin_tools.image_class,
+                                        Some(class.class_id.clone()),
+                                        &class.name,
+                                    );
+                                }
+                            });
+                        if ui
+                            .add_enabled(!self.loading.images, egui::Button::new("Apply filters"))
+                            .clicked()
+                        {
+                            self.admin_tools.image_query.page = 1;
+                            self.request_images();
+                        }
+                        if ui
+                            .add_enabled(!self.loading.images, egui::Button::new("Refresh images"))
+                            .clicked()
+                        {
+                            self.request_images();
+                        }
+                        if self.loading.images {
+                            ui.spinner();
+                        }
+                    };
+                    if compact_filters {
+                        ui.vertical(&mut show_filters);
+                    } else {
+                        ui.horizontal_wrapped(show_filters);
+                    }
+                    if let Some(error) = &self.admin_tools.images_error {
+                        ui.colored_label(theme::RED, error);
+                    }
+                    if let Some(page) = self.admin_tools.images.clone() {
+                        let previous = page.page > 1;
+                        let next = page.page < page.total_pages;
+                        let current_page = page.page;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} images | Page {} of {}",
+                                    page.total_items,
+                                    page.page,
+                                    page.total_pages.max(1)
+                                ))
+                                .strong(),
+                            );
+                            if ui
+                                .add_enabled(
+                                    previous && !self.loading.images,
+                                    egui::Button::new("Previous images"),
+                                )
+                                .clicked()
+                            {
+                                self.admin_tools.image_query.page = current_page.saturating_sub(1);
+                                self.request_images();
+                            }
+                            if ui
+                                .add_enabled(
+                                    next && !self.loading.images,
+                                    egui::Button::new("Next images"),
+                                )
+                                .clicked()
+                            {
+                                self.admin_tools.image_query.page = current_page + 1;
+                                self.request_images();
                             }
                         });
-                    if ui
-                        .add_enabled(!self.loading.images, egui::Button::new("Apply filters"))
-                        .clicked()
-                    {
-                        self.admin_tools.image_query.page = 1;
-                        self.request_images();
-                    }
-                    if ui
-                        .add_enabled(!self.loading.images, egui::Button::new("Refresh images"))
-                        .clicked()
-                    {
-                        self.request_images();
-                    }
-                    if self.loading.images {
-                        ui.spinner();
-                    }
-                };
-                if compact_filters {
-                    ui.vertical(&mut show_filters);
-                } else {
-                    ui.horizontal_wrapped(show_filters);
-                }
-                if let Some(error) = &self.admin_tools.images_error {
-                    ui.colored_label(theme::RED, error);
-                }
-                if let Some(page) = &self.admin_tools.images {
-                    ui.small(format!(
-                        "{} image(s), page {} of {}",
-                        page.total_items,
-                        page.page,
-                        page.total_pages.max(1)
-                    ));
-                    for item in &page.items {
-                        ui.separator();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(&item.image.file_name).strong());
-                            ui.small(&item.image.canonical_path);
-                            ui.small(format!(
-                                "{} x {} | {}",
-                                item.image.width,
-                                item.image.height,
-                                human_bytes(item.image.byte_size)
-                            ));
-                        });
-                        let statuses = item
-                            .task_statuses
-                            .iter()
-                            .map(|(task, status)| format!("{task}: {}", task_status_label(status)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let classes = item
-                            .class_ids
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        ui.small(format!(
-                            "Status: {} | Classes: {}",
-                            if statuses.is_empty() {
-                                "none"
-                            } else {
-                                &statuses
-                            },
-                            if classes.is_empty() { "none" } else { &classes }
-                        ));
-                    }
-                    let previous = page.page > 1;
-                    let next = page.page < page.total_pages;
-                    let current_page = page.page;
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_enabled(
-                                previous && !self.loading.images,
-                                egui::Button::new("Previous images"),
-                            )
-                            .clicked()
-                        {
-                            self.admin_tools.image_query.page = current_page.saturating_sub(1);
-                            self.request_images();
+                        if page.items.is_empty() {
+                            ui.label(
+                                RichText::new("No images match these filters.").color(theme::MUTED),
+                            );
                         }
-                        if ui
-                            .add_enabled(
-                                next && !self.loading.images,
-                                egui::Button::new("Next images"),
-                            )
-                            .clicked()
-                        {
-                            self.admin_tools.image_query.page = current_page + 1;
-                            self.request_images();
+                        for item in &page.items {
+                            ui.add_space(4.0);
+                            let status_details = item
+                                .task_statuses
+                                .iter()
+                                .map(|(task, status)| {
+                                    format!("{task}: {}", task_status_label(status))
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let statuses = item.task_statuses.values().cloned().collect::<Vec<_>>();
+                            let classes = item
+                                .class_ids
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            egui::Frame::new()
+                                .fill(theme::PANEL_ALT)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(RichText::new(&item.image.file_name).strong());
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} x {} | {}",
+                                                item.image.width,
+                                                item.image.height,
+                                                human_bytes(item.image.byte_size)
+                                            ))
+                                            .color(theme::BLUE),
+                                        );
+                                    });
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&item.image.canonical_path)
+                                                .color(theme::MUTED),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&item.image.canonical_path);
+                                    let class_summary = if classes.is_empty() {
+                                        "No classes".to_string()
+                                    } else {
+                                        format!("Classes: {classes}")
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} | {class_summary}",
+                                            task_status_summary(&statuses)
+                                        ))
+                                        .color(theme::MUTED),
+                                    )
+                                    .on_hover_text(
+                                        if status_details.is_empty() {
+                                            "No workflow status".to_string()
+                                        } else {
+                                            status_details
+                                        },
+                                    );
+                                });
                         }
-                    });
-                } else if !self.loading.images && self.admin_tools.images_error.is_none() {
-                    ui.label(RichText::new("No image results loaded.").color(theme::MUTED));
-                }
-            });
+                    } else if !self.loading.images && self.admin_tools.images_error.is_none() {
+                        ui.label(RichText::new("No image results loaded.").color(theme::MUTED));
+                    }
+                });
+        });
     }
 
     fn snapshots_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Backups / Snapshots")
-            .default_open(false)
-            .show(ui, |ui| {
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::CollapsingHeader::new("Backups / Snapshots")
+                .default_open(false)
+                .show(ui, |ui| {
                 ui.label(
                     RichText::new("Create and download native dataset snapshots. Image bytes are not included.")
                         .color(theme::MUTED),
@@ -597,7 +700,8 @@ impl LabelloApp {
                         });
                     }
                 }
-            });
+                });
+        });
     }
 
     pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
@@ -811,6 +915,89 @@ impl LabelloApp {
     }
 }
 
+fn user_identity(ui: &mut egui::Ui, user: &DatasetUser) {
+    ui.label(RichText::new(&user.account.display_name).strong());
+    if let Some(login) = &user.account.github_login {
+        ui.label(RichText::new(format!("@{login}")).color(theme::MUTED));
+    }
+    ui.small(format!("ID: {}", user.account.user_id));
+}
+
+fn user_role_controls(
+    ui: &mut egui::Ui,
+    user: &mut DatasetUser,
+    baseline: &[DatasetUser],
+    current_user: &UserId,
+    admin_count: usize,
+    admin_loading: bool,
+    saving: Option<&UserId>,
+) -> bool {
+    for (role, label) in [
+        (DatasetRole::Annotator, "Annotator"),
+        (DatasetRole::Reviewer, "Reviewer"),
+        (DatasetRole::Adjudicator, "Adjudicator"),
+        (DatasetRole::DataAdmin, "Data admin"),
+    ] {
+        let is_admin_role = role == DatasetRole::DataAdmin;
+        let role_enabled = !admin_loading
+            && saving.is_none()
+            && !(is_admin_role
+                && user.roles.contains(&role)
+                && (&user.account.user_id == current_user || admin_count == 1));
+        let mut enabled = user.roles.contains(&role);
+        if ui
+            .add_enabled(role_enabled, egui::Checkbox::new(&mut enabled, label))
+            .on_disabled_hover_text(if &user.account.user_id == current_user {
+                "You cannot remove your own data admin role."
+            } else {
+                "At least one data admin must remain."
+            })
+            .changed()
+        {
+            if enabled {
+                user.roles.push(role);
+                user.roles.sort();
+                user.roles.dedup();
+            } else {
+                user.roles.retain(|existing| existing != &role);
+            }
+        }
+    }
+    let dirty = baseline
+        .iter()
+        .find(|existing| existing.account.user_id == user.account.user_id)
+        .is_none_or(|existing| existing.roles != user.roles);
+    let this_saving = saving == Some(&user.account.user_id);
+    ui.add_enabled(
+        dirty && saving.is_none() && !admin_loading,
+        egui::Button::new(if this_saving {
+            "Saving..."
+        } else {
+            "Save permissions"
+        }),
+    )
+    .clicked()
+}
+
+fn admin_metric(ui: &mut egui::Ui, label: &str, value: String) {
+    let response = egui::Frame::new()
+        .fill(theme::PANEL_ALT)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(label).color(theme::MUTED));
+            ui.heading(value);
+        });
+    response.response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Other,
+            true,
+            format!("Admin metric {label}"),
+        )
+    });
+}
+
 fn task_statuses() -> [TaskStatus; 6] {
     [
         TaskStatus::Pending,
@@ -830,6 +1017,25 @@ fn task_status_label(status: &TaskStatus) -> &'static str {
         TaskStatus::Completed => "Completed",
         TaskStatus::NeedsCorrection => "Needs correction",
         TaskStatus::AdjudicationRequired => "Adjudication required",
+    }
+}
+
+fn task_status_summary(statuses: &[TaskStatus]) -> String {
+    let summary = task_statuses()
+        .into_iter()
+        .filter_map(|status| {
+            let count = statuses
+                .iter()
+                .filter(|current| **current == status)
+                .count();
+            (count > 0).then(|| format!("{} {count}", task_status_label(&status)))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if summary.is_empty() {
+        "No workflow status".to_string()
+    } else {
+        summary
     }
 }
 
@@ -884,6 +1090,7 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
 
 fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.heading("Class Workflows");
         ui.label(
             RichText::new("Fast path: create a class and its worker-visible task together.")
@@ -1063,57 +1270,25 @@ fn edit_string_list(
 
 fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [TaskDefinition]) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.heading("Classes");
         ui.label(
             RichText::new("Classes define the objects annotators can label.").color(theme::MUTED),
         );
         let mut remove = None;
+        let wide = ui.available_width() >= 820.0;
         for (index, label) in labels.iter_mut().enumerate() {
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut label.name)
-                    .on_hover_text("Display name shown to annotators.");
-                ui.label("ID");
-                let mut class_id = label.class_id.to_string();
-                if ui
-                    .text_edit_singleline(&mut class_id)
-                    .on_hover_text("Stable class id used by annotations and tasks. Existing task links update when this changes.")
-                    .changed()
-                {
-                    let previous = label.class_id.clone();
-                    let updated = ClassId::from(class_id);
-                    label.class_id = updated.clone();
-                    for task in tasks.iter_mut() {
-                        for class_id in &mut task.class_ids {
-                            if class_id == &previous {
-                                *class_id = updated.clone();
-                            }
-                        }
+            ui.add_space(4.0);
+            egui::Frame::new()
+                .fill(theme::PANEL_ALT)
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    if edit_class_card(ui, index, label, tasks, wide) {
+                        remove = Some(index);
                     }
-                }
-                ui.label("Color");
-                ui.text_edit_singleline(&mut label.color)
-                    .on_hover_text("Class color as a hex value, for example #5eead4.");
-                if destructive_button(ui, "Remove class") {
-                    remove = Some(index);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Description");
-                let mut description = label.description.clone().unwrap_or_default();
-                if ui
-                    .text_edit_singleline(&mut description)
-                    .on_hover_text("Optional guidance about what belongs in this class.")
-                    .changed()
-                {
-                    label.description = if description.trim().is_empty() {
-                        None
-                    } else {
-                        Some(description)
-                    };
-                }
-            });
+                });
         }
         if let Some(index) = remove {
             let removed = labels.remove(index).class_id;
@@ -1136,6 +1311,107 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [Tas
     });
 }
 
+fn edit_class_card(
+    ui: &mut egui::Ui,
+    index: usize,
+    label: &mut LabelClass,
+    tasks: &mut [TaskDefinition],
+    wide: bool,
+) -> bool {
+    let mut class_id = label.class_id.to_string();
+    let mut description = label.description.clone().unwrap_or_default();
+    let mut remove = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(format!("Class {}", index + 1)).strong());
+        ui.label(RichText::new(&label.name).color(theme::BLUE));
+        remove = destructive_button(ui, "Remove class");
+    });
+
+    let (id_changed, description_changed) = if wide {
+        let mut id_changed = false;
+        let mut description_changed = false;
+        let spacing = ui.spacing().item_spacing.x;
+        let unit = (ui.available_width() - 3.0 * spacing) / 6.0;
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(unit, 68.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let field_label = ui.label("Name");
+                    ui.add(egui::TextEdit::singleline(&mut label.name).desired_width(unit))
+                        .labelled_by(field_label.id)
+                        .on_hover_text("Display name shown to annotators.");
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(unit, 68.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let field_label = ui.label("ID");
+                    id_changed = ui
+                        .add(egui::TextEdit::singleline(&mut class_id).desired_width(unit))
+                        .labelled_by(field_label.id)
+                        .on_hover_text("Stable class id used by annotations and linked workflows.")
+                        .changed();
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(unit, 68.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let field_label = ui.label("Color");
+                    ui.add(egui::TextEdit::singleline(&mut label.color).desired_width(unit))
+                        .labelled_by(field_label.id)
+                        .on_hover_text("Class color as a hex value, for example #5eead4.");
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(3.0 * unit, 68.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let field_label = ui.label("Description");
+                    description_changed = ui
+                        .add(egui::TextEdit::singleline(&mut description).desired_width(3.0 * unit))
+                        .labelled_by(field_label.id)
+                        .on_hover_text("Optional guidance about what belongs in this class.")
+                        .changed();
+                },
+            );
+        });
+        (id_changed, description_changed)
+    } else {
+        labeled_text(ui, "Name", &mut label.name)
+            .on_hover_text("Display name shown to annotators.");
+        let id_changed = labeled_text(ui, "ID", &mut class_id)
+            .on_hover_text("Stable class id used by annotations and linked workflows.")
+            .changed();
+        labeled_text(ui, "Color", &mut label.color)
+            .on_hover_text("Class color as a hex value, for example #5eead4.");
+        let description_changed = labeled_text(ui, "Description", &mut description)
+            .on_hover_text("Optional guidance about what belongs in this class.")
+            .changed();
+        (id_changed, description_changed)
+    };
+
+    if id_changed {
+        let previous = label.class_id.clone();
+        let updated = ClassId::from(class_id);
+        label.class_id = updated.clone();
+        for task in tasks.iter_mut() {
+            for class_id in &mut task.class_ids {
+                if class_id == &previous {
+                    *class_id = updated.clone();
+                }
+            }
+        }
+    }
+    if description_changed {
+        label.description = (!description.trim().is_empty()).then_some(description);
+    }
+
+    remove
+}
+
 fn edit_tasks(
     ui: &mut egui::Ui,
     tasks: &mut Vec<TaskDefinition>,
@@ -1143,6 +1419,7 @@ fn edit_tasks(
     prelabels: &[PrelabelConfig],
 ) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.heading("Labeling Workflows");
         ui.label(
             RichText::new(
@@ -1153,122 +1430,54 @@ fn edit_tasks(
         let mut remove = None;
         for (index, task) in tasks.iter_mut().enumerate() {
             normalize_task_annotation(task);
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Task ID");
-                let mut task_id = task.task_id.to_string();
-                if ui
-                    .text_edit_singleline(&mut task_id)
-                    .on_hover_text("Stable task id used by assignments and event logs.")
-                    .changed()
-                {
-                    task.task_id = TaskId::from(task_id);
-                }
-                ui.label("Name");
-                ui.text_edit_singleline(&mut task.name)
-                    .on_hover_text("Task name shown in the work panel.");
-                ui.checkbox(&mut task.enabled, "Enabled");
-                if destructive_button(ui, "Remove workflow") {
-                    remove = Some(index);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Annotation type");
-                let mut annotation_type = task.annotation_type.clone();
-                egui::ComboBox::from_id_salt(format!("task-type-{index}"))
-                    .selected_text(annotation_type.to_string())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut annotation_type,
-                            AnnotationType::BoundingBox,
-                            "bounding_box",
-                        );
-                        ui.selectable_value(
-                            &mut annotation_type,
-                            AnnotationType::Skeleton,
-                            "skeleton",
-                        );
-                    });
-                if annotation_type != task.annotation_type {
-                    set_task_annotation_type(task, annotation_type);
-                }
-            });
-            if task.annotation_type == AnnotationType::Skeleton
-                && let Some(skeleton) = task.skeleton.as_mut()
-            {
-                edit_skeleton(ui, index, skeleton);
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Instruction title");
-                ui.text_edit_singleline(&mut task.instructions.title)
-                    .on_hover_text("Tutorial/instruction title.");
-            });
-            ui.label("Tutorial instructions");
-            ui.text_edit_multiline(&mut task.instructions.example_text)
-                .on_hover_text("Instructions annotators see in the tutorial panel.");
-            ui.label("Tutorial example images");
-            edit_string_list(
-                ui,
-                &mut task.instructions.example_images,
-                "Image path",
-                "Add example image",
-                "tutorial/example.png",
+            let class_name = task
+                .class_ids
+                .first()
+                .and_then(|class_id| labels.iter().find(|label| &label.class_id == class_id))
+                .map(|label| label.name.as_str())
+                .unwrap_or("No class");
+            let summary = format!(
+                "{} | {} | {} | {}",
+                task.name,
+                task.annotation_type,
+                class_name,
+                if task.enabled { "Enabled" } else { "Disabled" }
             );
-            ui.label("Class");
-            if labels.is_empty() {
-                ui.label(
-                    RichText::new("Add a class before configuring this task.").color(theme::RED),
-                );
-            } else {
-                let mut selected = task.class_ids.first().cloned();
-                let selected_text = selected
-                    .as_ref()
-                    .and_then(|class_id| {
-                        labels
-                            .iter()
-                            .find(|label| &label.class_id == class_id)
-                            .map(|label| label.name.clone())
-                    })
-                    .unwrap_or_else(|| "Select a class".to_string());
-                egui::ComboBox::from_id_salt(format!("task-class-{index}"))
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        for label in labels {
-                            ui.selectable_value(
-                                &mut selected,
-                                Some(label.class_id.clone()),
-                                &label.name,
-                            );
-                        }
-                    });
-                if selected.as_ref() != task.class_ids.first()
-                    || task.class_ids.len() != usize::from(selected.is_some())
-                {
-                    task.class_ids = selected.into_iter().collect();
-                }
-            }
-            ui.label("Prelabel sources");
-            if prelabels.is_empty() {
-                ui.small("No prelabel sources configured.");
-            }
-            for prelabel in prelabels {
-                let mut enabled = task.prelabel_config_ids.contains(&prelabel.config_id);
-                if ui
-                    .checkbox(
-                        &mut enabled,
-                        format!("{} ({})", prelabel.name, prelabel.config_id),
-                    )
-                    .changed()
-                {
-                    if enabled {
-                        task.prelabel_config_ids.push(prelabel.config_id.clone());
-                    } else {
-                        task.prelabel_config_ids
-                            .retain(|config_id| config_id != &prelabel.config_id);
-                    }
-                }
-            }
-            edit_review(ui, index, task);
+            ui.add_space(4.0);
+            egui::Frame::new()
+                .fill(theme::PANEL_ALT)
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(12, 6))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    egui::CollapsingHeader::new(summary)
+                        .id_salt(("workflow-editor", index))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let remove_clicked = if ui.available_width() >= 760.0 {
+                                let mut remove_clicked = false;
+                                ui.columns(2, |columns| {
+                                    remove_clicked = edit_workflow_basics(
+                                        &mut columns[0],
+                                        index,
+                                        task,
+                                        labels,
+                                        prelabels,
+                                    );
+                                    edit_workflow_instructions(&mut columns[1], task);
+                                });
+                                remove_clicked
+                            } else {
+                                let remove_clicked =
+                                    edit_workflow_basics(ui, index, task, labels, prelabels);
+                                edit_workflow_instructions(ui, task);
+                                remove_clicked
+                            };
+                            if remove_clicked {
+                                remove = Some(index);
+                            }
+                        });
+                });
         }
         if let Some(index) = remove {
             tasks.remove(index);
@@ -1301,6 +1510,124 @@ fn edit_tasks(
     });
 }
 
+fn edit_workflow_basics(
+    ui: &mut egui::Ui,
+    index: usize,
+    task: &mut TaskDefinition,
+    labels: &[LabelClass],
+    prelabels: &[PrelabelConfig],
+) -> bool {
+    ui.label(RichText::new("Workflow").color(theme::BLUE).strong());
+    let mut task_id = task.task_id.to_string();
+    if labeled_text(ui, "Task ID", &mut task_id)
+        .on_hover_text("Stable task id used by assignments and event logs.")
+        .changed()
+    {
+        task.task_id = TaskId::from(task_id);
+    }
+    labeled_text(ui, "Name", &mut task.name).on_hover_text("Task name shown in the work panel.");
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut task.enabled, "Enabled");
+        ui.label("Annotation type");
+        let mut annotation_type = task.annotation_type.clone();
+        egui::ComboBox::from_id_salt(format!("task-type-{index}"))
+            .selected_text(annotation_type.to_string())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut annotation_type,
+                    AnnotationType::BoundingBox,
+                    "bounding_box",
+                );
+                ui.selectable_value(&mut annotation_type, AnnotationType::Skeleton, "skeleton");
+            });
+        if annotation_type != task.annotation_type {
+            set_task_annotation_type(task, annotation_type);
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Class");
+        if labels.is_empty() {
+            ui.label(RichText::new("Add a class first.").color(theme::RED));
+        } else {
+            let mut selected = task.class_ids.first().cloned();
+            let selected_text = selected
+                .as_ref()
+                .and_then(|class_id| labels.iter().find(|label| &label.class_id == class_id))
+                .map(|label| label.name.clone())
+                .unwrap_or_else(|| "Select a class".to_string());
+            egui::ComboBox::from_id_salt(format!("task-class-{index}"))
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for label in labels {
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(label.class_id.clone()),
+                            &label.name,
+                        );
+                    }
+                });
+            if selected.as_ref() != task.class_ids.first()
+                || task.class_ids.len() != usize::from(selected.is_some())
+            {
+                task.class_ids = selected.into_iter().collect();
+            }
+        }
+    });
+    if task.annotation_type == AnnotationType::Skeleton
+        && let Some(skeleton) = task.skeleton.as_mut()
+    {
+        edit_skeleton(ui, index, skeleton);
+    }
+    ui.label("Prelabel sources");
+    if prelabels.is_empty() {
+        ui.small("No prelabel sources configured.");
+    }
+    for prelabel in prelabels {
+        let mut enabled = task.prelabel_config_ids.contains(&prelabel.config_id);
+        if ui
+            .checkbox(
+                &mut enabled,
+                format!("{} ({})", prelabel.name, prelabel.config_id),
+            )
+            .changed()
+        {
+            if enabled {
+                task.prelabel_config_ids.push(prelabel.config_id.clone());
+            } else {
+                task.prelabel_config_ids
+                    .retain(|config_id| config_id != &prelabel.config_id);
+            }
+        }
+    }
+    edit_review(ui, index, task);
+    destructive_button(ui, "Remove workflow")
+}
+
+fn edit_workflow_instructions(ui: &mut egui::Ui, task: &mut TaskDefinition) {
+    ui.label(
+        RichText::new("Annotator instructions")
+            .color(theme::BLUE)
+            .strong(),
+    );
+    labeled_text(ui, "Title", &mut task.instructions.title)
+        .on_hover_text("Tutorial/instruction title.");
+    ui.label("Tutorial instructions");
+    ui.add(
+        egui::TextEdit::multiline(&mut task.instructions.example_text)
+            .desired_width(ui.available_width())
+            .desired_rows(3),
+    )
+    .on_hover_text("Instructions annotators see in the tutorial panel.");
+    ui.label("Tutorial example images");
+    edit_string_list(
+        ui,
+        &mut task.instructions.example_images,
+        "Image path",
+        "Add example image",
+        "tutorial/example.png",
+    );
+}
+
 fn normalize_task_annotation(task: &mut TaskDefinition) {
     match task.annotation_type {
         AnnotationType::BoundingBox => task.skeleton = None,
@@ -1322,107 +1649,115 @@ fn set_task_annotation_type(task: &mut TaskDefinition, annotation_type: Annotati
 }
 
 fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSpec) {
-    ui.collapsing("Skeleton configuration", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut skeleton.allow_hidden, "Allow hidden keypoints")
-                .on_hover_text("Annotators may mark a keypoint as hidden behind another object.");
-            ui.checkbox(&mut skeleton.allow_absent, "Allow absent keypoints")
-                .on_hover_text("Annotators may mark a keypoint as outside the image or absent.");
-        });
-
-        ui.label(RichText::new("Keypoints").strong());
-        let mut remove_keypoint = None;
-        let mut renames = Vec::new();
-        for (keypoint_index, keypoint) in skeleton.keypoints.iter_mut().enumerate() {
-            let previous_name = keypoint.name.clone();
+    egui::CollapsingHeader::new("Skeleton configuration")
+        .id_salt(("skeleton-configuration", task_index))
+        .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut keypoint.name)
-                    .on_hover_text("Unique keypoint name used by skeleton edges.");
-                ui.checkbox(&mut keypoint.required, "Required");
-                if destructive_button(ui, "Remove keypoint") {
-                    remove_keypoint = Some(keypoint_index);
-                }
+                ui.checkbox(&mut skeleton.allow_hidden, "Allow hidden keypoints")
+                    .on_hover_text(
+                        "Annotators may mark a keypoint as hidden behind another object.",
+                    );
+                ui.checkbox(&mut skeleton.allow_absent, "Allow absent keypoints")
+                    .on_hover_text(
+                        "Annotators may mark a keypoint as outside the image or absent.",
+                    );
             });
-            if keypoint.name != previous_name {
-                renames.push((previous_name, keypoint.name.clone()));
-            }
-        }
-        for (previous, updated) in renames {
-            for edge in &mut skeleton.edges {
-                if edge.from == previous {
-                    edge.from = updated.clone();
-                }
-                if edge.to == previous {
-                    edge.to = updated.clone();
-                }
-            }
-        }
-        if let Some(index) = remove_keypoint {
-            let removed = skeleton.keypoints.remove(index).name;
-            skeleton
-                .edges
-                .retain(|edge| edge.from != removed && edge.to != removed);
-        }
-        if ui.button("Add keypoint").clicked() {
-            skeleton.keypoints.push(KeypointSpec {
-                name: next_keypoint_name(skeleton),
-                required: true,
-            });
-        }
 
-        ui.add_space(4.0);
-        ui.label(RichText::new("Edges").strong());
-        let keypoint_names: Vec<_> = skeleton
-            .keypoints
-            .iter()
-            .map(|keypoint| keypoint.name.clone())
-            .collect();
-        let mut remove_edge = None;
-        for (edge_index, edge) in skeleton.edges.iter_mut().enumerate() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("From");
-                egui::ComboBox::from_id_salt(format!(
-                    "skeleton-edge-from-{task_index}-{edge_index}"
-                ))
-                .selected_text(&edge.from)
-                .show_ui(ui, |ui| {
-                    for name in &keypoint_names {
-                        ui.selectable_value(&mut edge.from, name.clone(), name);
+            ui.label(RichText::new("Keypoints").strong());
+            let mut remove_keypoint = None;
+            let mut renames = Vec::new();
+            for (keypoint_index, keypoint) in skeleton.keypoints.iter_mut().enumerate() {
+                let previous_name = keypoint.name.clone();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut keypoint.name)
+                        .on_hover_text("Unique keypoint name used by skeleton edges.");
+                    ui.checkbox(&mut keypoint.required, "Required");
+                    if destructive_button(ui, "Remove keypoint") {
+                        remove_keypoint = Some(keypoint_index);
                     }
                 });
-                ui.label("To");
-                egui::ComboBox::from_id_salt(format!("skeleton-edge-to-{task_index}-{edge_index}"))
+                if keypoint.name != previous_name {
+                    renames.push((previous_name, keypoint.name.clone()));
+                }
+            }
+            for (previous, updated) in renames {
+                for edge in &mut skeleton.edges {
+                    if edge.from == previous {
+                        edge.from = updated.clone();
+                    }
+                    if edge.to == previous {
+                        edge.to = updated.clone();
+                    }
+                }
+            }
+            if let Some(index) = remove_keypoint {
+                let removed = skeleton.keypoints.remove(index).name;
+                skeleton
+                    .edges
+                    .retain(|edge| edge.from != removed && edge.to != removed);
+            }
+            if ui.button("Add keypoint").clicked() {
+                skeleton.keypoints.push(KeypointSpec {
+                    name: next_keypoint_name(skeleton),
+                    required: true,
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("Edges").strong());
+            let keypoint_names: Vec<_> = skeleton
+                .keypoints
+                .iter()
+                .map(|keypoint| keypoint.name.clone())
+                .collect();
+            let mut remove_edge = None;
+            for (edge_index, edge) in skeleton.edges.iter_mut().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("From");
+                    egui::ComboBox::from_id_salt(format!(
+                        "skeleton-edge-from-{task_index}-{edge_index}"
+                    ))
+                    .selected_text(&edge.from)
+                    .show_ui(ui, |ui| {
+                        for name in &keypoint_names {
+                            ui.selectable_value(&mut edge.from, name.clone(), name);
+                        }
+                    });
+                    ui.label("To");
+                    egui::ComboBox::from_id_salt(format!(
+                        "skeleton-edge-to-{task_index}-{edge_index}"
+                    ))
                     .selected_text(&edge.to)
                     .show_ui(ui, |ui| {
                         for name in &keypoint_names {
                             ui.selectable_value(&mut edge.to, name.clone(), name);
                         }
                     });
-                if destructive_button(ui, "Remove edge") {
-                    remove_edge = Some(edge_index);
-                }
-            });
-        }
-        if let Some(index) = remove_edge {
-            skeleton.edges.remove(index);
-        }
-        let next_edge = next_skeleton_edge(skeleton);
-        if ui
-            .add_enabled(next_edge.is_some(), egui::Button::new("Add edge"))
-            .on_hover_text(if next_edge.is_some() {
-                "Connect two keypoints that are not already connected."
-            } else {
-                "Add at least two keypoints, or remove an existing edge first."
-            })
-            .clicked()
-            && let Some(edge) = next_edge
-        {
-            skeleton.edges.push(edge);
-        }
+                    if destructive_button(ui, "Remove edge") {
+                        remove_edge = Some(edge_index);
+                    }
+                });
+            }
+            if let Some(index) = remove_edge {
+                skeleton.edges.remove(index);
+            }
+            let next_edge = next_skeleton_edge(skeleton);
+            if ui
+                .add_enabled(next_edge.is_some(), egui::Button::new("Add edge"))
+                .on_hover_text(if next_edge.is_some() {
+                    "Connect two keypoints that are not already connected."
+                } else {
+                    "Add at least two keypoints, or remove an existing edge first."
+                })
+                .clicked()
+                && let Some(edge) = next_edge
+            {
+                skeleton.edges.push(edge);
+            }
 
-        show_issues(ui, &skeleton_issues(skeleton, "Skeleton"));
-    });
+            show_issues(ui, &skeleton_issues(skeleton, "Skeleton"));
+        });
 }
 
 fn next_keypoint_name(skeleton: &SkeletonSpec) -> String {
@@ -1462,81 +1797,88 @@ fn canonical_edge<'a>(from: &'a str, to: &'a str) -> (&'a str, &'a str) {
 }
 
 fn edit_review(ui: &mut egui::Ui, task_index: usize, task: &mut TaskDefinition) {
-    ui.collapsing("Review configuration", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Workflow");
-            let previous = task.review.workflow.clone();
-            egui::ComboBox::from_id_salt(format!("review-workflow-{task_index}"))
-                .selected_text(review_workflow_name(&task.review.workflow))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut task.review.workflow, ReviewWorkflow::None, "none");
-                    ui.selectable_value(
-                        &mut task.review.workflow,
-                        ReviewWorkflow::Approval,
-                        "approval",
-                    );
-                    ui.selectable_value(
-                        &mut task.review.workflow,
-                        ReviewWorkflow::IndependentAgreement,
-                        "independent agreement",
-                    );
-                });
-            if task.review.workflow != previous {
-                match task.review.workflow {
-                    ReviewWorkflow::None => {
-                        task.review.required_reviews = 0;
-                        task.review.agreement_threshold = None;
+    egui::CollapsingHeader::new("Review configuration")
+        .id_salt(("review-configuration", task_index))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Workflow");
+                let previous = task.review.workflow.clone();
+                egui::ComboBox::from_id_salt(format!("review-workflow-{task_index}"))
+                    .selected_text(review_workflow_name(&task.review.workflow))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut task.review.workflow,
+                            ReviewWorkflow::None,
+                            "none",
+                        );
+                        ui.selectable_value(
+                            &mut task.review.workflow,
+                            ReviewWorkflow::Approval,
+                            "approval",
+                        );
+                        ui.selectable_value(
+                            &mut task.review.workflow,
+                            ReviewWorkflow::IndependentAgreement,
+                            "independent agreement",
+                        );
+                    });
+                if task.review.workflow != previous {
+                    match task.review.workflow {
+                        ReviewWorkflow::None => {
+                            task.review.required_reviews = 0;
+                            task.review.agreement_threshold = None;
+                        }
+                        ReviewWorkflow::Approval => {
+                            task.review.required_reviews = task.review.required_reviews.max(1);
+                            task.review.agreement_threshold = None;
+                        }
+                        ReviewWorkflow::IndependentAgreement => {
+                            task.review.required_reviews = task.review.required_reviews.max(2);
+                            task.review.agreement_threshold = Some(default_agreement(task));
+                        }
                     }
-                    ReviewWorkflow::Approval => {
-                        task.review.required_reviews = task.review.required_reviews.max(1);
-                        task.review.agreement_threshold = None;
-                    }
-                    ReviewWorkflow::IndependentAgreement => {
-                        task.review.required_reviews = task.review.required_reviews.max(2);
-                        task.review.agreement_threshold = Some(default_agreement(task));
-                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Required reviews");
+                ui.add(
+                    egui::DragValue::new(&mut task.review.required_reviews)
+                        .range(0..=100)
+                        .speed(1),
+                )
+                .on_hover_text("Number of completed reviews required for this task.");
+                ui.checkbox(
+                    &mut task.review.allow_reviewer_corrections,
+                    "Allow reviewer correction",
+                );
+            });
+            if task.review.workflow == ReviewWorkflow::IndependentAgreement {
+                let mut enabled = task.review.agreement_threshold.is_some();
+                if ui
+                    .checkbox(&mut enabled, "Use agreement threshold")
+                    .changed()
+                {
+                    task.review.agreement_threshold = enabled.then(|| default_agreement(task));
+                }
+                if let Some(agreement) = task.review.agreement_threshold.as_mut() {
+                    agreement.metric = match task.annotation_type {
+                        AnnotationType::BoundingBox => AgreementMetric::Iou,
+                        AnnotationType::Skeleton => AgreementMetric::KeypointMeanDistance,
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Agreement metric");
+                        ui.label(match agreement.metric {
+                            AgreementMetric::Iou => "intersection over union",
+                            AgreementMetric::KeypointMeanDistance => "keypoint mean distance",
+                        });
+                        ui.add(
+                            egui::Slider::new(&mut agreement.threshold, 0.0..=1.0)
+                                .text("threshold"),
+                        );
+                    });
                 }
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Required reviews");
-            ui.add(
-                egui::DragValue::new(&mut task.review.required_reviews)
-                    .range(0..=100)
-                    .speed(1),
-            )
-            .on_hover_text("Number of completed reviews required for this task.");
-            ui.checkbox(
-                &mut task.review.allow_reviewer_corrections,
-                "Allow reviewer correction",
-            );
-        });
-        if task.review.workflow == ReviewWorkflow::IndependentAgreement {
-            let mut enabled = task.review.agreement_threshold.is_some();
-            if ui
-                .checkbox(&mut enabled, "Use agreement threshold")
-                .changed()
-            {
-                task.review.agreement_threshold = enabled.then(|| default_agreement(task));
-            }
-            if let Some(agreement) = task.review.agreement_threshold.as_mut() {
-                agreement.metric = match task.annotation_type {
-                    AnnotationType::BoundingBox => AgreementMetric::Iou,
-                    AnnotationType::Skeleton => AgreementMetric::KeypointMeanDistance,
-                };
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Agreement metric");
-                    ui.label(match agreement.metric {
-                        AgreementMetric::Iou => "intersection over union",
-                        AgreementMetric::KeypointMeanDistance => "keypoint mean distance",
-                    });
-                    ui.add(
-                        egui::Slider::new(&mut agreement.threshold, 0.0..=1.0).text("threshold"),
-                    );
-                });
-            }
-        }
-    });
 }
 
 fn default_agreement(task: &TaskDefinition) -> AgreementThreshold {
@@ -1563,6 +1905,7 @@ fn edit_prelabels(
     tasks: &mut [TaskDefinition],
 ) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.heading("Prelabels");
         let mut remove = None;
         for (index, config) in configs.iter_mut().enumerate() {
@@ -1654,6 +1997,7 @@ fn edit_prelabels(
 
 fn edit_imbalance(ui: &mut egui::Ui, imbalance: &mut Option<ImbalanceConfig>) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.heading("Assignment Balance");
         ui.label(
             RichText::new("Limit how unevenly work may be distributed across classes.")
@@ -2087,16 +2431,18 @@ fn is_hex_color(value: &str) -> bool {
 }
 
 fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) -> egui::Response {
-    if ui.available_width() < 520.0 {
+    if ui.available_width() < 400.0 {
         ui.vertical(|ui| {
-            ui.label(label);
+            let label = ui.label(label);
             ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+                .labelled_by(label.id)
         })
         .inner
     } else {
         ui.horizontal(|ui| {
-            ui.add_sized([150.0, 44.0], egui::Label::new(label));
+            let label = ui.add_sized([110.0, 44.0], egui::Label::new(label));
             ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+                .labelled_by(label.id)
         })
         .inner
     }
@@ -2340,6 +2686,19 @@ mod tests {
             task_issues(&[task], &[person, vehicle], &[])
                 .iter()
                 .any(|issue| issue.contains("exactly one class"))
+        );
+    }
+
+    #[test]
+    fn task_status_summary_groups_statuses_in_workflow_order() {
+        assert_eq!(task_status_summary(&[]), "No workflow status");
+        assert_eq!(
+            task_status_summary(&[
+                TaskStatus::Completed,
+                TaskStatus::Pending,
+                TaskStatus::Pending,
+            ]),
+            "Pending 2 | Completed 1"
         );
     }
 }
