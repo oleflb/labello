@@ -1439,6 +1439,23 @@ fn skip_releases_then_claims_another_assignment() {
 }
 
 #[test]
+fn entering_admin_clears_the_released_assignment() {
+    let mut harness = loaded_work_harness(Rc::new(SpyApi::new()));
+
+    click(&mut harness, "Admin");
+    release_and_switch(&mut harness);
+    step_until(&mut harness, 12, |app| app.view == AppView::Admin);
+
+    assert!(harness.state().assignment.is_none());
+    click(&mut harness, "Annotate");
+    assert!(
+        harness
+            .query_by_label("Switch active assignment?")
+            .is_none()
+    );
+}
+
+#[test]
 fn failed_refill_keeps_the_one_shot_image_excluded() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());

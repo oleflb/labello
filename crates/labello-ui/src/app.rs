@@ -1105,6 +1105,7 @@ impl LabelloApp {
             PendingTransition::View(view) => {
                 self.begin_workspace_epoch();
                 if view == AppView::Admin {
+                    self.clear_current_image();
                     self.request_admin_dataset();
                     return;
                 }
