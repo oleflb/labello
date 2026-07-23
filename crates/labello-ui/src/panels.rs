@@ -889,7 +889,7 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn central(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         match self.view {
             AppView::Setup => {
                 centered_scroll(ui, 760.0, |ui| self.setup_view(ui));
@@ -905,75 +905,10 @@ impl LabelloApp {
             }
             AppView::Annotate | AppView::Review | AppView::Adjudicate => {}
         }
-        if self.show_tutorial
-            && let Some(task) = self.selected_task()
-        {
-            theme::card_frame().show(ui, |ui| {
-                ui.heading(&task.instructions.title);
-                ui.label(&task.instructions.example_text);
-            });
-            ui.add_space(8.0);
-        }
         if let Some(current) = self.current.clone() {
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(&current.image.file_name).strong()).truncate(),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "{} x {}",
-                        current.image.width, current.image.height
-                    ))
-                    .color(theme::MUTED),
-                );
-                if let Some(workflow) = self.selected_workflow() {
-                    badge(ui, &workflow.label(), theme::TEAL);
-                }
-                if self.view == AppView::Annotate {
-                    if ui
-                        .add_enabled(
-                            self.canvas.can_pan(),
-                            egui::Button::selectable(self.canvas.pan_mode(), "Pan").shortcut_text(
-                                self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::TogglePanMode,
-                                ),
-                            ),
-                        )
-                        .on_disabled_hover_text("Zoom in before enabling Pan mode.")
-                        .clicked()
-                    {
-                        self.trigger_user_action(labello_domain::UserAction::TogglePanMode);
-                    }
-                    if ui
-                        .add(egui::Button::new("Zoom out").shortcut_text(
-                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomOut),
-                        ))
-                        .clicked()
-                    {
-                        self.trigger_user_action(labello_domain::UserAction::ZoomOut);
-                    }
-                    ui.label(format!("{:.0}%", self.canvas.current_zoom() * 100.0));
-                    if ui
-                        .add(egui::Button::new("Zoom in").shortcut_text(
-                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomIn),
-                        ))
-                        .clicked()
-                    {
-                        self.trigger_user_action(labello_domain::UserAction::ZoomIn);
-                    }
-                    if ui
-                        .add(egui::Button::new("Fit").shortcut_text(
-                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::FitImage),
-                        ))
-                        .clicked()
-                    {
-                        self.trigger_user_action(labello_domain::UserAction::FitImage);
-                    }
-                    if self.canvas.pan_mode() {
-                        ui.label(RichText::new("Primary-drag to pan").color(theme::TEAL));
-                    }
-                }
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                self.work_context_header(ui, &current, layout);
             });
             ui.add_space(2.0);
             let texture = self.current_texture.clone();
@@ -1184,9 +1119,183 @@ impl LabelloApp {
                 None => {}
             }
         }
+        self.tutorial_overlay(ctx);
         self.draft_recovery_modal(ctx);
         self.transition_modal(ctx);
         self.settings_modal(ctx);
+    }
+
+    fn work_context_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        current: &crate::queue::QueuedImage,
+        layout: LayoutMode,
+    ) {
+        self.image_metadata_row(ui, current, layout);
+        if layout == LayoutMode::Compact
+            && let Some(workflow) = self.selected_workflow()
+        {
+            let label = workflow.label();
+            let outer_width = ui.available_width().min(220.0);
+            bounded_badge(ui, &label, theme::TEAL, (outer_width - 18.0).max(24.0));
+        }
+        if self.view == AppView::Annotate {
+            self.canvas_controls(ui, layout);
+        }
+    }
+
+    fn image_metadata_row(
+        &self,
+        ui: &mut egui::Ui,
+        current: &crate::queue::QueuedImage,
+        layout: LayoutMode,
+    ) {
+        let dimensions = format!("{} x {}", current.image.width, current.image.height);
+        let workflow = (layout != LayoutMode::Compact)
+            .then(|| self.selected_workflow().map(|workflow| workflow.label()))
+            .flatten();
+        let workflow_outer_width = workflow
+            .as_ref()
+            .map(|_| {
+                if layout == LayoutMode::Wide {
+                    220.0
+                } else {
+                    160.0
+                }
+            })
+            .unwrap_or_default();
+        let dimensions_width = 76.0;
+        let metadata_height = 34.0;
+
+        ui.horizontal(|ui| {
+            let gaps = if workflow.is_some() { 2.0 } else { 1.0 } * ui.spacing().item_spacing.x;
+            let filename_width =
+                (ui.available_width() - dimensions_width - workflow_outer_width - gaps).max(40.0);
+            ui.add_sized(
+                [filename_width, metadata_height],
+                egui::Label::new(RichText::new(&current.image.file_name).strong()).truncate(),
+            )
+            .on_hover_text(&current.image.file_name);
+            ui.add_sized(
+                [dimensions_width, metadata_height],
+                egui::Label::new(RichText::new(dimensions).color(theme::MUTED)),
+            );
+            if let Some(workflow) = workflow {
+                bounded_badge(
+                    ui,
+                    &workflow,
+                    theme::TEAL,
+                    (workflow_outer_width - 18.0).max(24.0),
+                );
+            }
+        });
+    }
+
+    fn canvas_controls(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        ui.horizontal(|ui| {
+            let show_shortcuts = layout == LayoutMode::Wide;
+            let pan_shortcut =
+                self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
+            let mut pan = egui::Button::selectable(self.canvas.pan_mode(), "Pan")
+                .min_size(egui::vec2(44.0, 44.0));
+            if show_shortcuts {
+                pan = pan.shortcut_text(&pan_shortcut);
+            }
+            if ui
+                .add_enabled(self.canvas.can_pan(), pan)
+                .on_disabled_hover_text("Zoom in before enabling Pan mode.")
+                .on_hover_text(format!("Pan the image ({pan_shortcut})."))
+                .clicked()
+            {
+                self.trigger_user_action(labello_domain::UserAction::TogglePanMode);
+            }
+
+            let zoom_out_shortcut =
+                self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomOut);
+            let mut zoom_out = egui::Button::new(if show_shortcuts { "Zoom out" } else { "−" })
+                .min_size(egui::vec2(44.0, 44.0));
+            if show_shortcuts {
+                zoom_out = zoom_out.shortcut_text(&zoom_out_shortcut);
+            }
+            let zoom_out_response = ui
+                .add(zoom_out)
+                .on_hover_text(format!("Zoom out ({zoom_out_shortcut})."));
+            zoom_out_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Zoom out")
+            });
+            if zoom_out_response.clicked() {
+                self.trigger_user_action(labello_domain::UserAction::ZoomOut);
+            }
+
+            ui.add_sized(
+                [48.0, 44.0],
+                egui::Label::new(format!("{:.0}%", self.canvas.current_zoom() * 100.0)),
+            );
+
+            let zoom_in_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomIn);
+            let mut zoom_in = egui::Button::new(if show_shortcuts { "Zoom in" } else { "+" })
+                .min_size(egui::vec2(44.0, 44.0));
+            if show_shortcuts {
+                zoom_in = zoom_in.shortcut_text(&zoom_in_shortcut);
+            }
+            let zoom_in_response = ui
+                .add(zoom_in)
+                .on_hover_text(format!("Zoom in ({zoom_in_shortcut})."));
+            zoom_in_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Zoom in")
+            });
+            if zoom_in_response.clicked() {
+                self.trigger_user_action(labello_domain::UserAction::ZoomIn);
+            }
+
+            let fit_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::FitImage);
+            let mut fit = egui::Button::new("Fit").min_size(egui::vec2(44.0, 44.0));
+            if show_shortcuts {
+                fit = fit.shortcut_text(&fit_shortcut);
+            }
+            if ui
+                .add(fit)
+                .on_hover_text(format!("Fit and center the image ({fit_shortcut})."))
+                .clicked()
+            {
+                self.trigger_user_action(labello_domain::UserAction::FitImage);
+            }
+
+            if layout != LayoutMode::Compact && self.canvas.pan_mode() {
+                ui.label(RichText::new("Primary-drag to pan").color(theme::TEAL));
+            }
+        });
+    }
+
+    fn tutorial_overlay(&mut self, ctx: &egui::Context) {
+        if !self.show_tutorial {
+            return;
+        }
+        let Some((title, text)) = self.selected_task().map(|task| {
+            (
+                task.instructions.title.clone(),
+                task.instructions.example_text.clone(),
+            )
+        }) else {
+            return;
+        };
+        let screen = ctx.content_rect();
+        let mut open = true;
+        egui::Window::new("Tutorial")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .max_width((screen.width() - 24.0).clamp(240.0, 420.0))
+            .max_height((screen.height() - 24.0).clamp(240.0, 560.0))
+            .constrain_to(screen)
+            .show(ctx, |ui| {
+                ui.heading(title);
+                egui::ScrollArea::vertical().show(ui, |ui| ui.label(text));
+            });
+        if !open {
+            self.show_tutorial = false;
+        }
     }
 
     fn draft_recovery_modal(&mut self, ctx: &egui::Context) {

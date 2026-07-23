@@ -1796,6 +1796,73 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
 }
 
 #[test]
+fn compact_long_work_context_preserves_canvas_and_controls() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness
+        .state_mut()
+        .current
+        .as_mut()
+        .unwrap()
+        .image
+        .file_name =
+        "a-very-long-image-name-that-must-not-collapse-the-annotation-workspace.jpg".to_string();
+    harness
+        .state_mut()
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == TaskId::from("bounding_box:person"))
+        .unwrap()
+        .name = "A deliberately long workflow name for compact layout testing".to_string();
+
+    for (width, height, minimum_canvas_height) in [
+        (320.0, 568.0, 200.0),
+        (390.0, 667.0, 320.0),
+        (390.0, 844.0, 500.0),
+    ] {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+
+        let canvas = harness.get_by_label("Annotation canvas").rect();
+        assert!(
+            canvas.height() >= minimum_canvas_height,
+            "canvas too short at {width}x{height}: {canvas:?}",
+        );
+        for label in ["Pan", "Zoom out", "Zoom in", "Fit"] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
+        let workflow = harness
+            .get_by_label("A deliberately long workflow name for compact layout testing")
+            .rect();
+        assert!(
+            workflow.height() <= 44.0,
+            "workflow badge wrapped vertically at {width}x{height}: {workflow:?}",
+        );
+    }
+}
+
+#[test]
+fn tutorial_overlay_does_not_change_canvas_geometry() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.set_size(egui::vec2(390.0, 667.0));
+    harness.step();
+    let before = harness.get_by_label("Annotation canvas").rect();
+
+    harness.state_mut().show_tutorial = true;
+    harness.step();
+
+    assert_eq!(harness.get_by_label("Annotation canvas").rect(), before);
+    assert!(harness.query_by_label("Tutorial").is_some());
+}
+
+#[test]
 fn setup_geometry_stays_clamped_at_supported_viewports() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
@@ -2099,6 +2166,8 @@ fn responsive_modes_do_not_switch_at_1240() {
     assert_eq!(LayoutMode::for_width(600.0), LayoutMode::Medium);
     assert_eq!(LayoutMode::for_width(1239.0), LayoutMode::Medium);
     assert_eq!(LayoutMode::for_width(1240.0), LayoutMode::Medium);
+    assert_eq!(LayoutMode::for_width(1287.0), LayoutMode::Medium);
+    assert_eq!(LayoutMode::for_width(1288.0), LayoutMode::Wide);
     assert_eq!(LayoutMode::for_width(1366.0), LayoutMode::Wide);
 }
 

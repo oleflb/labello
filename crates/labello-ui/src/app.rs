@@ -2242,7 +2242,7 @@ impl eframe::App for LabelloApp {
         };
         egui::CentralPanel::default()
             .frame(central_frame)
-            .show(ui, |ui| self.central(ui));
+            .show(ui, |ui| self.central(ui, layout));
         self.overlays(ui.ctx(), layout);
         self.queue_current_drafts();
         self.persist_workspace_preference();
