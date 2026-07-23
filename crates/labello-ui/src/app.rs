@@ -88,8 +88,8 @@ pub(crate) enum LayoutMode {
 impl LayoutMode {
     pub(crate) const COMPACT_MAX_WIDTH: f32 = 600.0;
     pub(crate) const TASK_PANEL_WIDTH: f32 = 280.0;
-    pub(crate) const INSPECTOR_PANEL_WIDTH: f32 = 320.0;
-    pub(crate) const MIN_WIDE_CANVAS_WIDTH: f32 = 640.0;
+    pub(crate) const INSPECTOR_PANEL_WIDTH: f32 = 315.0;
+    pub(crate) const MIN_WIDE_CANVAS_WIDTH: f32 = 645.0;
     const WIDE_GUTTERS: f32 = 48.0;
 
     pub(crate) fn for_width(width: f32) -> Self {
@@ -1130,6 +1130,8 @@ impl LabelloApp {
                 }
             }
             PendingTransition::View(view) => {
+                self.show_tutorial = false;
+                self.drawer = None;
                 self.begin_workspace_epoch();
                 if view == AppView::Admin {
                     self.clear_current_image();
@@ -2192,9 +2194,29 @@ impl eframe::App for LabelloApp {
         self.autosave_if_due();
         self.handle_shortcuts(ui.ctx());
         let layout = LayoutMode::for_width(ui.available_width());
-        egui::Panel::top("top_bar")
-            .frame(theme::top_bar_frame())
-            .show(ui, |ui| self.top_bar(ui, layout));
+        egui::Panel::top("app_bar")
+            .exact_size(56.0)
+            .frame(theme::top_bar_frame().inner_margin(egui::Margin::symmetric(14, 6)))
+            .show(ui, |ui| self.app_bar(ui, layout));
+        if self.work_view() {
+            egui::Panel::top("workspace_context")
+                .exact_size(
+                    if layout == LayoutMode::Compact
+                        && self.view == AppView::Annotate
+                        && self.current.is_some()
+                    {
+                        100.0
+                    } else {
+                        56.0
+                    },
+                )
+                .frame(
+                    theme::top_bar_frame()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::symmetric(14, 6)),
+                )
+                .show(ui, |ui| self.workspace_context_bar(ui, layout));
+        }
         if self.work_view() && layout != LayoutMode::Wide {
             egui::Panel::bottom("compact_primary_actions")
                 .exact_size(
@@ -2241,6 +2263,12 @@ impl eframe::App for LabelloApp {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui, true));
                 });
+        } else if !self.work_view() && layout == LayoutMode::Wide {
+            egui::Panel::left("desktop_navigation")
+                .resizable(false)
+                .exact_size(176.0)
+                .frame(theme::side_frame())
+                .show(ui, |ui| self.desktop_navigation(ui));
         }
         let central_frame = if self.work_view() {
             theme::central_frame().inner_margin(egui::Margin::symmetric(8, 8))

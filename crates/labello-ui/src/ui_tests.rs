@@ -164,7 +164,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     assert_eq!(api.counts().list_datasets, before_save.list_datasets);
     assert!(api.metadata().label_classes.len() >= 3);
 
-    click(&mut harness, "Admin");
+    click_application_menu_item(&mut harness, "Admin");
     step_until(&mut harness, 8, |app| app.view == AppView::Admin);
     let before_ingest = api.counts();
     harness.state_mut().request_ingest();
@@ -191,7 +191,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
             .contains("Ingest complete")
     );
 
-    click(&mut harness, "Annotate");
+    click_application_menu_item(&mut harness, "Annotate");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
 }
@@ -337,10 +337,14 @@ fn session_is_restored_before_datasets_load_and_logout_clears_it() {
             .map(|account| account.user_id.clone()),
         Some(UserId::from("admin"))
     );
+    harness.state_mut().drawer = Some(Drawer::Workflow);
+    harness.state_mut().show_tutorial = true;
     click(&mut harness, "Sign out");
     step_until(&mut harness, 8, |app| app.auth.account.is_none());
     assert_eq!(api.counts().logout, 1);
     assert!(harness.state().datasets.summaries.is_empty());
+    assert!(harness.state().drawer.is_none());
+    assert!(!harness.state().show_tutorial);
 }
 
 #[test]
@@ -547,9 +551,25 @@ fn image_load_failure_shows_retry_and_loads_image() {
     assert!(harness.state().current.is_none());
     assert!(
         harness
+            .query_by_label("Assignment image unavailable")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Skip").is_some());
+    assert!(
+        harness
             .query_by_label_contains("Retry image load")
             .is_some()
     );
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
+    assert!(
+        harness
+            .get_by_label("Workspace context bar")
+            .rect()
+            .height()
+            <= 44.0
+    );
+    assert_visible_controls_clamped(&harness, 320.0, 568.0);
     click(&mut harness, "Retry image load");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert!(api.counts().get_image_preview >= 2);
@@ -699,7 +719,7 @@ fn keybindings_are_editable_and_persisted() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     assert!(harness.query_by_label("Keyboard shortcuts").is_none());
-    click(&mut harness, "Settings");
+    click_application_menu_item(&mut harness, "Settings");
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
     click(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Enter);
@@ -788,7 +808,7 @@ fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
 fn shortcut_settings_cancel_discards_the_draft() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    click(&mut harness, "Settings");
+    click_application_menu_item(&mut harness, "Settings");
     click(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Enter);
     harness.step();
@@ -811,7 +831,7 @@ fn shortcut_settings_cancel_discards_the_draft() {
 fn shortcut_settings_lock_editing_while_saving() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    click(&mut harness, "Settings");
+    click_application_menu_item(&mut harness, "Settings");
     harness.state_mut().loading.keybindings = true;
     harness.step();
 
@@ -836,10 +856,10 @@ fn draft_recovery_modal_blocks_background_controls() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1500.0, 780.0))
         .build_eframe(|_| LabelloApp::default());
-    let settings = harness
-        .query_all_by_label_contains("Settings")
+    let menu = harness
+        .query_all_by_label_contains("Menu")
         .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
-        .expect("settings button")
+        .expect("application menu button")
         .rect()
         .center();
     let metadata = SpyApi::new().metadata();
@@ -862,7 +882,7 @@ fn draft_recovery_modal_blocks_background_controls() {
     harness.step();
     assert!(harness.query_by_label("Unsaved admin draft").is_some());
 
-    click_at(&mut harness, settings);
+    click_at(&mut harness, menu);
 
     assert!(!harness.state().show_settings);
     assert!(harness.state().runtime.persistence.recovery.is_some());
@@ -889,7 +909,7 @@ fn pan_mode_shortcut_requires_zoom_and_escape_returns_to_annotation_mode() {
     harness.key_press(egui::Key::P);
     harness.step();
     assert!(harness.state().canvas.pan_mode());
-    assert!(harness.query_by_label_contains("Pan P").is_some());
+    assert!(harness.query_by_label("Pan").is_some());
 
     harness.key_press(egui::Key::Escape);
     harness.step();
@@ -922,9 +942,21 @@ fn long_status_messages_keep_their_complete_accessible_text() {
     let mut harness = loaded_work_harness(api);
     let message = "A deliberately long status message that exceeds the visible top bar limit but must remain available to assistive technology and pointer users.";
     harness.state_mut().runtime.error = Some(message.to_string());
-    harness.step();
-
-    assert!(harness.query_by_label(message).is_some());
+    for (width, height) in [(320.0, 568.0), (600.0, 800.0), (1440.0, 900.0)] {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        let dataset = harness.get_by_label("Dataset Demo Dataset").rect();
+        let status = harness.get_by_label(message).rect();
+        let menu = harness.get_by_label("Menu").rect();
+        assert!(dataset.right() <= status.left() + 0.5);
+        assert!(status.right() <= menu.left() + 0.5);
+        if width >= LayoutMode::COMPACT_MAX_WIDTH {
+            let save = harness.get_by_label("Idle").rect();
+            assert!(status.right() <= save.left() + 0.5);
+            assert!(save.right() <= menu.left() + 0.5);
+        }
+        assert_visible_controls_clamped(&harness, width, height);
+    }
 }
 
 #[test]
@@ -1123,7 +1155,10 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     click(&mut harness, "Accept");
     assert_eq!(harness.state().save_status, SaveStatus::Dirty);
     assert_eq!(api.counts().append_event, 0);
+    click(&mut harness, "More actions");
     assert!(harness.query_by_label_contains("Undo").is_some());
+    harness.key_press(egui::Key::Escape);
+    harness.step();
 
     harness.state_mut().undo();
     assert!(harness.state().annotations.is_empty());
@@ -1780,7 +1815,7 @@ fn skip_remains_active_in_review() {
 fn entering_admin_clears_the_released_assignment() {
     let mut harness = loaded_work_harness(Rc::new(SpyApi::new()));
 
-    click(&mut harness, "Admin");
+    click_application_menu_item(&mut harness, "Admin");
     release_and_switch(&mut harness);
     step_until(&mut harness, 12, |app| app.view == AppView::Admin);
 
@@ -1857,7 +1892,7 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
 fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
     let api = Rc::new(SpyApi::new());
     api.sanitize_metadata_roles();
-    let harness = loaded_work_harness(api);
+    let mut harness = loaded_work_harness(api);
 
     assert!(
         harness
@@ -1869,6 +1904,8 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
             .role_assignments
             .is_empty()
     );
+    click(&mut harness, "Menu");
+    click_accesskit_button(&mut harness, "Navigation");
     for label in ["Annotate", "Review", "Adjudicate", "Admin", "Stats"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
@@ -1881,8 +1918,10 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
 fn annotator_and_reviewer_roles_are_independent_capabilities() {
     let api = Rc::new(SpyApi::new());
     api.set_summary_roles(vec![DatasetRole::Annotator, DatasetRole::Reviewer]);
-    let harness = loaded_work_harness(api);
+    let mut harness = loaded_work_harness(api);
 
+    click(&mut harness, "Menu");
+    click_accesskit_button(&mut harness, "Navigation");
     for label in ["Annotate", "Review", "Stats"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
@@ -1961,24 +2000,43 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
 fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
+    let image_name = harness
+        .state()
+        .current
+        .as_ref()
+        .unwrap()
+        .image
+        .file_name
+        .clone();
+    let workflow_label = harness.state().selected_workflow().unwrap().label();
     let sizes = viewport_sizes();
     let mut boundary_widths = Vec::new();
     for (width, height) in sizes {
         harness.set_size(egui::vec2(width, height));
         harness.step();
+        assert!(harness.query_all_by_label(&image_name).next().is_some());
+        assert!(harness.query_all_by_label(&workflow_label).next().is_some());
         let dataset_badge = harness.get_by_label("Dataset Demo Dataset").rect();
         let status_badge = harness.get_by_label("Idle").rect();
         assert!(
-            (dataset_badge.height() - status_badge.height()).abs() <= 0.5,
-            "top-bar badges differ at {width}x{height}: {dataset_badge:?}, {status_badge:?}",
+            dataset_badge.height() > 0.0,
+            "dataset badge is missing at {width}x{height}",
         );
+        assert!(status_badge.height() > 0.0);
+        let menu = harness.get_by_label("Menu").rect();
+        assert!(dataset_badge.right() <= status_badge.left() + 0.5);
+        assert!(status_badge.right() <= menu.left() + 0.5);
         if width >= LayoutMode::COMPACT_MAX_WIDTH {
             assert!(
-                width - status_badge.right() <= 25.0,
-                "status is not right-aligned at {width}x{height}: {status_badge:?}",
+                width - menu.right() <= 25.0,
+                "application menu is not right-aligned at {width}x{height}: {menu:?}",
             );
         }
         let canvas = harness.get_by_label("Annotation canvas");
+        let app_bar = harness.get_by_label("Application bar").rect();
+        let context_bar = harness.get_by_label("Workspace context bar").rect();
+        assert!(app_bar.bottom() <= context_bar.top() + 0.5);
+        assert!(context_bar.bottom() <= canvas.rect().top() + 0.5);
         let minimum_width = if width < 600.0 { width - 40.0 } else { 560.0 };
         let minimum_height = match height as u32 {
             568 => 210.0,
@@ -1998,6 +2056,24 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             "canvas too short at {width}x{height}: {:?}",
             canvas.rect(),
         );
+        let wide_baseline = match (width as u32, height as u32) {
+            (1288, 820) => Some((676.0, 593.0)),
+            (1366, 768) => Some((754.0, 541.0)),
+            (1440, 900) => Some((828.0, 673.0)),
+            _ => None,
+        };
+        if let Some((baseline_width, baseline_height)) = wide_baseline {
+            assert!(
+                canvas.rect().width() >= baseline_width,
+                "canvas narrower than baseline at {width}x{height}: {:?}",
+                canvas.rect(),
+            );
+            assert!(
+                canvas.rect().height() >= baseline_height,
+                "canvas shorter than baseline at {width}x{height}: {:?}",
+                canvas.rect(),
+            );
+        }
         if width < 600.0 {
             assert_control_inside(
                 &harness,
@@ -2040,6 +2116,38 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     }
     assert_eq!(boundary_widths.len(), 2);
     assert!((boundary_widths[0] - boundary_widths[1]).abs() <= 2.0);
+
+    harness.set_size(egui::vec2(320.0, 568.0));
+    for (status, label) in [
+        (SaveStatus::Dirty, "Unsaved"),
+        (SaveStatus::Saved, "Saved"),
+        (SaveStatus::Saving, "Saving"),
+        (SaveStatus::Retry, "Retry"),
+    ] {
+        harness.state_mut().save_status = status;
+        harness.step();
+        assert!(harness.query_by_label(label).is_some());
+        assert_visible_controls_clamped(&harness, 320.0, 568.0);
+    }
+
+    click(&mut harness, "Menu");
+    for label in ["Navigation", "Workspace", "Status", "Sign out"] {
+        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
+    }
+    click_accesskit_button(&mut harness, "Navigation");
+    for label in [
+        "Setup",
+        "Annotate",
+        "Review",
+        "Adjudicate",
+        "Stats",
+        "Admin",
+    ] {
+        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
+    }
+    assert_visible_controls_clamped(&harness, 320.0, 568.0);
+    harness.key_press(egui::Key::Escape);
+    harness.step();
 }
 
 #[test]
@@ -2101,12 +2209,24 @@ fn tutorial_overlay_does_not_change_canvas_geometry() {
     harness.set_size(egui::vec2(390.0, 667.0));
     harness.step();
     let before = harness.get_by_label("Annotation canvas").rect();
+    let selected = harness.state().selected_task_id.clone().unwrap();
+    harness
+        .state_mut()
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == selected)
+        .unwrap()
+        .instructions
+        .example_text = "Detailed tutorial guidance. ".repeat(100);
 
     harness.state_mut().show_tutorial = true;
     harness.step();
 
     assert_eq!(harness.get_by_label("Annotation canvas").rect(), before);
-    assert!(harness.query_by_label("Tutorial").is_some());
+    let tutorial = harness.get_by_label("Tutorial").rect();
+    let context = harness.get_by_label("Workspace context bar").rect();
+    assert!(tutorial.top() >= context.bottom());
+    assert!(tutorial.bottom() <= 667.0);
 }
 
 #[test]
@@ -2122,19 +2242,39 @@ fn setup_geometry_stays_clamped_at_supported_viewports() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
         assert_label_inside(&harness, "Choose where to work", width, height);
-        if width < LayoutMode::COMPACT_MAX_WIDTH {
+        if LayoutMode::for_width(width) == LayoutMode::Wide {
+            assert!(harness.query_by_label("Menu").is_none());
+            assert!(harness.query_by_label("Desktop navigation").is_some());
             assert_control_inside(
                 &harness,
-                "View: Setup",
+                "Setup",
                 egui::accesskit::Role::Button,
                 width,
                 height,
             );
         } else {
-            assert_label_inside(&harness, "Setup", width, height);
+            assert_control_inside(
+                &harness,
+                "Menu",
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
         }
         assert_visible_controls_clamped(&harness, width, height);
     }
+
+    harness.set_size(egui::vec2(1440.0, 320.0));
+    harness.step();
+    assert!(harness.query_by_label("Menu").is_none());
+    assert_control_inside(
+        &harness,
+        "Sign out",
+        egui::accesskit::Role::Button,
+        1440.0,
+        320.0,
+    );
+    assert_visible_controls_clamped(&harness, 1440.0, 320.0);
 }
 
 #[test]
@@ -2466,7 +2606,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert!(harness.query_by_label("Reject object & finish").is_none());
     assert!(harness.query_by_label("Accept all annotations").is_none());
 
-    click(&mut harness, "Tutorial");
+    click_application_menu_item(&mut harness, "Tutorial");
     harness.step();
     assert!(
         harness
@@ -2518,7 +2658,8 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 
     assert!(api.counts().assign_next_image >= 2);
 
-    click(&mut harness, "Review");
+    harness.state_mut().drawer = Some(Drawer::Inspector);
+    click_application_menu_item(&mut harness, "Review");
     assert!(
         harness
             .query_by_label("Switch active assignment?")
@@ -2528,6 +2669,8 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     step_until(&mut harness, 10, |app| {
         app.view == AppView::Review && !app.loading.image
     });
+    assert!(harness.state().drawer.is_none());
+    assert!(harness.query_by_label("Tutorial").is_none());
     assert!(harness.query_by_label("Approve object").is_some());
     assert!(harness.query_by_label("Reject object & finish").is_some());
     assert!(harness.query_by_label("Accept").is_none());
@@ -2547,7 +2690,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
             .is_some_and(|assignment| api.has_active_assignment(&assignment.assignment_id))
     });
 
-    click(&mut harness, "Adjudicate");
+    click_application_menu_item(&mut harness, "Adjudicate");
     assert!(
         harness
             .query_by_label("Switch active assignment?")
@@ -3062,7 +3205,7 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     let mut harness = loaded_work_harness(api.clone());
     assert_eq!(api.counts().dataset_stats, 0);
 
-    click(&mut harness, "Stats");
+    click_application_menu_item(&mut harness, "Stats");
     release_and_switch(&mut harness);
     step_until(&mut harness, 8, |app| app.view == AppView::Stats);
     harness.step();
@@ -3073,11 +3216,11 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 
     harness.set_size(egui::vec2(390.0, 760.0));
     harness.step();
-    assert!(harness.query_by_label("View: Stats").is_some());
+    assert!(harness.query_by_label("Menu").is_some());
 
     harness.set_size(egui::vec2(1280.0, 820.0));
     harness.step();
-    click(&mut harness, "Annotate");
+    click_application_menu_item(&mut harness, "Annotate");
     harness.step();
     assert!(harness.query_by_label_contains("Save").is_some());
     assert!(harness.query_by_label_contains("Submit & next").is_some());
@@ -3332,7 +3475,7 @@ fn saturate_command_queue(app: &mut LabelloApp) {
     }
 }
 
-fn viewport_sizes() -> [(f32, f32); 9] {
+fn viewport_sizes() -> [(f32, f32); 10] {
     [
         (320.0, 568.0),
         (390.0, 667.0),
@@ -3341,6 +3484,7 @@ fn viewport_sizes() -> [(f32, f32); 9] {
         (1024.0, 768.0),
         (1239.0, 820.0),
         (1240.0, 820.0),
+        (1288.0, 820.0),
         (1366.0, 768.0),
         (1440.0, 900.0),
     ]
@@ -3445,9 +3589,21 @@ fn assert_visible_controls_clamped(
 }
 
 fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
-    let clicked = click_visible(harness, label);
-    assert!(clicked, "button or label {label:?} was not visible");
+    assert!(
+        click_visible(harness, label),
+        "button or label {label:?} was not visible"
+    );
     harness.step();
+}
+
+fn click_application_menu_item(harness: &mut Harness<'static, LabelloApp>, label: &str) {
+    click(harness, "Menu");
+    let section = match label {
+        "Annotate" | "Review" | "Adjudicate" | "Admin" | "Stats" => "Navigation",
+        _ => "Workspace",
+    };
+    click_accesskit_button(harness, section);
+    click_accesskit_button(harness, label);
 }
 
 fn click_at(harness: &mut Harness<'static, LabelloApp>, pos: egui::Pos2) {

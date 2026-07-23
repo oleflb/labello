@@ -248,74 +248,97 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn mode_toolbar(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .selectable_label(self.view == AppView::Setup, "Setup")
-            .clicked()
-        {
-            self.open_view(AppView::Setup);
+    pub(crate) fn navigation_menu_contents(&mut self, ui: &mut egui::Ui) {
+        for (view, label) in self.navigation_destinations() {
+            if ui
+                .add(egui::Button::selectable(self.view == view, label))
+                .clicked()
+            {
+                self.open_view(view);
+                ui.close();
+            }
         }
+    }
+
+    pub(crate) fn desktop_navigation(&mut self, ui: &mut egui::Ui) {
+        let account = self
+            .auth
+            .account
+            .as_ref()
+            .map(|account| account.display_name.clone());
+        let footer_height = if account.is_some() { 132.0 } else { 0.0 };
+        let footer_gap = if account.is_some() {
+            ui.spacing().item_spacing.y
+        } else {
+            0.0
+        };
+        let navigation_height = (ui.available_height() - footer_height - footer_gap).max(0.0);
+        let response = ui.vertical(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), navigation_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(navigation_height);
+                    ui.set_max_height(navigation_height);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("Navigate");
+                        ui.add_space(theme::SPACE_1);
+                        for (view, label) in self.navigation_destinations() {
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 44.0],
+                                    egui::Button::selectable(self.view == view, label),
+                                )
+                                .clicked()
+                            {
+                                self.open_view(view);
+                            }
+                        }
+                    });
+                },
+            );
+
+            if let Some(account) = account {
+                ui.label(RichText::new("Account").strong().color(theme::TEXT_MUTED));
+                ui.separator();
+                ui.add_sized(
+                    [ui.available_width(), 44.0],
+                    egui::Label::new(&account).truncate(),
+                );
+                if theme::quiet_button(
+                    ui,
+                    !self.loading.logout,
+                    egui::Button::new("Sign out").min_size(egui::vec2(ui.available_width(), 44.0)),
+                )
+                .clicked()
+                {
+                    self.request_logout();
+                }
+            }
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Desktop navigation")
+        });
+    }
+
+    fn navigation_destinations(&self) -> Vec<(AppView, &'static str)> {
+        let mut destinations = vec![(AppView::Setup, "Setup")];
         for (view, role, label) in [
             (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
             (AppView::Review, DatasetRole::Reviewer, "Review"),
             (AppView::Adjudicate, DatasetRole::Adjudicator, "Adjudicate"),
         ] {
-            if self.has_dataset_role(role)
-                && ui.selectable_label(self.view == view, label).clicked()
-            {
-                self.open_view(view);
+            if self.has_dataset_role(role) {
+                destinations.push((view, label));
             }
         }
-        if self.datasets.metadata.is_some()
-            && ui
-                .selectable_label(self.view == AppView::Stats, "Stats")
-                .clicked()
-        {
-            self.open_view(AppView::Stats);
+        if self.datasets.metadata.is_some() {
+            destinations.push((AppView::Stats, "Stats"));
         }
-        if self.can_admin()
-            && ui
-                .selectable_label(self.view == AppView::Admin, "Admin")
-                .clicked()
-        {
-            self.open_view(AppView::Admin);
+        if self.can_admin() {
+            destinations.push((AppView::Admin, "Admin"));
         }
-    }
-
-    pub(crate) fn compact_navigation(&mut self, ui: &mut egui::Ui) {
-        let current = match self.view {
-            AppView::Setup => "Setup",
-            AppView::Annotate => "Annotate",
-            AppView::Review => "Review",
-            AppView::Adjudicate => "Adjudicate",
-            AppView::Admin => "Admin",
-            AppView::Stats => "Stats",
-        };
-        ui.menu_button(format!("View: {current}"), |ui| {
-            let mut destination = None;
-            if ui.button("Setup").clicked() {
-                destination = Some(AppView::Setup);
-            }
-            for (view, role, label) in [
-                (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
-                (AppView::Review, DatasetRole::Reviewer, "Review"),
-                (AppView::Adjudicate, DatasetRole::Adjudicator, "Adjudicate"),
-            ] {
-                if self.has_dataset_role(role) && ui.button(label).clicked() {
-                    destination = Some(view);
-                }
-            }
-            if self.datasets.metadata.is_some() && ui.button("Stats").clicked() {
-                destination = Some(AppView::Stats);
-            }
-            if self.can_admin() && ui.button("Admin").clicked() {
-                destination = Some(AppView::Admin);
-            }
-            if let Some(view) = destination {
-                self.open_view(view);
-                ui.close();
-            }
-        });
+        destinations
     }
 
     pub(crate) fn open_view(&mut self, view: AppView) {

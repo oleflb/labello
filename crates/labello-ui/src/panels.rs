@@ -11,7 +11,7 @@ use crate::{
 };
 
 impl LabelloApp {
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+    pub(crate) fn app_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let dataset_name = self
             .datasets
             .metadata
@@ -25,8 +25,8 @@ impl LabelloApp {
                     .find(|summary| summary.dataset_id == self.config.dataset_id)
                     .map(|summary| summary.name.as_str())
             })
-            .unwrap_or(self.config.dataset_id.as_str());
-        let dataset_label = format!("Dataset {dataset_name}");
+            .unwrap_or(self.config.dataset_id.as_str())
+            .to_owned();
         let save_status = self.work_view().then(|| {
             (
                 status_text(self.save_status),
@@ -34,179 +34,171 @@ impl LabelloApp {
             )
         });
         let runtime_status = if let Some(error) = &self.runtime.storage_error {
-            Some((error.as_str(), theme::Intent::Warning))
+            Some((error.clone(), theme::Intent::Warning))
         } else if let Some(error) = &self.runtime.error {
-            Some((error.as_str(), theme::Intent::Warning))
+            Some((error.clone(), theme::Intent::Warning))
         } else {
             self.runtime
                 .notice
-                .as_deref()
+                .clone()
                 .map(|notice| (notice, theme::Intent::Success))
         };
-        let show_identity = |ui: &mut egui::Ui| {
+        let dataset_label = format!("Dataset {dataset_name}");
+        let account = self
+            .auth
+            .account
+            .as_ref()
+            .map(|account| account.display_name.clone());
+
+        let response = ui.horizontal(|ui| {
             ui.label(
                 RichText::new("Labello")
                     .size(22.0)
                     .strong()
                     .color(theme::TEXT),
             );
-            theme::bounded_badge(
+            let dataset_response = theme::bounded_badge(
                 ui,
-                &dataset_label,
+                if layout == LayoutMode::Compact {
+                    &dataset_name
+                } else {
+                    &dataset_label
+                },
                 theme::Intent::Info,
                 if layout == LayoutMode::Compact {
-                    96.0
+                    46.0
                 } else {
-                    220.0
+                    142.0
                 },
-            );
-        };
-        if layout == LayoutMode::Compact {
-            ui.horizontal_wrapped(|ui| {
-                show_identity(ui);
-                if let Some((text, intent)) = save_status {
-                    theme::bounded_badge(ui, text, intent, 56.0);
-                }
-                if let Some((message, intent)) = runtime_status {
-                    status_message(ui, message, intent);
-                }
+            )
+            .on_hover_text("Current dataset");
+            dataset_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, dataset_label.clone())
             });
-        } else {
-            ui.horizontal(|ui| {
-                show_identity(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some((text, intent)) = save_status {
-                        theme::bounded_badge(ui, text, intent, 72.0);
-                    }
-                    if let Some((message, intent)) = runtime_status {
-                        status_message(ui, message, intent);
-                    }
-                });
-            });
-        }
-        ui.add_space(2.0);
-        if layout == LayoutMode::Compact {
-            ui.horizontal_wrapped(|ui| {
-                self.compact_navigation(ui);
-                if self.work_view() {
-                    ui.menu_button("Panels", |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new("Workflow").shortcut_text(self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::ToggleWorkflowPanel,
-                                )),
-                            )
-                            .clicked()
-                        {
-                            self.trigger_user_action(
-                                labello_domain::UserAction::ToggleWorkflowPanel,
-                            );
-                            ui.close();
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new("Inspector").shortcut_text(self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::ToggleInspectorPanel,
-                                )),
-                            )
-                            .clicked()
-                        {
-                            self.trigger_user_action(
-                                labello_domain::UserAction::ToggleInspectorPanel,
-                            );
-                            ui.close();
-                        }
-                        if ui
-                            .add(egui::Button::new("Settings").shortcut_text(
-                                self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::OpenSettings,
-                                ),
-                            ))
-                            .clicked()
-                        {
-                            self.open_shortcut_settings();
-                            ui.close();
-                        }
-                        if self.auth.account.is_some() {
-                            ui.separator();
-                            if ui
-                                .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
-                                .clicked()
-                            {
-                                self.request_logout();
-                                ui.close();
-                            }
-                        }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.work_view() || layout != LayoutMode::Wide {
+                    ui.menu_button("Menu", |ui| {
+                        self.application_menu_contents(
+                            ui,
+                            layout,
+                            save_status,
+                            runtime_status.as_ref(),
+                        );
                     });
                 }
-                if !self.work_view()
-                    && self.auth.account.is_some()
-                    && ui
-                        .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
-                        .clicked()
+                if layout == LayoutMode::Wide
+                    && self.work_view()
+                    && let Some(account) = account
                 {
-                    self.request_logout();
+                    ui.add_sized([160.0, 44.0], egui::Label::new(account).truncate());
+                }
+                if layout != LayoutMode::Compact
+                    && let Some((text, intent)) = save_status
+                {
+                    theme::bounded_badge(ui, text, intent, 72.0);
+                }
+                if let Some((message, intent)) = runtime_status.as_ref() {
+                    status_message(ui, message, *intent);
+                } else if layout == LayoutMode::Compact
+                    && let Some((text, intent)) = save_status
+                {
+                    let response = theme::bounded_badge(
+                        ui,
+                        compact_status_text(self.save_status),
+                        intent,
+                        38.0,
+                    )
+                    .on_hover_text(text);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text)
+                    });
                 }
             });
-            return;
-        }
-        ui.horizontal_wrapped(|ui| {
-            self.mode_toolbar(ui);
-            if layout != LayoutMode::Wide && self.work_view() {
-                if ui
-                    .add(egui::Button::new("Workflow").shortcut_text(
-                        self.shortcut_text(
-                            ui.ctx(),
-                            labello_domain::UserAction::ToggleWorkflowPanel,
-                        ),
-                    ))
-                    .clicked()
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Application bar")
+        });
+    }
+
+    fn application_menu_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: LayoutMode,
+        save_status: Option<(&'static str, theme::Intent)>,
+        runtime_status: Option<&(String, theme::Intent)>,
+    ) {
+        ui.menu_button("Navigation", |ui| self.navigation_menu_contents(ui));
+        if self.work_view() {
+            ui.separator();
+            ui.menu_button("Workspace", |ui| {
+                let panel_actions = [
+                    (
+                        "Workflow panel",
+                        labello_domain::UserAction::ToggleWorkflowPanel,
+                    ),
+                    (
+                        "Inspector panel",
+                        labello_domain::UserAction::ToggleInspectorPanel,
+                    ),
+                ];
+                for (label, action) in panel_actions
+                    .into_iter()
+                    .filter(|_| layout != LayoutMode::Wide)
+                    .chain(std::iter::once((
+                        "Tutorial",
+                        labello_domain::UserAction::OpenTutorial,
+                    )))
                 {
-                    self.trigger_user_action(labello_domain::UserAction::ToggleWorkflowPanel);
+                    if ui
+                        .add(
+                            egui::Button::new(label)
+                                .shortcut_text(self.shortcut_text(ui.ctx(), action)),
+                        )
+                        .clicked()
+                    {
+                        self.trigger_user_action(action);
+                        ui.close();
+                    }
                 }
                 if ui
-                    .add(egui::Button::new("Inspector").shortcut_text(
-                        self.shortcut_text(
-                            ui.ctx(),
-                            labello_domain::UserAction::ToggleInspectorPanel,
-                        ),
-                    ))
-                    .clicked()
-                {
-                    self.trigger_user_action(labello_domain::UserAction::ToggleInspectorPanel);
-                }
-            }
-            if self.work_view()
-                && ui
                     .add(egui::Button::new("Settings").shortcut_text(
                         self.shortcut_text(ui.ctx(), labello_domain::UserAction::OpenSettings),
                     ))
                     .clicked()
-            {
-                self.open_shortcut_settings();
-            }
-            if layout == LayoutMode::Wide {
-                self.workspace_actions(ui, layout);
-            }
-            if let Some(account) = &self.auth.account {
-                ui.separator();
-                if layout == LayoutMode::Wide || !self.work_view() {
-                    ui.add_sized(
-                        [180.0, 44.0],
-                        egui::Label::new(&account.display_name).truncate(),
-                    );
-                }
-                if ui
-                    .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
-                    .clicked()
                 {
-                    self.request_logout();
+                    self.open_shortcut_settings();
+                    ui.close();
                 }
+            });
+        }
+        if save_status.is_some() || runtime_status.is_some() {
+            ui.separator();
+            ui.menu_button("Status", |ui| {
+                if let Some((text, intent)) = save_status {
+                    theme::badge(ui, text, intent);
+                }
+                if let Some((message, intent)) = runtime_status {
+                    ui.label(RichText::new(message).color(intent.color()));
+                }
+            });
+        }
+        if let Some(account) = self
+            .auth
+            .account
+            .as_ref()
+            .map(|account| account.display_name.clone())
+        {
+            ui.separator();
+            ui.label(RichText::new(account).strong());
+            if ui
+                .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
+                .clicked()
+            {
+                self.request_logout();
+                ui.close();
             }
-        });
+        }
     }
 
     pub(crate) fn workspace_actions(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
@@ -218,26 +210,6 @@ impl LabelloApp {
             && !self.loading.image
             && self.pending_transition.is_none();
         if self.view == AppView::Annotate {
-            if ui
-                .add_enabled(
-                    ready && !self.undo_stack.is_empty(),
-                    egui::Button::new("Undo"),
-                )
-                .on_hover_text("Undo the last annotation edit (Ctrl/Cmd+Z).")
-                .clicked()
-            {
-                self.trigger_user_action(labello_domain::UserAction::UndoEdit);
-            }
-            if ui
-                .add_enabled(
-                    ready && !self.redo_stack.is_empty(),
-                    egui::Button::new("Redo"),
-                )
-                .on_hover_text("Redo the last undone edit (Ctrl/Cmd+Shift+Z or Ctrl+Y).")
-                .clicked()
-            {
-                self.trigger_user_action(labello_domain::UserAction::RedoEdit);
-            }
             if ui
                 .add_enabled(
                     ready && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry),
@@ -271,11 +243,33 @@ impl LabelloApp {
         {
             self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
         }
-        if ui
-            .add(egui::Button::selectable(self.show_tutorial, "Tutorial"))
-            .clicked()
-        {
-            self.trigger_user_action(labello_domain::UserAction::OpenTutorial);
+        if self.view == AppView::Annotate {
+            ui.menu_button("More actions", |ui| {
+                if ui
+                    .add_enabled(
+                        ready && !self.undo_stack.is_empty(),
+                        egui::Button::new("Undo").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::UndoEdit),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::UndoEdit);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        ready && !self.redo_stack.is_empty(),
+                        egui::Button::new("Redo").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::RedoEdit),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::RedoEdit);
+                    ui.close();
+                }
+            });
         }
     }
 
@@ -363,20 +357,6 @@ impl LabelloApp {
                         .clicked()
                     {
                         self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
-                        ui.close();
-                    }
-                    if ui
-                        .add(
-                            egui::Button::selectable(self.show_tutorial, "Tutorial").shortcut_text(
-                                self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::OpenTutorial,
-                                ),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.trigger_user_action(labello_domain::UserAction::OpenTutorial);
                         ui.close();
                     }
                 },
@@ -852,7 +832,7 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn central(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+    pub(crate) fn central(&mut self, ui: &mut egui::Ui, _layout: LayoutMode) {
         match self.view {
             AppView::Setup => {
                 centered_scroll(ui, 760.0, |ui| self.setup_view(ui));
@@ -869,11 +849,6 @@ impl LabelloApp {
             AppView::Annotate | AppView::Review | AppView::Adjudicate => {}
         }
         if let Some(current) = self.current.clone() {
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                self.work_context_header(ui, &current, layout);
-            });
-            ui.add_space(2.0);
             let texture = self.current_texture.clone();
             let mut annotations = self
                 .annotations
@@ -1006,7 +981,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn overlays(&mut self, ctx: &egui::Context, layout: LayoutMode) {
-        if layout != LayoutMode::Wide {
+        if layout != LayoutMode::Wide && self.work_view() {
             let screen = ctx.content_rect();
             let compact = layout == LayoutMode::Compact;
             let width = if compact {
@@ -1087,87 +1062,109 @@ impl LabelloApp {
         self.settings_modal(ctx);
     }
 
-    fn work_context_header(
-        &mut self,
-        ui: &mut egui::Ui,
-        current: &crate::queue::QueuedImage,
-        layout: LayoutMode,
-    ) {
-        self.image_metadata_row(ui, current, layout);
-        if layout == LayoutMode::Compact
-            && let Some(workflow) = self.selected_workflow()
-        {
-            let label = workflow.label();
-            let outer_width = ui.available_width().min(220.0);
-            theme::bounded_badge(
-                ui,
-                &label,
-                theme::Intent::Accent,
-                (outer_width - 18.0).max(24.0),
+    pub(crate) fn workspace_context_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        let current = self.current.clone();
+        let workflow = self.selected_workflow().map(|workflow| workflow.label());
+        let view = self.view;
+        let loading_image = self.loading.image;
+        let has_assignment = self.assignment.is_some();
+        let add_summary = |ui: &mut egui::Ui, filename_width: f32| {
+            ui.label(
+                RichText::new(view_label(view))
+                    .strong()
+                    .color(theme::ACCENT),
             );
-        }
-        if self.view == AppView::Annotate {
-            self.canvas_controls(ui, layout);
-        }
-    }
-
-    fn image_metadata_row(
-        &self,
-        ui: &mut egui::Ui,
-        current: &crate::queue::QueuedImage,
-        layout: LayoutMode,
-    ) {
-        let dimensions = format!("{} x {}", current.image.width, current.image.height);
-        let workflow = (layout != LayoutMode::Compact)
-            .then(|| self.selected_workflow().map(|workflow| workflow.label()))
-            .flatten();
-        let workflow_outer_width = workflow
-            .as_ref()
-            .map(|_| {
+            if let Some(current) = current.as_ref() {
+                if filename_width > 0.0 {
+                    ui.separator();
+                    ui.add_sized(
+                        [filename_width, 44.0],
+                        egui::Label::new(RichText::new(&current.image.file_name).strong())
+                            .truncate(),
+                    )
+                    .on_hover_text(&current.image.file_name);
+                }
                 if layout == LayoutMode::Wide {
-                    220.0
-                } else {
-                    160.0
+                    ui.add_sized(
+                        [82.0, 44.0],
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "{} x {}",
+                                current.image.width, current.image.height
+                            ))
+                            .color(theme::MUTED),
+                        ),
+                    );
+                }
+            } else if loading_image {
+                ui.spinner();
+                ui.label("Loading assignment...");
+            } else if has_assignment {
+                ui.label(RichText::new("Assignment image unavailable").color(theme::WARNING));
+            } else {
+                ui.label(RichText::new("No active assignment").color(theme::TEXT_MUTED));
+            }
+        };
+        let response = if layout == LayoutMode::Compact {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.horizontal(|ui| {
+                    ui.set_min_height(44.0);
+                    add_summary(ui, 50.0);
+                    if current.is_some()
+                        && let Some(workflow) = workflow.as_ref()
+                    {
+                        theme::bounded_badge(ui, workflow, theme::Intent::Accent, 90.0);
+                    }
+                });
+                if self.view == AppView::Annotate && current.is_some() {
+                    self.canvas_controls(ui);
                 }
             })
-            .unwrap_or_default();
-        let dimensions_width = 76.0;
-        let metadata_height = 34.0;
-
-        ui.horizontal(|ui| {
-            let gaps = if workflow.is_some() { 2.0 } else { 1.0 } * ui.spacing().item_spacing.x;
-            let filename_width =
-                (ui.available_width() - dimensions_width - workflow_outer_width - gaps).max(40.0);
-            ui.add_sized(
-                [filename_width, metadata_height],
-                egui::Label::new(RichText::new(&current.image.file_name).strong()).truncate(),
-            )
-            .on_hover_text(&current.image.file_name);
-            ui.add_sized(
-                [dimensions_width, metadata_height],
-                egui::Label::new(RichText::new(dimensions).color(theme::MUTED)),
-            );
-            if let Some(workflow) = workflow {
-                theme::bounded_badge(
+        } else {
+            ui.horizontal(|ui| {
+                add_summary(
                     ui,
-                    &workflow,
-                    theme::Intent::Accent,
-                    (workflow_outer_width - 18.0).max(24.0),
+                    if layout == LayoutMode::Wide {
+                        160.0
+                    } else {
+                        60.0
+                    },
                 );
-            }
+                if current.is_some()
+                    && let Some(workflow) = workflow.as_ref()
+                {
+                    theme::bounded_badge(
+                        ui,
+                        workflow,
+                        theme::Intent::Accent,
+                        if layout == LayoutMode::Wide {
+                            120.0
+                        } else {
+                            70.0
+                        },
+                    );
+                }
+                if self.view == AppView::Annotate && current.is_some() {
+                    self.canvas_controls(ui);
+                }
+                if layout == LayoutMode::Wide {
+                    ui.separator();
+                    self.workspace_actions(ui, layout);
+                }
+            })
+        };
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Workspace context bar")
         });
     }
 
-    fn canvas_controls(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+    fn canvas_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let show_shortcuts = layout == LayoutMode::Wide;
             let pan_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
-            let mut pan = egui::Button::selectable(self.canvas.pan_mode(), "Pan")
+            let pan = egui::Button::selectable(self.canvas.pan_mode(), "Pan")
                 .min_size(egui::vec2(44.0, 44.0));
-            if show_shortcuts {
-                pan = pan.shortcut_text(&pan_shortcut);
-            }
             if ui
                 .add_enabled(self.canvas.can_pan(), pan)
                 .on_disabled_hover_text("Zoom in before enabling Pan mode.")
@@ -1179,11 +1176,7 @@ impl LabelloApp {
 
             let zoom_out_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomOut);
-            let mut zoom_out = egui::Button::new(if show_shortcuts { "Zoom out" } else { "−" })
-                .min_size(egui::vec2(44.0, 44.0));
-            if show_shortcuts {
-                zoom_out = zoom_out.shortcut_text(&zoom_out_shortcut);
-            }
+            let zoom_out = egui::Button::new("−").min_size(egui::vec2(44.0, 44.0));
             let zoom_out_response = ui
                 .add(zoom_out)
                 .on_hover_text(format!("Zoom out ({zoom_out_shortcut})."));
@@ -1200,11 +1193,7 @@ impl LabelloApp {
             );
 
             let zoom_in_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomIn);
-            let mut zoom_in = egui::Button::new(if show_shortcuts { "Zoom in" } else { "+" })
-                .min_size(egui::vec2(44.0, 44.0));
-            if show_shortcuts {
-                zoom_in = zoom_in.shortcut_text(&zoom_in_shortcut);
-            }
+            let zoom_in = egui::Button::new("+").min_size(egui::vec2(44.0, 44.0));
             let zoom_in_response = ui
                 .add(zoom_in)
                 .on_hover_text(format!("Zoom in ({zoom_in_shortcut})."));
@@ -1216,10 +1205,7 @@ impl LabelloApp {
             }
 
             let fit_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::FitImage);
-            let mut fit = egui::Button::new("Fit").min_size(egui::vec2(44.0, 44.0));
-            if show_shortcuts {
-                fit = fit.shortcut_text(&fit_shortcut);
-            }
+            let fit = egui::Button::new("Fit").min_size(egui::vec2(44.0, 44.0));
             if ui
                 .add(fit)
                 .on_hover_text(format!("Fit and center the image ({fit_shortcut})."))
@@ -1227,15 +1213,11 @@ impl LabelloApp {
             {
                 self.trigger_user_action(labello_domain::UserAction::FitImage);
             }
-
-            if layout != LayoutMode::Compact && self.canvas.pan_mode() {
-                ui.label(RichText::new("Primary-drag to pan").color(theme::TEAL));
-            }
         });
     }
 
     fn tutorial_overlay(&mut self, ctx: &egui::Context) {
-        if !self.show_tutorial {
+        if !self.show_tutorial || !self.work_view() {
             return;
         }
         let Some((title, text)) = self.selected_task().map(|task| {
@@ -1247,15 +1229,27 @@ impl LabelloApp {
             return;
         };
         let screen = ctx.content_rect();
+        let shell_height = if LayoutMode::for_width(screen.width()) == LayoutMode::Compact {
+            156.0
+        } else {
+            112.0
+        };
+        let workspace = egui::Rect::from_min_max(
+            egui::pos2(screen.left(), screen.top() + shell_height),
+            screen.right_bottom(),
+        );
         let mut open = true;
         egui::Window::new("Tutorial")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
-            .max_width((screen.width() - 24.0).clamp(240.0, 420.0))
-            .max_height((screen.height() - 24.0).clamp(240.0, 560.0))
-            .constrain_to(screen)
+            .anchor(
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(-12.0, shell_height + 12.0),
+            )
+            .max_width((workspace.width() - 24.0).clamp(240.0, 420.0))
+            .max_height((workspace.height() - 24.0).clamp(120.0, 560.0))
+            .constrain_to(workspace)
             .show(ctx, |ui| {
                 ui.heading(title);
                 egui::ScrollArea::vertical().show(ui, |ui| ui.label(text));
@@ -1970,6 +1964,16 @@ fn status_text(status: SaveStatus) -> &'static str {
         SaveStatus::Dirty => "Unsaved",
         SaveStatus::Saved => "Saved",
         SaveStatus::Saving => "Saving",
+        SaveStatus::Retry => "Retry",
+    }
+}
+
+fn compact_status_text(status: SaveStatus) -> &'static str {
+    match status {
+        SaveStatus::Idle => "Idle",
+        SaveStatus::Dirty => "Edit",
+        SaveStatus::Saved => "Done",
+        SaveStatus::Saving => "Wait",
         SaveStatus::Retry => "Retry",
     }
 }

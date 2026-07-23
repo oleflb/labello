@@ -115,6 +115,8 @@ impl LabelloApp {
                             self.datasets.users.clear();
                             self.datasets.users_baseline.clear();
                             self.admin_tools = Default::default();
+                            self.drawer = None;
+                            self.show_tutorial = false;
                             self.clear_current_image();
                             self.isolate_browser_workspace();
                             self.runtime.storage_error = None;
