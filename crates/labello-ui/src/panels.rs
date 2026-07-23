@@ -55,7 +55,7 @@ impl LabelloApp {
                 &dataset_label,
                 theme::BLUE,
                 if layout == LayoutMode::Compact {
-                    132.0
+                    96.0
                 } else {
                     220.0
                 },
@@ -65,7 +65,7 @@ impl LabelloApp {
             ui.horizontal_wrapped(|ui| {
                 show_identity(ui);
                 if let Some((text, color)) = save_status {
-                    bounded_badge(ui, text, color, 72.0);
+                    bounded_badge(ui, text, color, 56.0);
                 }
                 if let Some((message, color)) = runtime_status {
                     status_message(ui, message, color);
@@ -130,9 +130,20 @@ impl LabelloApp {
                             self.open_shortcut_settings();
                             ui.close();
                         }
+                        if self.auth.account.is_some() {
+                            ui.separator();
+                            if ui
+                                .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
+                                .clicked()
+                            {
+                                self.request_logout();
+                                ui.close();
+                            }
+                        }
                     });
                 }
-                if self.auth.account.is_some()
+                if !self.work_view()
+                    && self.auth.account.is_some()
                     && ui
                         .add_enabled(!self.loading.logout, egui::Button::new("Sign out"))
                         .clicked()
@@ -210,12 +221,7 @@ impl LabelloApp {
             if ui
                 .add_enabled(
                     ready && !self.undo_stack.is_empty(),
-                    egui::Button::new("Undo").shortcut_text(wide_shortcut(
-                        self,
-                        ui.ctx(),
-                        layout,
-                        labello_domain::UserAction::UndoEdit,
-                    )),
+                    egui::Button::new("Undo"),
                 )
                 .on_hover_text("Undo the last annotation edit (Ctrl/Cmd+Z).")
                 .clicked()
@@ -225,12 +231,7 @@ impl LabelloApp {
             if ui
                 .add_enabled(
                     ready && !self.redo_stack.is_empty(),
-                    egui::Button::new("Redo").shortcut_text(wide_shortcut(
-                        self,
-                        ui.ctx(),
-                        layout,
-                        labello_domain::UserAction::RedoEdit,
-                    )),
+                    egui::Button::new("Redo"),
                 )
                 .on_hover_text("Redo the last undone edit (Ctrl/Cmd+Shift+Z or Ctrl+Y).")
                 .clicked()
@@ -240,12 +241,7 @@ impl LabelloApp {
             if ui
                 .add_enabled(
                     ready && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry),
-                    egui::Button::new("Save").shortcut_text(wide_shortcut(
-                        self,
-                        ui.ctx(),
-                        layout,
-                        labello_domain::UserAction::SaveAnnotations,
-                    )),
+                    egui::Button::new("Save"),
                 )
                 .on_hover_text("Save edits and keep this assignment active.")
                 .clicked()
@@ -253,15 +249,7 @@ impl LabelloApp {
                 self.trigger_user_action(labello_domain::UserAction::SaveAnnotations);
             }
             if ui
-                .add_enabled(
-                    ready,
-                    egui::Button::new("Submit & next").shortcut_text(wide_shortcut(
-                        self,
-                        ui.ctx(),
-                        layout,
-                        labello_domain::UserAction::NextImage,
-                    )),
-                )
+                .add_enabled(ready, egui::Button::new("Submit & next"))
                 .on_hover_text("Save, complete this assignment, and claim another.")
                 .clicked()
             {
@@ -278,31 +266,14 @@ impl LabelloApp {
             self.adjudication_decision_buttons(ui, false);
         }
         if ui
-            .add_enabled(
-                ready,
-                egui::Button::new("Skip").shortcut_text(wide_shortcut(
-                    self,
-                    ui.ctx(),
-                    layout,
-                    labello_domain::UserAction::SkipAssignment,
-                )),
-            )
+            .add_enabled(ready, egui::Button::new("Skip"))
             .on_hover_text("Release this assignment and claim another.")
             .clicked()
         {
             self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
         }
         if ui
-            .add(
-                egui::Button::selectable(self.show_tutorial, "Tutorial").shortcut_text(
-                    wide_shortcut(
-                        self,
-                        ui.ctx(),
-                        layout,
-                        labello_domain::UserAction::OpenTutorial,
-                    ),
-                ),
-            )
+            .add(egui::Button::selectable(self.show_tutorial, "Tutorial"))
             .clicked()
         {
             self.trigger_user_action(labello_domain::UserAction::OpenTutorial);
@@ -317,12 +288,7 @@ impl LabelloApp {
         ui.horizontal_wrapped(|ui| {
             if self.view == AppView::Annotate
                 && ui
-                    .add_enabled(
-                        ready,
-                        egui::Button::new("Submit & next").shortcut_text(
-                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::NextImage),
-                        ),
-                    )
+                    .add_enabled(ready, egui::Button::new("Submit & next"))
                     .clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::NextImage);
@@ -684,7 +650,7 @@ impl LabelloApp {
             }
         }
         if show_primary_actions {
-            self.review_decision_buttons(ui);
+            ui.horizontal_wrapped(|ui| self.review_decision_buttons(ui));
         }
     }
 
@@ -695,14 +661,12 @@ impl LabelloApp {
         } else {
             ("Approve object", "Reject object & finish")
         };
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(ready, egui::Button::new(approve)).clicked() {
-                self.request_review(ReviewDecision::Approved);
-            }
-            if ui.add_enabled(ready, egui::Button::new(reject)).clicked() {
-                self.request_review(ReviewDecision::Rejected);
-            }
-        });
+        if ui.add_enabled(ready, egui::Button::new(approve)).clicked() {
+            self.request_review(ReviewDecision::Approved);
+        }
+        if ui.add_enabled(ready, egui::Button::new(reject)).clicked() {
+            self.request_review(ReviewDecision::Rejected);
+        }
     }
 
     fn correction_actions(&mut self, ui: &mut egui::Ui, ready: bool) {
@@ -862,7 +826,7 @@ impl LabelloApp {
             );
         }
         if show_primary_actions {
-            self.adjudication_decision_buttons(ui, false);
+            ui.horizontal_wrapped(|ui| self.adjudication_decision_buttons(ui, false));
         }
     }
 
@@ -876,17 +840,15 @@ impl LabelloApp {
         } else {
             ("Accept all annotations", "Send back for correction")
         };
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(ready && has_candidates, egui::Button::new(accept))
-                .clicked()
-            {
-                self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
-            }
-            if ui.add_enabled(ready, egui::Button::new(correct)).clicked() {
-                self.request_adjudication(AdjudicationDecision::NeedsCorrection);
-            }
-        });
+        if ui
+            .add_enabled(ready && has_candidates, egui::Button::new(accept))
+            .clicked()
+        {
+            self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
+        }
+        if ui.add_enabled(ready, egui::Button::new(correct)).clicked() {
+            self.request_adjudication(AdjudicationDecision::NeedsCorrection);
+        }
     }
 
     pub(crate) fn central(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
@@ -1053,7 +1015,7 @@ impl LabelloApp {
                 340.0_f32.min(screen.width() - 24.0)
             };
             let max_height = if compact {
-                (screen.height() * 0.58).max(240.0)
+                (screen.height() * 0.7).max(240.0)
             } else {
                 (screen.height() - 24.0).max(240.0)
             };
@@ -1069,7 +1031,7 @@ impl LabelloApp {
                                 egui::Align2::LEFT_CENTER
                             },
                             if compact {
-                                egui::vec2(0.0, -8.0)
+                                egui::vec2(0.0, -24.0)
                             } else {
                                 egui::vec2(12.0, 0.0)
                             },
@@ -1080,7 +1042,7 @@ impl LabelloApp {
                         .constrain_to(screen)
                         .show(ctx, |ui| {
                             egui::ScrollArea::vertical()
-                                .max_height(max_height - 48.0)
+                                .max_height(ui.available_height())
                                 .show(ui, |ui| self.task_panel(ui));
                         });
                     if !open {
@@ -1098,7 +1060,7 @@ impl LabelloApp {
                                 egui::Align2::RIGHT_CENTER
                             },
                             if compact {
-                                egui::vec2(0.0, -8.0)
+                                egui::vec2(0.0, -24.0)
                             } else {
                                 egui::vec2(-12.0, 0.0)
                             },
@@ -1109,7 +1071,7 @@ impl LabelloApp {
                         .constrain_to(screen)
                         .show(ctx, |ui| {
                             egui::ScrollArea::vertical()
-                                .max_height(max_height - 48.0)
+                                .max_height(ui.available_height())
                                 .show(ui, |ui| self.right_panel(ui, false));
                         });
                     if !open {
@@ -1517,7 +1479,7 @@ impl LabelloApp {
                 .collect::<std::collections::BTreeSet<_>>();
             let query = self.shortcut_settings.search.trim().to_ascii_lowercase();
             egui::ScrollArea::vertical()
-                .max_height((screen.height() - 260.0).clamp(180.0, 520.0))
+                .max_height((screen.height() - 300.0).clamp(180.0, 520.0))
                 .show(ui, |ui| {
                     let mut current_category = "";
                     for action in labello_domain::UserAction::ACTIVE {
@@ -1751,7 +1713,7 @@ impl LabelloApp {
                 theme::card_frame()
             };
             frame.show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .selectable_label(selected, suggestion.class_id.to_string())
                         .clicked()
@@ -1985,19 +1947,6 @@ fn format_chord(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> String
     modifiers.shift = chord.shift;
     modifiers.alt = chord.alt;
     ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
-}
-
-fn wide_shortcut(
-    app: &LabelloApp,
-    ctx: &egui::Context,
-    layout: LayoutMode,
-    action: labello_domain::UserAction,
-) -> String {
-    if layout == LayoutMode::Wide {
-        app.shortcut_text(ctx, action)
-    } else {
-        String::new()
-    }
 }
 
 fn view_label(view: AppView) -> &'static str {

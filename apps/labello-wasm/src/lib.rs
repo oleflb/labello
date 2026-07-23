@@ -47,7 +47,8 @@ async fn run() -> Result<(), JsValue> {
         .start(
             canvas,
             options,
-            Box::new(move |_creation_context| {
+            Box::new(move |creation_context| {
+                labello_ui::theme::apply(&creation_context.egui_ctx);
                 Ok(Box::new(labello_ui::LabelloApp::live_http(config.clone())))
             }),
         )

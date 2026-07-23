@@ -2174,8 +2174,10 @@ pub(crate) fn annotation_type_label(annotation_type: &AnnotationType) -> &'stati
 impl eframe::App for LabelloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.theme_applied {
-            theme::apply(ui.ctx());
-            self.theme_applied = true;
+            self.theme_applied = theme::apply_fallback(ui.ctx());
+            if !self.theme_applied {
+                return;
+            }
         }
         self.process_messages(ui.ctx());
         self.retry_prefetch_if_due(ui.ctx());
@@ -2195,11 +2197,18 @@ impl eframe::App for LabelloApp {
             .show(ui, |ui| self.top_bar(ui, layout));
         if self.work_view() && layout != LayoutMode::Wide {
             egui::Panel::bottom("compact_primary_actions")
-                .exact_size(if layout == LayoutMode::Compact {
-                    60.0
-                } else {
-                    68.0
-                })
+                .exact_size(
+                    if layout == LayoutMode::Compact
+                        && self.view == AppView::Review
+                        && self.correction_draft.is_none()
+                    {
+                        112.0
+                    } else if layout == LayoutMode::Compact {
+                        60.0
+                    } else {
+                        68.0
+                    },
+                )
                 .frame(theme::top_bar_frame())
                 .show(ui, |ui| {
                     if layout == LayoutMode::Compact {
@@ -2213,14 +2222,11 @@ impl eframe::App for LabelloApp {
                 || self.datasets.users != self.datasets.users_baseline)
         {
             let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
-            let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
             egui::Panel::bottom("admin_save_status")
                 .exact_size(if layout != LayoutMode::Compact {
                     68.0
-                } else if config_dirty && permissions_dirty {
-                    164.0
                 } else if config_dirty {
-                    112.0
+                    164.0
                 } else {
                     68.0
                 })
