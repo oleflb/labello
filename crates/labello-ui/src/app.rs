@@ -623,7 +623,9 @@ pub(crate) struct DatasetState {
     pub stats: DatasetStats,
     pub stats_request_id: u64,
     pub active_stats_request: Option<(u64, DatasetId)>,
+    pub last_stats_attempt: Option<Instant>,
     pub last_stats_completion: Option<Instant>,
+    pub stats_error: Option<String>,
     pub requested_view: Option<AppView>,
     pub users: Vec<DatasetUser>,
     pub users_baseline: Vec<DatasetUser>,
@@ -639,7 +641,9 @@ impl DatasetState {
             stats: DatasetStats::default(),
             stats_request_id: 0,
             active_stats_request: None,
+            last_stats_attempt: None,
             last_stats_completion: None,
+            stats_error: None,
             requested_view: None,
             users: Vec::new(),
             users_baseline: Vec::new(),
@@ -864,6 +868,8 @@ impl LabelloApp {
         let mut app = Self::demo(config);
         app.view = AppView::Setup;
         app.setup.started = false;
+        app.setup.create_dataset_id.clear();
+        app.setup.create_dataset_name.clear();
         app.auth.checked = false;
         app.current = None;
         app.queue.clear();
@@ -1027,7 +1033,7 @@ impl LabelloApp {
         self.assignment_kind().is_some()
     }
 
-    fn class_name(&self, class_id: &ClassId) -> String {
+    pub(crate) fn class_name(&self, class_id: &ClassId) -> String {
         self.classes
             .iter()
             .find(|class| &class.class_id == class_id)
@@ -1135,6 +1141,13 @@ impl LabelloApp {
 
     pub(crate) fn skip_assignment(&mut self) {
         if self.loading.saving || (self.assignment.is_none() && self.runtime.api.is_some()) {
+            return;
+        }
+        if self.view == AppView::Annotate
+            && self.runtime.api.is_some()
+            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+        {
+            self.pending_transition = Some(PendingTransition::NextAssignment);
             return;
         }
         if self.runtime.api.is_none() {
@@ -1369,9 +1382,10 @@ impl LabelloApp {
         let class_id = class_id.clone();
         let user_id = self.config.user_id.clone();
         let timestamp = labello_domain::now();
+        let annotation_id = AnnotationId::generate();
         self.record_edit();
         self.annotations.push(labello_domain::AnnotationVersion {
-            annotation_id: AnnotationId::generate(),
+            annotation_id: annotation_id.clone(),
             version: 1,
             task_id,
             class_id,
@@ -1383,6 +1397,7 @@ impl LabelloApp {
             updated_at: timestamp,
             deleted: false,
         });
+        self.selected_annotation = Some(annotation_id);
         self.mark_edited();
     }
 
@@ -1570,9 +1585,10 @@ impl LabelloApp {
         }
         let timestamp = labello_domain::now();
         let user_id = self.config.user_id.clone();
+        let annotation_id = AnnotationId::generate();
         self.record_edit();
         self.annotations.push(labello_domain::AnnotationVersion {
-            annotation_id: AnnotationId::generate(),
+            annotation_id: annotation_id.clone(),
             version: 1,
             task_id: suggestion.task_id.clone(),
             class_id: suggestion.class_id.clone(),
@@ -1593,10 +1609,11 @@ impl LabelloApp {
         });
         self.accepted_prelabels
             .push(suggestion.suggestion_id.clone());
+        self.selected_annotation = Some(annotation_id);
         self.mark_edited();
     }
 
-    fn delete_selected(&mut self) {
+    pub(crate) fn delete_selected(&mut self) {
         if let Some(selected) = self.selected_annotation.clone() {
             let persisted = self.persisted_annotations.contains(&selected);
             let persisted_version = self
@@ -1610,6 +1627,7 @@ impl LabelloApp {
                 .position(|annotation| annotation.annotation_id == selected)
             {
                 if self.annotations[index].deleted {
+                    self.selected_annotation = None;
                     return;
                 }
                 self.record_edit();
@@ -1622,7 +1640,15 @@ impl LabelloApp {
                     }
                     self.modified_annotations.remove(&selected);
                 }
+                if self.active_skeleton.as_ref() == Some(&selected) {
+                    self.active_skeleton = None;
+                    self.skeleton_keypoint_index = 0;
+                    self.next_keypoint_hidden = false;
+                }
+                self.selected_annotation = None;
                 self.mark_edited();
+            } else {
+                self.selected_annotation = None;
             }
         }
     }
@@ -1755,6 +1781,8 @@ impl LabelloApp {
             || self.loading.saving
             || self.loading.image
             || self.pending_transition.is_some()
+            || self.show_settings
+            || self.runtime.persistence.recovery.is_some()
         {
             return;
         }
@@ -1778,9 +1806,13 @@ impl LabelloApp {
             ))
         });
         if undo {
-            self.undo();
+            if self.correction_draft.is_some() {
+                self.undo_correction();
+            } else {
+                self.undo();
+            }
         }
-        if redo {
+        if redo && self.correction_draft.is_none() {
             self.redo();
         }
         let pressed = self
@@ -1852,7 +1884,7 @@ fn shortcut_pressed(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> bo
     })
 }
 
-fn parse_key(key: &str) -> Option<egui::Key> {
+pub(crate) fn parse_key(key: &str) -> Option<egui::Key> {
     use egui::Key;
     Some(match key {
         "ArrowRight" => Key::ArrowRight,
@@ -1918,7 +1950,7 @@ impl eframe::App for LabelloApp {
                     if layout == LayoutMode::Compact {
                         self.compact_workspace_actions(ui);
                     } else {
-                        ui.horizontal_wrapped(|ui| self.workspace_actions(ui));
+                        ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
                     }
                 });
         } else if self.view == AppView::Admin {
@@ -1944,7 +1976,7 @@ impl eframe::App for LabelloApp {
                 .exact_size(LayoutMode::INSPECTOR_PANEL_WIDTH)
                 .frame(theme::side_frame())
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui));
+                    egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui, true));
                 });
         }
         let central_frame = if self.work_view() {
@@ -1973,10 +2005,8 @@ impl eframe::App for LabelloApp {
         if self.view == AppView::Stats && !self.loading.stats {
             let until_refresh = self
                 .datasets
-                .last_stats_completion
-                .map(|completed| {
-                    std::time::Duration::from_secs(3).saturating_sub(completed.elapsed())
-                })
+                .last_stats_attempt
+                .map(|attempt| std::time::Duration::from_secs(3).saturating_sub(attempt.elapsed()))
                 .unwrap_or(std::time::Duration::from_secs(3));
             ui.ctx().request_repaint_after(until_refresh);
         }

@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText};
-use labello_domain::{DatasetRole, UserId};
+use labello_domain::{DatasetId, DatasetRole, UserId};
 
 use crate::{
     app::{AppView, LabelloApp, PendingTransition},
@@ -8,22 +8,49 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn setup_view(&mut self, ui: &mut egui::Ui) {
+        let signed_in = self.auth.account.is_some();
         ui.vertical_centered(|ui| {
-            ui.heading(RichText::new("Welcome To Labello").size(28.0));
-            ui.label(
-                RichText::new("Sign in, then open a dataset available to your account.")
-                    .color(theme::MUTED),
-            );
+            let (title, subtitle) = if signed_in {
+                (
+                    "Choose where to work",
+                    "Continue with a recommended dataset or choose where to work.",
+                )
+            } else {
+                (
+                    "Welcome to Labello",
+                    "Sign in, then open a dataset available to your account.",
+                )
+            };
+            ui.heading(RichText::new(title).size(28.0));
+            ui.label(RichText::new(subtitle).color(theme::MUTED));
         });
         ui.add_space(18.0);
+
+        if signed_in {
+            self.datasets_section(ui);
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new("Advanced connection settings")
+                .show(ui, |ui| self.connection_section(ui));
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new("Create a dataset")
+                .show(ui, |ui| self.create_dataset_section(ui));
+        } else {
+            self.connection_section(ui);
+            ui.add_space(12.0);
+            self.datasets_section(ui);
+        }
+    }
+
+    fn connection_section(&mut self, ui: &mut egui::Ui) {
         theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.heading("Connection");
             form_row(ui, "API URL", |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.config.api_base_url)
-                        .desired_width(ui.available_width()),
+                ui.add_sized(
+                    [ui.available_width(), 44.0],
+                    egui::TextEdit::singleline(&mut self.config.api_base_url),
                 )
-                .on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.");
+                .on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.")
             });
             if self.loading.session {
                 ui.horizontal(|ui| {
@@ -47,24 +74,22 @@ impl LabelloApp {
                 );
             if self.setup.dev_auth {
                 form_row(ui, "Dev token", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.config.dev_token)
-                            .password(true)
-                            .desired_width(ui.available_width()),
+                    ui.add_sized(
+                        [ui.available_width(), 44.0],
+                        egui::TextEdit::singleline(&mut self.config.dev_token).password(true),
                     )
-                    .on_hover_text("Must match developmentAuth.token in labello.server.toml.");
+                    .on_hover_text("Must match the development authentication token on the server.")
                 });
                 let mut user_id = self.config.user_id.to_string();
                 form_row(ui, "Development user ID", |ui| {
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut user_id)
-                                .desired_width(ui.available_width()),
-                        )
-                        .changed()
-                    {
+                    let response = ui.add_sized(
+                        [ui.available_width(), 44.0],
+                        egui::TextEdit::singleline(&mut user_id),
+                    );
+                    if response.changed() {
                         self.config.user_id = UserId::from(user_id);
                     }
+                    response
                 });
                 if ui.button("Apply development login").clicked() {
                     if let Err(error) = self.config.user_id.validate_path_segment() {
@@ -82,9 +107,11 @@ impl LabelloApp {
                 }
             }
         });
+    }
 
-        ui.add_space(12.0);
+    fn datasets_section(&mut self, ui: &mut egui::Ui) {
         theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.heading("Datasets");
                 if self.loading.datasets || self.loading.dataset {
@@ -110,8 +137,11 @@ impl LabelloApp {
             let datasets = self.datasets.summaries.clone();
             if let Some(dataset) = self.recommended_dataset()
                 && ui
-                    .add_sized([220.0, 44.0], egui::Button::new("Continue Work"))
-                    .on_hover_text("Open your most recent dataset and recommended work queue.")
+                    .add_sized(
+                        [280.0_f32.min(ui.available_width()), 44.0],
+                        egui::Button::new(format!("Continue with {}", dataset.name)),
+                    )
+                    .on_hover_text("Open this dataset and its recommended work queue.")
                     .clicked()
             {
                 let view = recommended_view(&dataset.roles);
@@ -119,6 +149,7 @@ impl LabelloApp {
             }
             for dataset in datasets {
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.label(RichText::new(&dataset.name).strong());
                     ui.small(format!("{} images", dataset.total_images));
                     ui.horizontal_wrapped(|ui| {
@@ -149,35 +180,44 @@ impl LabelloApp {
                 ui.add_space(8.0);
             }
         });
+    }
 
-        ui.add_space(12.0);
-        if self.auth.account.is_some() {
-            theme::card_frame().show(ui, |ui| {
-                ui.heading("Create Dataset");
-                form_row(ui, "ID", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.setup.create_dataset_id)
-                            .desired_width(ui.available_width()),
-                    )
-                    .on_hover_text("Stable dataset id used as the dataset folder name.");
-                });
-                form_row(ui, "Name", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.setup.create_dataset_name)
-                            .desired_width(ui.available_width()),
-                    )
-                    .on_hover_text("Human-readable dataset name.");
-                });
-                if ui
-                    .button("Create as current user")
-                    .on_hover_text("Create a new dataset. Requires bootstrap admin access.")
-                    .clicked()
-                {
-                    self.request_create_dataset();
-                }
-                ui.small("Dataset creation requires the current user to be a bootstrap admin in labello.server.toml.");
+    fn create_dataset_section(&mut self, ui: &mut egui::Ui) {
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            form_row(ui, "Dataset ID", |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 44.0],
+                    egui::TextEdit::singleline(&mut self.setup.create_dataset_id),
+                )
+                .on_hover_text("Stable identifier used for this dataset.")
             });
-        }
+            form_row(ui, "Dataset name", |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 44.0],
+                    egui::TextEdit::singleline(&mut self.setup.create_dataset_name),
+                )
+                .on_hover_text("Human-readable dataset name.")
+            });
+            let dataset_id = DatasetId::from(self.setup.create_dataset_id.trim());
+            let id_error = dataset_id.validate_path_segment().err();
+            let can_create = id_error.is_none()
+                && !self.setup.create_dataset_name.trim().is_empty()
+                && !self.loading.dataset;
+            if ui
+                .add_enabled(can_create, egui::Button::new("Create dataset"))
+                .on_hover_text("Requires bootstrap administrator access.")
+                .clicked()
+            {
+                self.request_create_dataset();
+            }
+            if let Some(error) = id_error
+                && !self.setup.create_dataset_id.trim().is_empty()
+            {
+                ui.label(RichText::new(format!("Dataset ID: {error}")).color(theme::RED));
+            }
+            ui.small("Only bootstrap administrators can create datasets.");
+        });
     }
 
     pub(crate) fn mode_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -251,6 +291,15 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_view(&mut self, view: AppView) {
+        if self.view == AppView::Admin
+            && view != AppView::Admin
+            && self.datasets.users != self.datasets.users_baseline
+        {
+            self.runtime.error = Some(
+                "Save or revert permission changes in People before leaving Admin.".to_string(),
+            );
+            return;
+        }
         if view == AppView::Setup {
             self.request_transition(PendingTransition::View(view));
             return;
@@ -280,13 +329,22 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_dataset(&mut self, dataset_id: labello_domain::DatasetId, view: AppView) {
+        if self.view == AppView::Admin && self.datasets.users != self.datasets.users_baseline {
+            self.runtime.error = Some(
+                "Save or revert permission changes in People before switching datasets."
+                    .to_string(),
+            );
+            return;
+        }
         if self.loading.dataset {
             return;
         }
         if self.config.dataset_id != dataset_id {
             self.loading.stats = false;
             self.datasets.active_stats_request = None;
+            self.datasets.last_stats_attempt = None;
             self.datasets.last_stats_completion = None;
+            self.datasets.stats_error = None;
             self.datasets.stats = labello_domain::DatasetStats::default();
         }
         self.config.dataset_id = dataset_id;
@@ -317,16 +375,20 @@ impl LabelloApp {
     }
 }
 
-fn form_row(ui: &mut egui::Ui, label: &str, add_field: impl FnOnce(&mut egui::Ui)) {
+fn form_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_field: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) {
     if ui.available_width() < 520.0 {
         ui.vertical(|ui| {
-            ui.label(label);
-            add_field(ui);
+            let label = ui.label(label);
+            add_field(ui).labelled_by(label.id);
         });
     } else {
         ui.horizontal(|ui| {
-            ui.add_sized([150.0, 44.0], egui::Label::new(label));
-            add_field(ui);
+            let label = ui.add_sized([150.0, 44.0], egui::Label::new(label));
+            add_field(ui).labelled_by(label.id);
         });
     }
 }
@@ -349,6 +411,12 @@ fn role_badge(ui: &mut egui::Ui, role: &DatasetRole) {
         .corner_radius(12.0)
         .inner_margin(egui::Margin::symmetric(7, 3))
         .show(ui, |ui| {
-            ui.label(RichText::new(role.to_string()).color(theme::BLUE));
+            let label = match role {
+                DatasetRole::Annotator => "Annotator",
+                DatasetRole::Reviewer => "Reviewer",
+                DatasetRole::Adjudicator => "Adjudicator",
+                DatasetRole::DataAdmin => "Data admin",
+            };
+            ui.label(RichText::new(label).color(theme::BLUE));
         });
 }

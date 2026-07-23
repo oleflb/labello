@@ -125,7 +125,9 @@ impl LabelloApp {
                         if self.config.dataset_id != metadata.dataset_id {
                             self.loading.stats = false;
                             self.datasets.active_stats_request = None;
+                            self.datasets.last_stats_attempt = None;
                             self.datasets.last_stats_completion = None;
+                            self.datasets.stats_error = None;
                             self.datasets.stats = labello_domain::DatasetStats::default();
                         }
                         self.config.dataset_id = metadata.dataset_id.clone();
@@ -518,10 +520,13 @@ impl LabelloApp {
                     }
                     self.datasets.active_stats_request = None;
                     self.loading.stats = false;
-                    self.datasets.last_stats_completion = Some(Instant::now());
                     match result {
-                        Ok(stats) => self.datasets.stats = stats,
-                        Err(error) => self.runtime.error = Some(error),
+                        Ok(stats) => {
+                            self.datasets.stats = stats;
+                            self.datasets.last_stats_completion = Some(Instant::now());
+                            self.datasets.stats_error = None;
+                        }
+                        Err(error) => self.datasets.stats_error = Some(error),
                     }
                 }
                 UiMessage::KeybindingsSaved { result, .. } => {
@@ -842,7 +847,7 @@ impl LabelloApp {
         }
         let due = self
             .datasets
-            .last_stats_completion
+            .last_stats_attempt
             .is_none_or(|last| last.elapsed() >= Duration::from_secs(3));
         if due {
             self.request_stats();
@@ -918,7 +923,6 @@ impl LabelloApp {
             UiCommand::Stats { .. } => {
                 self.loading.stats = false;
                 self.datasets.active_stats_request = None;
-                self.datasets.last_stats_completion = Some(Instant::now());
             }
             UiCommand::SaveKeybindings { .. } => self.loading.keybindings = false,
             UiCommand::ClaimAssignment { operation_id, .. }
@@ -1150,7 +1154,7 @@ impl LabelloApp {
         let Some(metadata) = self.datasets.admin_config.clone() else {
             return;
         };
-        if self.loading.admin {
+        if self.loading.admin || self.loading.roles_user.is_some() {
             return;
         }
         self.loading.admin = true;
@@ -1159,7 +1163,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_role_save(&mut self, user_id: labello_domain::UserId) {
-        if self.loading.roles_user.is_some() || self.runtime.api.is_none() {
+        if self.loading.admin || self.loading.roles_user.is_some() || self.runtime.api.is_none() {
             return;
         }
         let Some(user) = self
@@ -1203,6 +1207,7 @@ impl LabelloApp {
     }
 
     fn sync_role_assignment(&mut self, user: &labello_client::DatasetUser) {
+        let assigned_at = labello_domain::now();
         for metadata in [
             self.datasets.metadata.as_mut(),
             self.datasets.admin_config.as_mut(),
@@ -1221,7 +1226,7 @@ impl LabelloApp {
                         dataset_id: metadata.dataset_id.clone(),
                         user_id: user.account.user_id.clone(),
                         roles: user.roles.iter().cloned().collect(),
-                        assigned_at: labello_domain::now(),
+                        assigned_at,
                         assigned_by: Some(self.config.user_id.clone()),
                     });
             }
@@ -1238,7 +1243,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_ingest(&mut self) {
-        if self.loading.ingesting || self.runtime.api.is_none() {
+        if self.admin_mutation_blocked() || self.runtime.api.is_none() {
             return;
         }
         self.loading.ingesting = true;
@@ -1253,6 +1258,15 @@ impl LabelloApp {
         });
     }
 
+    pub(crate) fn admin_mutation_blocked(&self) -> bool {
+        self.loading.ingesting
+            || self.loading.uploading
+            || self.loading.admin
+            || self.loading.roles_user.is_some()
+            || self.datasets.admin_config != self.datasets.admin_baseline
+            || self.datasets.users != self.datasets.users_baseline
+    }
+
     pub(crate) fn request_stats(&mut self) {
         if self.loading.stats
             || self.runtime.api.is_none()
@@ -1265,6 +1279,7 @@ impl LabelloApp {
         let request = self.request_identity(Some(dataset_id.clone()));
         self.datasets.stats_request_id = request.request_id;
         self.loading.stats = true;
+        self.datasets.last_stats_attempt = Some(Instant::now());
         self.datasets.active_stats_request = Some((request.request_id, dataset_id.clone()));
         self.queue_command(UiCommand::Stats {
             request,

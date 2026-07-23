@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, RichText};
 use labello_domain::{
@@ -13,15 +13,19 @@ use crate::{app::LabelloApp, theme};
 
 impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
-        let admin_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
         ui.horizontal_wrapped(|ui| {
             ui.heading("Dataset Admin");
             if self.loading.admin {
                 ui.spinner();
             }
             if ui
-                .add_enabled(!admin_dirty, egui::Button::new("Reload Admin Config"))
-                .on_hover_text(if admin_dirty {
+                .add_enabled(
+                    !config_dirty && !permissions_dirty,
+                    egui::Button::new("Reload Admin Config"),
+                )
+                .on_hover_text(if config_dirty || permissions_dirty {
                     "Discard or save staged changes before reloading."
                 } else {
                     "Reload configuration from the server."
@@ -35,6 +39,8 @@ impl LabelloApp {
         self.images_section(ui);
         self.snapshots_section(ui);
         let current_user = self.config.user_id.clone();
+        let admin_loading = self.loading.admin;
+        let roles_saving = self.loading.roles_user.is_some();
         let ingesting_now = self.loading.ingesting;
         let uploading_now = self.loading.uploading;
         let upload_progress = self.loading.upload_progress.clone();
@@ -48,7 +54,9 @@ impl LabelloApp {
 
         let mut ingest = false;
         let mut upload_folder = false;
-        ui.vertical(|ui| {
+        ui.add_enabled_ui(
+            !admin_loading && !roles_saving && !uploading_now && !ingesting_now,
+            |ui| {
             ui.label(
                 RichText::new(
                     "Edits are staged here. Review the validation summary before saving them.",
@@ -73,7 +81,10 @@ impl LabelloApp {
                 );
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .button("Pick folder and upload")
+                        .add_enabled(
+                            !config_dirty && !permissions_dirty,
+                            egui::Button::new("Pick folder and upload"),
+                        )
                         .on_hover_text("Open a browser folder picker, upload files to a new dataset-relative root, then ingest them.")
                         .clicked()
                     {
@@ -92,6 +103,12 @@ impl LabelloApp {
                     if progress.current_batch > 0 {
                         ui.small(format!("Batch {}", progress.current_batch));
                     }
+                }
+                if config_dirty {
+                    ui.label(
+                        RichText::new("Save or discard root changes before uploading or ingesting.")
+                            .color(theme::AMBER),
+                    );
                 }
                 ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
                 show_issues(ui, &image_root_issues(&config.image_roots));
@@ -128,7 +145,10 @@ impl LabelloApp {
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add_enabled(!ingesting_now, egui::Button::new("Run Ingest"))
+                    .add_enabled(
+                        !config_dirty && !permissions_dirty,
+                        egui::Button::new("Run Ingest"),
+                    )
                     .on_hover_text("Scan configured image roots and update the dataset image index.")
                     .clicked()
                 {
@@ -139,7 +159,8 @@ impl LabelloApp {
                     ui.small("Ingest running...");
                 }
             });
-        });
+            },
+        );
         if ingest {
             self.request_ingest();
         }
@@ -149,7 +170,8 @@ impl LabelloApp {
     }
 
     pub(crate) fn admin_status_bar(&mut self, ui: &mut egui::Ui) {
-        let dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
         let issues = self
             .datasets
             .admin_config
@@ -158,17 +180,23 @@ impl LabelloApp {
             .unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new(if dirty {
+                RichText::new(if config_dirty {
                     "Unsaved admin changes"
+                } else if permissions_dirty {
+                    "Unsaved permission changes"
                 } else {
                     "Admin config saved"
                 })
-                .color(if dirty { theme::AMBER } else { theme::TEAL })
+                .color(if config_dirty || permissions_dirty {
+                    theme::AMBER
+                } else {
+                    theme::TEAL
+                })
                 .strong(),
             );
             if ui
                 .add_enabled(
-                    dirty && issues.is_empty() && !self.loading.admin,
+                    config_dirty && issues.is_empty() && !self.loading.admin,
                     egui::Button::new("Save Admin Config"),
                 )
                 .on_disabled_hover_text(if issues.is_empty() {
@@ -182,7 +210,7 @@ impl LabelloApp {
             }
             if ui
                 .add_enabled(
-                    dirty && !self.loading.admin,
+                    config_dirty && !self.loading.admin,
                     egui::Button::new("Discard staged changes"),
                 )
                 .clicked()
@@ -193,6 +221,9 @@ impl LabelloApp {
             }
             if !issues.is_empty() {
                 ui.colored_label(theme::RED, format!("{} validation error(s)", issues.len()));
+            }
+            if permissions_dirty {
+                ui.label("Save changed permissions in the People section.");
             }
         });
     }
@@ -209,6 +240,7 @@ impl LabelloApp {
                 return;
             }
             let current_user = self.config.user_id.clone();
+            let admin_loading = self.loading.admin;
             let baseline = self.datasets.users_baseline.clone();
             let admin_count = self
                 .datasets
@@ -235,9 +267,11 @@ impl LabelloApp {
                         (DatasetRole::DataAdmin, "Data admin"),
                     ] {
                         let is_admin_role = role == DatasetRole::DataAdmin;
-                        let role_enabled = !(is_admin_role
-                            && user.roles.contains(&role)
-                            && (user.account.user_id == current_user || admin_count == 1));
+                        let role_enabled = !admin_loading
+                            && saving.is_none()
+                            && !(is_admin_role
+                                && user.roles.contains(&role)
+                                && (user.account.user_id == current_user || admin_count == 1));
                         let mut enabled = user.roles.contains(&role);
                         if ui
                             .add_enabled(role_enabled, egui::Checkbox::new(&mut enabled, label))
@@ -264,7 +298,7 @@ impl LabelloApp {
                     let this_saving = saving.as_ref() == Some(&user.account.user_id);
                     if ui
                         .add_enabled(
-                            dirty && saving.is_none(),
+                            dirty && saving.is_none() && !admin_loading,
                             egui::Button::new(if this_saving {
                                 "Saving..."
                             } else {
@@ -567,19 +601,46 @@ impl LabelloApp {
     }
 
     pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
+        let initial_loading = self.loading.stats && self.datasets.last_stats_completion.is_none();
         ui.horizontal_wrapped(|ui| {
             ui.heading("Live Statistics");
             if self.loading.stats {
                 ui.spinner();
             }
             if ui
-                .button("Refresh now")
+                .add_enabled(!self.loading.stats, egui::Button::new("Refresh now"))
                 .on_hover_text("Refresh statistics immediately. They also refresh automatically.")
                 .clicked()
             {
                 self.request_stats();
             }
         });
+        if let Some(error) = &self.datasets.stats_error {
+            ui.colored_label(theme::RED, format!("Statistics refresh failed: {error}"));
+        }
+        if initial_loading {
+            theme::card_frame().show(ui, |ui| {
+                ui.label("Loading statistics...");
+            });
+            return;
+        }
+        if let Some(completed) = self.datasets.last_stats_completion {
+            ui.small(format!(
+                "Updated {} second(s) ago",
+                completed.elapsed().as_secs()
+            ));
+        }
+        let compact = ui.available_width() < 600.0;
+        let task_names = self
+            .tasks
+            .iter()
+            .map(|task| (task.task_id.clone(), task.name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let class_names = self
+            .classes
+            .iter()
+            .map(|class| (class.class_id.clone(), class.name.clone()))
+            .collect::<BTreeMap<_, _>>();
         ui.add_space(8.0);
         let metrics = [
             ("Images", self.datasets.stats.total_images),
@@ -610,64 +671,130 @@ impl LabelloApp {
         theme::card_frame().show(ui, |ui| {
             ui.heading("Per Task");
             let rows = &self.datasets.stats.per_task;
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.set_min_width(980.0);
-                stats_task_row(
-                    ui,
-                    "Task",
-                    "Done",
-                    "Pending",
-                    "Reviewed",
-                    "Unreviewed",
-                    "Approved",
-                    "Rejected",
-                    "Corrected",
-                    "Finalized",
-                    true,
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("stats_tasks")
-                    .max_height(240.0)
-                    .show_rows(ui, 36.0, rows.len(), |ui, range| {
-                        for (task_id, stats) in rows.iter().skip(range.start).take(range.len()) {
-                            stats_task_row(
-                                ui,
-                                &task_id.to_string(),
-                                &stats.completed.to_string(),
-                                &stats.pending.to_string(),
-                                &stats.reviewed.to_string(),
-                                &stats.unreviewed.to_string(),
-                                &stats.approved.to_string(),
-                                &stats.rejected.to_string(),
-                                &stats.reviewer_corrected.to_string(),
-                                &stats.finalized.to_string(),
-                                false,
-                            );
-                        }
+            if rows.is_empty() {
+                ui.label(RichText::new("No enabled tasks.").color(theme::MUTED));
+            } else if compact {
+                for (task_id, stats) in rows {
+                    theme::card_frame().show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                task_names
+                                    .get(task_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(task_id.as_str()),
+                            )
+                            .strong(),
+                        );
+                        ui.label(format!(
+                            "Completed: {}  Pending: {}  Finalized: {}",
+                            stats.completed, stats.pending, stats.finalized
+                        ));
+                        ui.label(format!(
+                            "Reviewed: {}  Unreviewed: {}  Approved: {}",
+                            stats.reviewed, stats.unreviewed, stats.approved
+                        ));
+                        ui.label(format!(
+                            "Rejected: {}  Reviewer corrected: {}",
+                            stats.rejected, stats.reviewer_corrected
+                        ));
                     });
-            });
+                }
+            } else {
+                egui::ScrollArea::horizontal()
+                    .id_salt("stats_tasks_horizontal")
+                    .show(ui, |ui| {
+                        ui.set_min_width(980.0);
+                        stats_task_row(
+                            ui,
+                            "Task",
+                            "Done",
+                            "Pending",
+                            "Reviewed",
+                            "Unreviewed",
+                            "Approved",
+                            "Rejected",
+                            "Corrected",
+                            "Finalized",
+                            true,
+                        );
+                        egui::ScrollArea::vertical()
+                            .id_salt("stats_tasks")
+                            .max_height(240.0)
+                            .show_rows(ui, 36.0, rows.len(), |ui, range| {
+                                for (task_id, stats) in
+                                    rows.iter().skip(range.start).take(range.len())
+                                {
+                                    stats_task_row(
+                                        ui,
+                                        task_names
+                                            .get(task_id)
+                                            .map(String::as_str)
+                                            .unwrap_or(task_id.as_str()),
+                                        &stats.completed.to_string(),
+                                        &stats.pending.to_string(),
+                                        &stats.reviewed.to_string(),
+                                        &stats.unreviewed.to_string(),
+                                        &stats.approved.to_string(),
+                                        &stats.rejected.to_string(),
+                                        &stats.reviewer_corrected.to_string(),
+                                        &stats.finalized.to_string(),
+                                        false,
+                                    );
+                                }
+                            });
+                    });
+            }
         });
         theme::card_frame().show(ui, |ui| {
             ui.heading("Per Class");
             let rows = &self.datasets.stats.per_class;
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.set_min_width(520.0);
-                stats_class_row(ui, "Class", "Annotations", "Completed tasks", true);
-                egui::ScrollArea::vertical()
-                    .id_salt("stats_classes")
-                    .max_height(240.0)
-                    .show_rows(ui, 36.0, rows.len(), |ui, range| {
-                        for (class_id, stats) in rows.iter().skip(range.start).take(range.len()) {
-                            stats_class_row(
-                                ui,
-                                &class_id.to_string(),
-                                &stats.annotations.to_string(),
-                                &stats.completed_tasks.to_string(),
-                                false,
-                            );
-                        }
+            if rows.is_empty() {
+                ui.label(RichText::new("No classes configured.").color(theme::MUTED));
+            } else if compact {
+                for (class_id, stats) in rows {
+                    theme::card_frame().show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                class_names
+                                    .get(class_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(class_id.as_str()),
+                            )
+                            .strong(),
+                        );
+                        ui.label(format!(
+                            "Annotations: {}  Completed tasks: {}",
+                            stats.annotations, stats.completed_tasks
+                        ));
                     });
-            });
+                }
+            } else {
+                egui::ScrollArea::horizontal()
+                    .id_salt("stats_classes_horizontal")
+                    .show(ui, |ui| {
+                        ui.set_min_width(520.0);
+                        stats_class_row(ui, "Class", "Annotations", "Completed tasks", true);
+                        egui::ScrollArea::vertical()
+                            .id_salt("stats_classes")
+                            .max_height(240.0)
+                            .show_rows(ui, 36.0, rows.len(), |ui, range| {
+                                for (class_id, stats) in
+                                    rows.iter().skip(range.start).take(range.len())
+                                {
+                                    stats_class_row(
+                                        ui,
+                                        class_names
+                                            .get(class_id)
+                                            .map(String::as_str)
+                                            .unwrap_or(class_id.as_str()),
+                                        &stats.annotations.to_string(),
+                                        &stats.completed_tasks.to_string(),
+                                        false,
+                                    );
+                                }
+                            });
+                    });
+            }
         });
         theme::card_frame().show(ui, |ui| {
             ui.heading("Throughput");
@@ -873,11 +1000,10 @@ fn has_task_for_class(
     class_id: &ClassId,
     annotation_type: &AnnotationType,
 ) -> bool {
-    config.tasks.iter().any(|task| {
-        task.enabled
-            && &task.annotation_type == annotation_type
-            && task.class_ids.contains(class_id)
-    })
+    config
+        .tasks
+        .iter()
+        .any(|task| &task.annotation_type == annotation_type && task.class_ids.contains(class_id))
 }
 
 fn next_class_id(config: &DatasetMetadata) -> String {
@@ -2164,6 +2290,33 @@ mod tests {
 
         set_task_annotation_type(&mut task, AnnotationType::BoundingBox);
         assert!(task.skeleton.is_none());
+    }
+
+    #[test]
+    fn disabled_quick_workflow_is_not_duplicated() {
+        let class = LabelClass {
+            class_id: ClassId::from("person"),
+            name: "Person".to_string(),
+            color: "#5eead4".to_string(),
+            description: None,
+        };
+        let mut config = DatasetMetadata::new(
+            labello_domain::DatasetId::from("demo"),
+            "Demo",
+            labello_domain::now(),
+        );
+        config.label_classes.push(class.clone());
+        let mut task = workflow_task_for_class(&class, AnnotationType::BoundingBox);
+        task.enabled = false;
+        config.tasks.push(task);
+
+        assert!(has_task_for_class(
+            &config,
+            &class.class_id,
+            &AnnotationType::BoundingBox
+        ));
+        add_task_for_class(&mut config, &class, AnnotationType::BoundingBox);
+        assert_eq!(config.tasks.len(), 1);
     }
 
     #[test]

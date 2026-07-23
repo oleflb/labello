@@ -11,7 +11,10 @@ use std::{
 };
 
 use eframe::egui;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use labello_client::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, ApiFuture, AppendEventRequest,
     AssignNextRequest, AssignmentActionRequest, AuthApi, ClientError, ClientResult,
@@ -92,13 +95,18 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
     let mut harness = live_harness(api.clone());
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
 
-    assert!(harness.query_by_label("Welcome To Labello").is_some());
+    assert!(harness.query_by_label("Choose where to work").is_some());
     assert_eq!(api.counts().me, 1);
     assert!(harness.query_all_by_label("Annotate").next().is_some());
     assert!(harness.query_all_by_label("Admin").next().is_some());
 
-    harness.state_mut().request_create_dataset();
+    harness.set_size(egui::vec2(1500.0, 1200.0));
     harness.step();
+    click(&mut harness, "Create a dataset");
+    harness.state_mut().setup.create_dataset_id = "new-dataset".to_string();
+    harness.state_mut().setup.create_dataset_name = "New dataset".to_string();
+    harness.step();
+    click(&mut harness, "Create dataset");
     step_until(&mut harness, 20, |app| {
         !app.loading.dataset && api.counts().create_dataset == 1
     });
@@ -369,10 +377,27 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
         .find(|user| user.account.user_id == UserId::from("reviewer"))
         .unwrap();
     reviewer.roles.push(DatasetRole::Reviewer);
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Unsaved permission changes")
+            .is_some()
+    );
+    harness.state_mut().open_view(AppView::Stats);
+    assert_eq!(harness.state().view, AppView::Admin);
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("before leaving Admin"))
+    );
     harness
         .state_mut()
         .request_role_save(UserId::from("reviewer"));
     step_until(&mut harness, 8, |app| app.loading.roles_user.is_none());
+    assert!(harness.query_by_label("Admin config saved").is_some());
     assert_eq!(api.counts().set_dataset_roles, 1);
     assert!(
         api.dataset_users()
@@ -610,8 +635,47 @@ fn keybindings_are_editable_and_persisted() {
     assert!(harness.query_by_label("Keyboard shortcuts").is_none());
     click(&mut harness, "Settings");
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
-    click(&mut harness, "Reset defaults");
-    click(&mut harness, "Save shortcuts");
+    harness
+        .state_mut()
+        .keybindings
+        .bindings
+        .get_mut(&labello_domain::UserAction::NextImage)
+        .unwrap()
+        .key = "Enter".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("uses unsupported key 'Enter'")
+            .is_some()
+    );
+    let save = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Save shortcuts")
+        .next()
+        .unwrap();
+    assert!(save.accesskit_node().is_disabled());
+    assert_eq!(api.counts().save_keybindings, 0);
+    click_accesskit_button(&mut harness, "Reset defaults");
+    harness.step();
+    assert_eq!(
+        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
+        "ArrowRight"
+    );
+    assert!(harness.state().keybindings.validate_conflicts().is_ok());
+    assert!(!harness.state().loading.keybindings);
+    assert!(
+        harness
+            .state()
+            .keybindings
+            .bindings
+            .values()
+            .all(|chord| crate::app::parse_key(&chord.key).is_some())
+    );
+    let save = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Save shortcuts")
+        .next()
+        .unwrap();
+    assert!(!save.accesskit_node().is_disabled());
+    click_accesskit_button(&mut harness, "Save shortcuts");
     step_until(&mut harness, 8, |app| !app.loading.keybindings);
 
     assert_eq!(api.counts().save_keybindings, 1);
@@ -619,6 +683,17 @@ fn keybindings_are_editable_and_persisted() {
         harness.state().runtime.notice.as_deref(),
         Some("Keyboard shortcuts saved")
     );
+}
+
+#[test]
+fn long_status_messages_keep_their_complete_accessible_text() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    let message = "A deliberately long status message that exceeds the visible top bar limit but must remain available to assistive technology and pointer users.";
+    harness.state_mut().runtime.error = Some(message.to_string());
+    harness.step();
+
+    assert!(harness.query_by_label(message).is_some());
 }
 
 #[test]
@@ -786,7 +861,8 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     let mut app = base_live_app(api);
     app.auth.checked = true;
     app.datasets.metadata = Some(metadata.clone());
-    app.datasets.admin_config = Some(metadata);
+    app.datasets.admin_config = Some(metadata.clone());
+    app.datasets.admin_baseline = Some(metadata);
     app.datasets.users = users.clone();
     app.datasets.users_baseline = users;
 
@@ -795,6 +871,8 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     assert!(!app.loading.datasets);
 
     saturate_command_queue(&mut app);
+    app.setup.create_dataset_id = "queued-dataset".to_string();
+    app.setup.create_dataset_name = "Queued dataset".to_string();
     app.request_create_dataset();
     assert!(!app.loading.dataset);
 
@@ -1050,13 +1128,49 @@ fn setup_recommends_a_single_continue_work_action() {
 
     assert_eq!(
         harness
-            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Continue Work")
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Continue with Demo Dataset",
+            )
             .count(),
         1
     );
-    click(&mut harness, "Continue Work");
+    click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
+}
+
+#[test]
+fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert!(harness.query_by_label("Choose where to work").is_some());
+    assert!(harness.query_by_label("API URL").is_none());
+    assert!(harness.state().setup.create_dataset_id.is_empty());
+    assert!(harness.state().setup.create_dataset_name.is_empty());
+
+    click(&mut harness, "Advanced connection settings");
+    let api_url = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
+        .next()
+        .expect("API URL field should have an accessible label");
+    assert!(api_url.rect().height() >= 43.0);
+    let user_id = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Development user ID")
+        .next()
+        .expect("development user ID field should have an accessible label");
+    assert!(user_id.rect().height() >= 43.0);
+
+    harness.set_size(egui::vec2(390.0, 844.0));
+    harness.step();
+    let compact_api_url = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
+        .next()
+        .expect("compact API URL field should retain its accessible label");
+    assert!(compact_api_url.rect().height() >= 43.0);
+    assert!(compact_api_url.rect().right() <= 390.5);
 }
 
 #[test]
@@ -1104,6 +1218,32 @@ fn skip_releases_then_claims_another_assignment() {
     assert_eq!(api.counts().release_assignment, 1);
     assert_eq!(api.counts().complete_assignment, 0);
     assert_eq!(api.counts().assign_next_image, 2);
+}
+
+#[test]
+fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click(&mut harness, "Accept");
+    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+
+    click(&mut harness, "Skip");
+    assert_eq!(api.counts().release_assignment, 0);
+    assert!(
+        harness
+            .query_by_label("Unsaved annotation changes")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Discard edits and skip").is_some());
+    assert!(!harness.state().loading.saving);
+
+    click_accesskit_button(&mut harness, "Cancel");
+    assert!(harness.state().pending_transition.is_none());
+    assert_eq!(api.counts().release_assignment, 0);
+
+    click(&mut harness, "Skip");
+    click_accesskit_button(&mut harness, "Discard edits and skip");
+    step_until(&mut harness, 16, |_| api.counts().release_assignment == 1);
 }
 
 #[test]
@@ -1299,7 +1439,7 @@ fn setup_geometry_stays_clamped_at_supported_viewports() {
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
-        assert_label_inside(&harness, "Welcome To Labello", width, height);
+        assert_label_inside(&harness, "Choose where to work", width, height);
         if width < LayoutMode::COMPACT_MAX_WIDTH {
             assert_control_inside(
                 &harness,
@@ -1349,6 +1489,96 @@ fn review_correction_drawer_and_actions_stay_reachable() {
             height,
         );
         assert_visible_controls_clamped(&harness, width, height);
+    }
+}
+
+#[test]
+fn review_primary_decisions_stay_visible_at_supported_viewports() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        false,
+    );
+    let mut harness = loaded_review_harness(api);
+
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        let (approve, reject) = ("Approve object", "Reject object & finish");
+        for label in [approve, reject] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
+        if LayoutMode::for_width(width) != LayoutMode::Wide {
+            harness.state_mut().drawer = Some(Drawer::Inspector);
+            harness.step();
+            assert_eq!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Button, approve)
+                    .count(),
+                1,
+                "review action duplicated when the Inspector drawer opened"
+            );
+            harness.state_mut().drawer = None;
+        }
+    }
+}
+
+#[test]
+fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        false,
+    );
+    let mut harness = loaded_adjudication_harness(api);
+
+    for (width, height) in viewport_sizes() {
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        let (accept, correct) = if LayoutMode::for_width(width) == LayoutMode::Compact {
+            ("Accept all", "Send back")
+        } else {
+            ("Accept all annotations", "Send back for correction")
+        };
+        for label in [accept, correct] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
+        if LayoutMode::for_width(width) != LayoutMode::Wide {
+            harness.state_mut().drawer = Some(Drawer::Inspector);
+            harness.step();
+            assert_eq!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Button, accept)
+                    .count(),
+                1,
+                "adjudication action duplicated when the Inspector drawer opened"
+            );
+            harness.state_mut().drawer = None;
+        }
     }
 }
 
@@ -1408,6 +1638,13 @@ fn stats_geometry_keeps_header_actions_and_equal_cards_in_view() {
                 (cards[0].width() - cards[1].width()).abs() <= 2.0,
                 "metric cards are not equal at {width}x{height}: {cards:?}",
             );
+        } else {
+            assert!(harness.query_by_label("Person boxes").is_some());
+            assert!(
+                harness
+                    .query_by_label_contains("Completed: 1  Pending: 1")
+                    .is_some()
+            );
         }
         assert_visible_controls_clamped(&harness, width, height);
     }
@@ -1458,9 +1695,9 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     assert!(harness.state().current.is_some());
     assert_eq!(harness.state().queue.queue_size(), IMAGE_QUEUE_SIZE);
     assert!(harness.query_by_label("Assignment").is_some());
-    assert!(harness.query_by_label("Approve  Y").is_none());
-    assert!(harness.query_by_label("Reject  N").is_none());
-    assert!(harness.query_by_label("Adjudicate accept").is_none());
+    assert!(harness.query_by_label("Approve object").is_none());
+    assert!(harness.query_by_label("Reject object & finish").is_none());
+    assert!(harness.query_by_label("Accept all annotations").is_none());
 
     click(&mut harness, "Tutorial");
     harness.step();
@@ -1473,6 +1710,10 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     click(&mut harness, "Accept");
     harness.step();
     assert_eq!(harness.state().annotations.len(), 1);
+    assert_eq!(
+        harness.state().selected_annotation.as_ref(),
+        Some(&harness.state().annotations[0].annotation_id)
+    );
     assert_eq!(harness.state().save_status, SaveStatus::Dirty);
 
     let canvas = harness.get_by_label("Annotation canvas");
@@ -1515,15 +1756,15 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     step_until(&mut harness, 10, |app| {
         app.view == AppView::Review && !app.loading.image
     });
-    assert!(harness.query_by_label("Approve  Y").is_some());
-    assert!(harness.query_by_label("Reject  N").is_some());
+    assert!(harness.query_by_label("Approve object").is_some());
+    assert!(harness.query_by_label("Reject object & finish").is_some());
     assert!(harness.query_by_label("Accept").is_none());
     harness.key_press(egui::Key::Y);
     harness.step();
     step_until(&mut harness, 10, |app| !app.loading.saving);
     assert_eq!(api.counts().record_review, 1);
 
-    click(&mut harness, "Reject  N");
+    click(&mut harness, "Reject object & finish");
     step_until(&mut harness, 10, |app| !app.loading.saving);
     // Rejecting an object records the object decision and the task-level
     // correction outcome that closes the review assignment.
@@ -1539,14 +1780,12 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     step_until(&mut harness, 10, |app| {
         app.view == AppView::Adjudicate && !app.loading.image
     });
-    assert!(harness.query_by_label("Adjudicate accept").is_some());
-    assert!(harness.query_by_label("Needs correction").is_some());
-    assert!(harness.query_by_label("Approve  Y").is_none());
-    click(&mut harness, "Adjudicate accept");
+    assert!(harness.query_by_label("Accept all annotations").is_some());
+    assert!(harness.query_by_label("Send back for correction").is_some());
+    assert!(harness.query_by_label("Approve object").is_none());
+    click(&mut harness, "Accept all annotations");
     step_until(&mut harness, 10, |app| !app.loading.saving);
-    click(&mut harness, "Needs correction");
-    step_until(&mut harness, 10, |app| !app.loading.saving);
-    assert_eq!(api.counts().record_adjudication, 2);
+    assert_eq!(api.counts().record_adjudication, 1);
 
     let claims_before_arrow = api.counts().assign_next_image;
     harness.key_press(egui::Key::ArrowRight);
@@ -1913,7 +2152,7 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
     harness
         .state_mut()
         .edit_correction_keypoint(crate::canvas::KeypointEdit {
-            annotation_id,
+            annotation_id: annotation_id.clone(),
             keypoint_index: 0,
             point: NormalizedPoint { x: 0.65, y: 0.4 },
         });
@@ -1931,6 +2170,22 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
                 && original.keypoints[0].point.unwrap().x == 0.5
     ));
 
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    harness.step();
+    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
+        panic!("expected skeleton correction draft");
+    };
+    assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
+    assert_eq!(skeleton.keypoints[0].point.unwrap().x, 0.5);
+
+    harness
+        .state_mut()
+        .edit_correction_keypoint(crate::canvas::KeypointEdit {
+            annotation_id,
+            keypoint_index: 0,
+            point: NormalizedPoint { x: 0.65, y: 0.4 },
+        });
     click(&mut harness, "Undo correction");
     let draft = harness.state().correction_draft.as_ref().unwrap();
     let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
@@ -1938,6 +2193,28 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
     };
     assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
     assert_eq!(skeleton.keypoints[0].point.unwrap().x, 0.5);
+}
+
+#[test]
+fn annotation_inspector_exposes_objects_and_visible_deletion() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().create_bbox(BoundingBox {
+        x: 0.1,
+        y: 0.1,
+        width: 0.2,
+        height: 0.2,
+    });
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label_contains("Object 1: Person, box at")
+            .is_some()
+    );
+    click(&mut harness, "Delete selected annotation");
+    assert!(harness.state().annotations[0].deleted);
+    assert!(harness.state().selected_annotation.is_none());
 }
 
 #[test]
@@ -1951,6 +2228,10 @@ fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
         height: 0.2,
     });
     let annotation_id = harness.state().annotations[0].annotation_id.clone();
+    assert_eq!(
+        harness.state().selected_annotation.as_ref(),
+        Some(&annotation_id)
+    );
     harness.state_mut().edit_bbox(BoundingBoxEdit {
         annotation_id: annotation_id.clone(),
         bounding_box: BoundingBox {
@@ -1966,10 +2247,10 @@ fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
         AnnotationGeometry::BoundingBox(BoundingBox { x, .. }) if (x - 0.1).abs() < f32::EPSILON
     ));
 
-    harness.state_mut().selected_annotation = Some(annotation_id);
     harness.key_press(egui::Key::Delete);
     harness.step();
     assert!(harness.state().annotations[0].deleted);
+    assert!(harness.state().selected_annotation.is_none());
     harness.state_mut().undo();
     assert!(!harness.state().annotations[0].deleted);
 
@@ -2091,6 +2372,7 @@ fn stats_ignore_stale_request_and_dataset_responses() {
     app.view = AppView::Stats;
     app.loading.stats = true;
     app.datasets.active_stats_request = Some((2, DatasetId::from("demo")));
+    app.datasets.stats_error = Some("stale refresh failure".to_string());
     app.runtime.active_requests.insert(2);
 
     for (request_id, dataset_id) in [(1, "demo"), (2, "other")] {
@@ -2117,6 +2399,7 @@ fn stats_ignore_stale_request_and_dataset_responses() {
     assert!(!app.loading.stats);
     assert_eq!(app.datasets.stats.total_images, 42);
     assert!(app.datasets.last_stats_completion.is_some());
+    assert!(app.datasets.stats_error.is_none());
 }
 
 #[test]
@@ -2127,12 +2410,12 @@ fn stats_polling_is_scheduled_from_completion_and_queue_failure_recovers() {
     app.setup.started = true;
     app.view = AppView::Stats;
     app.datasets.metadata = Some(metadata);
-    app.datasets.last_stats_completion = Some(Instant::now());
+    app.datasets.last_stats_attempt = Some(Instant::now());
 
     app.refresh_stats_if_due();
     assert!(app.runtime.commands.is_empty());
 
-    app.datasets.last_stats_completion = Some(Instant::now() - Duration::from_secs(4));
+    app.datasets.last_stats_attempt = Some(Instant::now() - Duration::from_secs(4));
     app.refresh_stats_if_due();
     assert!(app.loading.stats);
     assert_eq!(app.runtime.commands.len(), 1);
@@ -2148,7 +2431,8 @@ fn stats_polling_is_scheduled_from_completion_and_queue_failure_recovers() {
     app.request_stats();
     assert!(!app.loading.stats);
     assert!(app.datasets.active_stats_request.is_none());
-    assert!(app.datasets.last_stats_completion.is_some());
+    assert!(app.datasets.last_stats_attempt.is_some());
+    assert!(app.datasets.last_stats_completion.is_none());
 }
 
 #[test]
@@ -2186,6 +2470,16 @@ fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     click(&mut harness, "Review");
     step_until(&mut harness, 12, |app| {
         app.view == AppView::Review && app.current.is_some()
+    });
+    harness
+}
+
+fn loaded_adjudication_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+    click(&mut harness, "Adjudicate");
+    step_until(&mut harness, 12, |app| {
+        app.view == AppView::Adjudicate && app.current.is_some()
     });
     harness
 }

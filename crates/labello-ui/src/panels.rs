@@ -4,7 +4,7 @@ use labello_domain::{AdjudicationDecision, AnnotationGeometry, KeypointState, Re
 use crate::{
     app::{
         AppView, Drawer, LabelloApp, LayoutMode, PendingTransition, SaveStatus, Tool,
-        annotation_type_label,
+        annotation_type_label, parse_key,
     },
     canvas::{CanvasAction, CanvasInteraction, show_canvas_configured},
     theme,
@@ -37,11 +37,11 @@ impl LabelloApp {
                 );
             }
             if let Some(error) = &self.runtime.storage_error {
-                ui.colored_label(theme::AMBER, bounded_message(error));
+                status_message(ui, error, theme::AMBER);
             } else if let Some(error) = &self.runtime.error {
-                ui.colored_label(theme::AMBER, bounded_message(error));
+                status_message(ui, error, theme::AMBER);
             } else if let Some(notice) = &self.runtime.notice {
-                ui.colored_label(theme::TEAL, bounded_message(notice));
+                status_message(ui, notice, theme::TEAL);
             }
         });
         ui.add_space(2.0);
@@ -96,7 +96,7 @@ impl LabelloApp {
                 self.show_settings = true;
             }
             if layout == LayoutMode::Wide {
-                self.workspace_actions(ui);
+                self.workspace_actions(ui, layout);
             }
             if let Some(account) = &self.auth.account {
                 ui.separator();
@@ -116,7 +116,7 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn workspace_actions(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn workspace_actions(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         if !self.work_view() {
             return;
         }
@@ -163,6 +163,15 @@ impl LabelloApp {
                 self.submit_and_advance();
             }
         }
+        if layout != LayoutMode::Wide
+            && self.view == AppView::Review
+            && self.correction_draft.is_none()
+        {
+            self.review_decision_buttons(ui);
+        }
+        if layout != LayoutMode::Wide && self.view == AppView::Adjudicate {
+            self.adjudication_decision_buttons(ui, false);
+        }
         if ui
             .add_enabled(ready, egui::Button::new("Skip"))
             .on_hover_text("Release this assignment and claim another.")
@@ -186,54 +195,67 @@ impl LabelloApp {
             {
                 self.submit_and_advance();
             }
-            ui.menu_button("More actions", |ui| {
+            if self.view == AppView::Review && self.correction_draft.is_none() {
+                self.review_decision_buttons(ui);
+            }
+            if self.view == AppView::Adjudicate {
+                self.adjudication_decision_buttons(ui, true);
+            }
+            ui.menu_button(
                 if self.view == AppView::Annotate {
-                    if ui
-                        .add_enabled(
-                            ready && !self.undo_stack.is_empty(),
-                            egui::Button::new("Undo"),
-                        )
-                        .clicked()
-                    {
-                        self.undo();
+                    "More actions"
+                } else {
+                    "More"
+                },
+                |ui| {
+                    if self.view == AppView::Annotate {
+                        if ui
+                            .add_enabled(
+                                ready && !self.undo_stack.is_empty(),
+                                egui::Button::new("Undo"),
+                            )
+                            .clicked()
+                        {
+                            self.undo();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                ready && !self.redo_stack.is_empty(),
+                                egui::Button::new("Redo"),
+                            )
+                            .clicked()
+                        {
+                            self.redo();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                ready
+                                    && matches!(
+                                        self.save_status,
+                                        SaveStatus::Dirty | SaveStatus::Retry
+                                    ),
+                                egui::Button::new("Save"),
+                            )
+                            .clicked()
+                        {
+                            self.autosave();
+                            ui.close();
+                        }
+                    }
+                    if ui.add_enabled(ready, egui::Button::new("Skip")).clicked() {
+                        self.skip_assignment();
                         ui.close();
                     }
                     if ui
-                        .add_enabled(
-                            ready && !self.redo_stack.is_empty(),
-                            egui::Button::new("Redo"),
-                        )
+                        .toggle_value(&mut self.show_tutorial, "Tutorial")
                         .clicked()
                     {
-                        self.redo();
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            ready
-                                && matches!(
-                                    self.save_status,
-                                    SaveStatus::Dirty | SaveStatus::Retry
-                                ),
-                            egui::Button::new("Save"),
-                        )
-                        .clicked()
-                    {
-                        self.autosave();
-                        ui.close();
-                    }
-                }
-                if ui.add_enabled(ready, egui::Button::new("Skip")).clicked() {
-                    self.skip_assignment();
-                    ui.close();
-                }
-                if ui
-                    .toggle_value(&mut self.show_tutorial, "Tutorial")
-                    .clicked()
-                {
-                    ui.close();
-                }
-            });
+                },
+            );
         });
     }
 
@@ -279,7 +301,7 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         ui.heading(RichText::new("Inspector").color(theme::TEXT));
         let active_count = self
             .annotations
@@ -289,14 +311,77 @@ impl LabelloApp {
             })
             .count();
         metric(ui, "Active annotations", active_count.to_string());
+        if self.view == AppView::Annotate {
+            self.annotation_object_actions(ui);
+        }
         if self.view == AppView::Annotate && self.tool == Tool::Keypoints {
             self.keypoint_actions(ui);
         }
         match self.view {
             AppView::Annotate => self.prelabel_panel(ui),
-            AppView::Review => self.review_actions(ui),
-            AppView::Adjudicate => self.adjudication_actions(ui),
+            AppView::Review => self.review_actions(ui, show_primary_actions),
+            AppView::Adjudicate => self.adjudication_actions(ui, show_primary_actions),
             AppView::Setup | AppView::Admin | AppView::Stats => {}
+        }
+    }
+
+    fn annotation_object_actions(&mut self, ui: &mut egui::Ui) {
+        let objects = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
+            .enumerate()
+            .map(|(index, annotation)| {
+                let class_name = self.class_name(&annotation.class_id);
+                let geometry = match &annotation.geometry {
+                    AnnotationGeometry::BoundingBox(bbox) => format!(
+                        "box at {:.0}%, {:.0}%, size {:.0}% by {:.0}%",
+                        bbox.x * 100.0,
+                        bbox.y * 100.0,
+                        bbox.width * 100.0,
+                        bbox.height * 100.0
+                    ),
+                    AnnotationGeometry::Skeleton(skeleton) => format!(
+                        "skeleton with {} of {} keypoints placed",
+                        skeleton
+                            .keypoints
+                            .iter()
+                            .filter(|keypoint| keypoint.point.is_some())
+                            .count(),
+                        skeleton.keypoints.len()
+                    ),
+                };
+                (
+                    annotation.annotation_id.clone(),
+                    format!("Object {}: {class_name}, {geometry}", index + 1),
+                )
+            })
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            ui.label(RichText::new("Draw or accept an object to inspect it.").color(theme::MUTED));
+            return;
+        }
+
+        if self.selected_annotation.is_some()
+            && !objects
+                .iter()
+                .any(|(annotation_id, _)| Some(annotation_id) == self.selected_annotation.as_ref())
+        {
+            self.selected_annotation = None;
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Objects").strong());
+        for (annotation_id, label) in objects {
+            let selected = self.selected_annotation.as_ref() == Some(&annotation_id);
+            if ui.selectable_label(selected, label).clicked() {
+                self.selected_annotation = Some(annotation_id);
+            }
+        }
+        if self.selected_annotation.is_some() && ui.button("Delete selected annotation").clicked() {
+            self.delete_selected();
         }
     }
 
@@ -336,7 +421,7 @@ impl LabelloApp {
         }
     }
 
-    fn review_actions(&mut self, ui: &mut egui::Ui) {
+    fn review_actions(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         let ready = self.assignment.is_some() && !self.loading.saving;
         if self.correction_draft.is_some() {
             self.correction_actions(ui, ready);
@@ -370,17 +455,23 @@ impl LabelloApp {
                 self.start_correction();
             }
         }
+        if show_primary_actions {
+            self.review_decision_buttons(ui);
+        }
+    }
+
+    fn review_decision_buttons(&mut self, ui: &mut egui::Ui) {
+        let ready = self.assignment.is_some() && !self.loading.saving;
+        let (approve, reject) = if self.current_review_annotation().is_none() {
+            ("Complete review", "Send back")
+        } else {
+            ("Approve object", "Reject object & finish")
+        };
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new("Approve  Y"))
-                .clicked()
-            {
+            if ui.add_enabled(ready, egui::Button::new(approve)).clicked() {
                 self.request_review(ReviewDecision::Approved);
             }
-            if ui
-                .add_enabled(ready, egui::Button::new("Reject  N"))
-                .clicked()
-            {
+            if ui.add_enabled(ready, egui::Button::new(reject)).clicked() {
                 self.request_review(ReviewDecision::Rejected);
             }
         });
@@ -527,20 +618,47 @@ impl LabelloApp {
         });
     }
 
-    fn adjudication_actions(&mut self, ui: &mut egui::Ui) {
+    fn adjudication_actions(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
+        let candidates = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
+            .count();
+        metric(ui, "Candidate annotations", candidates.to_string());
+        if candidates == 0 {
+            ui.colored_label(
+                theme::AMBER,
+                "This assignment has no annotation candidates to adjudicate.",
+            );
+        }
+        if show_primary_actions {
+            self.adjudication_decision_buttons(ui, false);
+        }
+    }
+
+    fn adjudication_decision_buttons(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let has_candidates = self.annotations.iter().any(|annotation| {
+            !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+        });
         let ready = self.assignment.is_some() && !self.loading.saving;
-        if ui
-            .add_enabled(ready, egui::Button::new("Adjudicate accept"))
-            .clicked()
-        {
-            self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
-        }
-        if ui
-            .add_enabled(ready, egui::Button::new("Needs correction"))
-            .clicked()
-        {
-            self.request_adjudication(AdjudicationDecision::NeedsCorrection);
-        }
+        let (accept, correct) = if compact {
+            ("Accept all", "Send back")
+        } else {
+            ("Accept all annotations", "Send back for correction")
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(ready && has_candidates, egui::Button::new(accept))
+                .clicked()
+            {
+                self.request_adjudication(AdjudicationDecision::AcceptAnnotation);
+            }
+            if ui.add_enabled(ready, egui::Button::new(correct)).clicked() {
+                self.request_adjudication(AdjudicationDecision::NeedsCorrection);
+            }
+        });
     }
 
     pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
@@ -768,7 +886,7 @@ impl LabelloApp {
                         .show(ctx, |ui| {
                             egui::ScrollArea::vertical()
                                 .max_height(max_height - 48.0)
-                                .show(ui, |ui| self.right_panel(ui));
+                                .show(ui, |ui| self.right_panel(ui, false));
                         });
                     if !open {
                         self.drawer = None;
@@ -849,45 +967,54 @@ impl LabelloApp {
             .map(|workflow| workflow.label())
             .unwrap_or_else(|| "No workflow".to_string());
         let destination = self.transition_label(&pending);
-        egui::Window::new("Switch active assignment?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .max_width((ctx.content_rect().width() - 24.0).max(240.0))
-            .max_height((ctx.content_rect().height() - 24.0).max(240.0))
-            .constrain_to(ctx.content_rect())
-            .show(ctx, |ui| {
-                ui.label(format!("Current workflow: {current}"));
-                ui.label(format!("Pending destination: {destination}"));
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    if self.view == AppView::Annotate
-                        && ui
-                            .add_enabled(
-                                !self.loading.saving,
-                                egui::Button::new("Submit and switch"),
-                            )
-                            .clicked()
-                    {
-                        self.submit_pending_transition();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.loading.saving,
-                            egui::Button::new("Release and switch"),
-                        )
-                        .clicked()
-                    {
-                        self.release_pending_transition();
-                    }
-                    if ui
-                        .add_enabled(!self.loading.saving, egui::Button::new("Cancel"))
-                        .clicked()
-                    {
-                        self.cancel_pending_transition();
-                    }
-                });
+        let discards_edits = pending == PendingTransition::NextAssignment
+            && self.view == AppView::Annotate
+            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry);
+        egui::Modal::new(egui::Id::new("assignment-transition-modal")).show(ctx, |ui| {
+            ui.set_max_width((ctx.content_rect().width() - 48.0).clamp(240.0, 560.0));
+            ui.heading(if discards_edits {
+                "Unsaved annotation changes"
+            } else {
+                "Switch active assignment?"
             });
+            ui.label(format!("Current workflow: {current}"));
+            ui.label(format!("Pending destination: {destination}"));
+            if discards_edits {
+                ui.colored_label(
+                    theme::AMBER,
+                    "Skipping now will discard annotation changes that have not been saved.",
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if self.view == AppView::Annotate
+                    && ui
+                        .add_enabled(!self.loading.saving, egui::Button::new("Submit and switch"))
+                        .clicked()
+                {
+                    self.submit_pending_transition();
+                }
+                if ui
+                    .add_enabled(
+                        !self.loading.saving,
+                        egui::Button::new(if discards_edits {
+                            "Discard edits and skip"
+                        } else {
+                            "Release and switch"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.release_pending_transition();
+                }
+                if ui
+                    .add_enabled(!self.loading.saving, egui::Button::new("Cancel"))
+                    .clicked()
+                {
+                    self.cancel_pending_transition();
+                }
+            });
+        });
     }
 
     fn transition_label(&self, transition: &PendingTransition) -> String {
@@ -942,13 +1069,30 @@ impl LabelloApp {
                         }
                     });
                 let conflicts = self.keybindings.validate_conflicts().err();
+                let unsupported = self
+                    .keybindings
+                    .bindings
+                    .iter()
+                    .find(|(_, chord)| parse_key(&chord.key).is_none())
+                    .map(|(action, chord)| {
+                        format!(
+                            "{} uses unsupported key '{}'. Use ArrowRight, ArrowLeft, Delete, ?, A, B, K, N, O, S, or Y.",
+                            action_label(action),
+                            chord.key
+                        )
+                    });
                 if let Some(error) = conflicts.as_ref() {
                     ui.colored_label(theme::RED, error.to_string());
+                }
+                if let Some(error) = unsupported.as_ref() {
+                    ui.colored_label(theme::RED, error);
                 }
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
-                            conflicts.is_none() && !self.loading.keybindings,
+                            conflicts.is_none()
+                                && unsupported.is_none()
+                                && !self.loading.keybindings,
                             egui::Button::new("Save shortcuts"),
                         )
                         .clicked()
@@ -1076,13 +1220,11 @@ fn bounded_badge(ui: &mut egui::Ui, text: &str, color: Color32, width: f32) {
         });
 }
 
-fn bounded_message(message: &str) -> String {
-    const MAX_CHARS: usize = 70;
-    if message.chars().count() <= MAX_CHARS {
-        message.to_string()
-    } else {
-        format!("{}...", message.chars().take(MAX_CHARS).collect::<String>())
-    }
+fn status_message(ui: &mut egui::Ui, message: &str, color: Color32) {
+    ui.add_sized(
+        [ui.available_width().min(520.0), 24.0],
+        egui::Label::new(RichText::new(message).color(color)).truncate(),
+    );
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {

@@ -79,7 +79,7 @@ impl UploadAuthMode {
 
 impl LabelloApp {
     pub(crate) fn request_folder_upload(&mut self) {
-        if self.loading.uploading {
+        if self.admin_mutation_blocked() {
             return;
         }
         self.loading.uploading = true;
