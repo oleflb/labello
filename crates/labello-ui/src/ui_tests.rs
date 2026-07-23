@@ -168,7 +168,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     let before_ingest = api.counts();
     harness.state_mut().request_ingest();
     harness.step();
-    let badge = harness.get_by_label("Dataset demo");
+    let badge = harness.get_by_label("Dataset Demo Dataset");
     assert!(badge.rect().height() < 80.0);
     step_until(&mut harness, 16, |_| api.counts().ingest_dataset >= 1);
     assert_eq!(
@@ -552,23 +552,15 @@ fn workers_select_class_specific_workflows() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
 
-    assert!(
-        harness
-            .query_all_by_label("Person bounding box")
-            .next()
-            .is_some()
-    );
-    assert!(
-        harness
-            .query_all_by_label("Vehicle bounding box")
-            .next()
-            .is_some()
-    );
-    click(&mut harness, "Vehicle bounding box");
+    assert!(harness.query_all_by_label("Person boxes").next().is_some());
+    assert!(harness.query_by_label("Current").is_none());
+    assert!(harness.query_all_by_label("Vehicle boxes").next().is_some());
+    click(&mut harness, "Vehicle boxes");
     release_and_switch(&mut harness);
     step_until(&mut harness, 12, |app| {
         app.selected_class_id() == Some(&ClassId::from("vehicle")) && app.current.is_some()
     });
+    assert!(harness.query_all_by_label("Vehicle boxes").next().is_some());
 
     assert_eq!(
         harness
@@ -1628,6 +1620,18 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     for (width, height) in sizes {
         harness.set_size(egui::vec2(width, height));
         harness.step();
+        let dataset_badge = harness.get_by_label("Dataset Demo Dataset").rect();
+        let status_badge = harness.get_by_label("Idle").rect();
+        assert!(
+            (dataset_badge.height() - status_badge.height()).abs() <= 0.5,
+            "top-bar badges differ at {width}x{height}: {dataset_badge:?}, {status_badge:?}",
+        );
+        if width >= LayoutMode::COMPACT_MAX_WIDTH {
+            assert!(
+                width - status_badge.right() <= 25.0,
+                "status is not right-aligned at {width}x{height}: {status_badge:?}",
+            );
+        }
         let canvas = harness.get_by_label("Annotation canvas");
         let minimum_width = if width < 600.0 { width - 40.0 } else { 560.0 };
         let minimum_height = match height as u32 {
@@ -1913,6 +1917,52 @@ fn stats_geometry_keeps_header_actions_and_equal_cards_in_view() {
 }
 
 #[test]
+fn stats_tables_render_all_rows_without_nested_vertical_scrolling() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().clear_current_image();
+    harness.state_mut().view = AppView::Stats;
+    harness.state_mut().request_stats();
+    step_until(&mut harness, 8, |app| !app.loading.stats);
+
+    let task_stats = harness
+        .state()
+        .datasets
+        .stats
+        .per_task
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let class_stats = harness
+        .state()
+        .datasets
+        .stats
+        .per_class
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    for index in 0..10 {
+        harness
+            .state_mut()
+            .datasets
+            .stats
+            .per_task
+            .insert(TaskId::from(format!("zz-task-{index}")), task_stats.clone());
+        harness.state_mut().datasets.stats.per_class.insert(
+            ClassId::from(format!("zz-class-{index}")),
+            class_stats.clone(),
+        );
+    }
+    harness.set_size(egui::vec2(1440.0, 1600.0));
+    harness.step();
+
+    assert!(harness.query_by_label("zz-task-9").is_some());
+    assert!(harness.query_by_label("zz-class-9").is_some());
+}
+
+#[test]
 fn settings_and_transition_modals_are_viewport_constrained() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
@@ -2080,7 +2130,7 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
 
     click(&mut harness, "Accept");
     assert_eq!(harness.state().save_status, SaveStatus::Dirty);
-    click(&mut harness, "Vehicle bounding box");
+    click(&mut harness, "Vehicle boxes");
     assert!(
         harness
             .query_by_label("Switch active assignment?")

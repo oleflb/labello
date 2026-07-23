@@ -752,18 +752,12 @@ pub(crate) struct EditSnapshot {
 pub(crate) struct WorkflowChoice {
     pub task_id: TaskId,
     pub task_name: String,
-    pub class_id: ClassId,
-    pub class_name: String,
     pub annotation_type: AnnotationType,
 }
 
 impl WorkflowChoice {
     pub(crate) fn label(&self) -> String {
-        format!(
-            "{} {}",
-            self.class_name,
-            annotation_type_label(&self.annotation_type)
-        )
+        self.task_name.clone()
     }
 }
 
@@ -935,12 +929,9 @@ impl LabelloApp {
             if !valid_workflow(task) {
                 continue;
             }
-            let class_id = task.class_ids[0].clone();
             choices.push(WorkflowChoice {
                 task_id: task.task_id.clone(),
                 task_name: task.name.clone(),
-                class_name: self.class_name(&class_id),
-                class_id,
                 annotation_type: task.annotation_type.clone(),
             });
         }
@@ -949,12 +940,9 @@ impl LabelloApp {
 
     pub(crate) fn selected_workflow(&self) -> Option<WorkflowChoice> {
         let task = self.selected_task()?;
-        let class_id = self.selected_class_id()?;
         Some(WorkflowChoice {
             task_id: task.task_id.clone(),
             task_name: task.name.clone(),
-            class_id: class_id.clone(),
-            class_name: self.class_name(class_id),
             annotation_type: task.annotation_type.clone(),
         })
     }

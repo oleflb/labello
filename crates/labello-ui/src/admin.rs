@@ -821,31 +821,24 @@ impl LabelloApp {
                             "Finalized",
                             true,
                         );
-                        egui::ScrollArea::vertical()
-                            .id_salt("stats_tasks")
-                            .max_height(240.0)
-                            .show_rows(ui, 36.0, rows.len(), |ui, range| {
-                                for (task_id, stats) in
-                                    rows.iter().skip(range.start).take(range.len())
-                                {
-                                    stats_task_row(
-                                        ui,
-                                        task_names
-                                            .get(task_id)
-                                            .map(String::as_str)
-                                            .unwrap_or(task_id.as_str()),
-                                        &stats.completed.to_string(),
-                                        &stats.pending.to_string(),
-                                        &stats.reviewed.to_string(),
-                                        &stats.unreviewed.to_string(),
-                                        &stats.approved.to_string(),
-                                        &stats.rejected.to_string(),
-                                        &stats.reviewer_corrected.to_string(),
-                                        &stats.finalized.to_string(),
-                                        false,
-                                    );
-                                }
-                            });
+                        for (task_id, stats) in rows {
+                            stats_task_row(
+                                ui,
+                                task_names
+                                    .get(task_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(task_id.as_str()),
+                                &stats.completed.to_string(),
+                                &stats.pending.to_string(),
+                                &stats.reviewed.to_string(),
+                                &stats.unreviewed.to_string(),
+                                &stats.approved.to_string(),
+                                &stats.rejected.to_string(),
+                                &stats.reviewer_corrected.to_string(),
+                                &stats.finalized.to_string(),
+                                false,
+                            );
+                        }
                     });
             }
         });
@@ -878,25 +871,18 @@ impl LabelloApp {
                     .show(ui, |ui| {
                         ui.set_min_width(520.0);
                         stats_class_row(ui, "Class", "Annotations", "Completed tasks", true);
-                        egui::ScrollArea::vertical()
-                            .id_salt("stats_classes")
-                            .max_height(240.0)
-                            .show_rows(ui, 36.0, rows.len(), |ui, range| {
-                                for (class_id, stats) in
-                                    rows.iter().skip(range.start).take(range.len())
-                                {
-                                    stats_class_row(
-                                        ui,
-                                        class_names
-                                            .get(class_id)
-                                            .map(String::as_str)
-                                            .unwrap_or(class_id.as_str()),
-                                        &stats.annotations.to_string(),
-                                        &stats.completed_tasks.to_string(),
-                                        false,
-                                    );
-                                }
-                            });
+                        for (class_id, stats) in rows {
+                            stats_class_row(
+                                ui,
+                                class_names
+                                    .get(class_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(class_id.as_str()),
+                                &stats.annotations.to_string(),
+                                &stats.completed_tasks.to_string(),
+                                false,
+                            );
+                        }
                     });
             }
         });

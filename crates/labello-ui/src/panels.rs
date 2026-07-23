@@ -12,7 +12,38 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
-        ui.horizontal_wrapped(|ui| {
+        let dataset_name = self
+            .datasets
+            .metadata
+            .as_ref()
+            .filter(|metadata| metadata.dataset_id == self.config.dataset_id)
+            .map(|metadata| metadata.name.as_str())
+            .or_else(|| {
+                self.datasets
+                    .summaries
+                    .iter()
+                    .find(|summary| summary.dataset_id == self.config.dataset_id)
+                    .map(|summary| summary.name.as_str())
+            })
+            .unwrap_or(self.config.dataset_id.as_str());
+        let dataset_label = format!("Dataset {dataset_name}");
+        let save_status = self.work_view().then(|| {
+            (
+                status_text(self.save_status),
+                status_color(self.save_status),
+            )
+        });
+        let runtime_status = if let Some(error) = &self.runtime.storage_error {
+            Some((error.as_str(), theme::AMBER))
+        } else if let Some(error) = &self.runtime.error {
+            Some((error.as_str(), theme::AMBER))
+        } else {
+            self.runtime
+                .notice
+                .as_deref()
+                .map(|notice| (notice, theme::TEAL))
+        };
+        let show_identity = |ui: &mut egui::Ui| {
             ui.label(
                 RichText::new("Labello")
                     .size(22.0)
@@ -21,7 +52,7 @@ impl LabelloApp {
             );
             bounded_badge(
                 ui,
-                &format!("Dataset {}", self.config.dataset_id),
+                &dataset_label,
                 theme::BLUE,
                 if layout == LayoutMode::Compact {
                     132.0
@@ -29,21 +60,30 @@ impl LabelloApp {
                     220.0
                 },
             );
-            if self.work_view() {
-                badge(
-                    ui,
-                    status_text(self.save_status),
-                    status_color(self.save_status),
-                );
-            }
-            if let Some(error) = &self.runtime.storage_error {
-                status_message(ui, error, theme::AMBER);
-            } else if let Some(error) = &self.runtime.error {
-                status_message(ui, error, theme::AMBER);
-            } else if let Some(notice) = &self.runtime.notice {
-                status_message(ui, notice, theme::TEAL);
-            }
-        });
+        };
+        if layout == LayoutMode::Compact {
+            ui.horizontal_wrapped(|ui| {
+                show_identity(ui);
+                if let Some((text, color)) = save_status {
+                    bounded_badge(ui, text, color, 72.0);
+                }
+                if let Some((message, color)) = runtime_status {
+                    status_message(ui, message, color);
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                show_identity(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some((text, color)) = save_status {
+                        bounded_badge(ui, text, color, 72.0);
+                    }
+                    if let Some((message, color)) = runtime_status {
+                        status_message(ui, message, color);
+                    }
+                });
+            });
+        }
         ui.add_space(2.0);
         if layout == LayoutMode::Compact {
             ui.horizontal_wrapped(|ui| {
@@ -269,7 +309,14 @@ impl LabelloApp {
         }
         for workflow in workflows {
             let selected = self.selected_task_id.as_ref() == Some(&workflow.task_id);
-            theme::card_frame().show(ui, |ui| {
+            let frame = if selected {
+                theme::card_frame()
+                    .fill(Color32::from_rgb(32, 48, 76))
+                    .stroke(egui::Stroke::new(1.5, theme::TEAL.gamma_multiply(0.75)))
+            } else {
+                theme::card_frame()
+            };
+            frame.show(ui, |ui| {
                 if ui
                     .selectable_label(selected, RichText::new(workflow.label()).strong())
                     .clicked()
@@ -277,11 +324,11 @@ impl LabelloApp {
                 {
                     self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
                 }
-                ui.label(annotation_type_label(&workflow.annotation_type));
-                ui.small(format!("Task: {}", workflow.task_name));
-                if selected {
-                    badge(ui, "Current", theme::TEAL);
-                }
+                badge(
+                    ui,
+                    annotation_type_label(&workflow.annotation_type),
+                    theme::BLUE,
+                );
             });
             ui.add_space(6.0);
         }
