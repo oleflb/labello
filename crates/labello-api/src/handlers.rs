@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post, put},
 };
 use labello_client::{
-    CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
+    AuthOptions, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
     IngestJobStatus, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
@@ -56,12 +56,7 @@ pub fn router(state: ApiState) -> Router {
                 .allow_credentials(true)
                 .allow_origin(origins)
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    header::HeaderName::from_static("x-dev-token"),
-                    header::HeaderName::from_static("x-user-id"),
-                    header::HeaderName::from_static("x-user-role"),
-                ])
+                .allow_headers([header::CONTENT_TYPE])
                 .expose_headers([
                     header::HeaderName::from_static("x-image-width"),
                     header::HeaderName::from_static("x-image-height"),
@@ -111,6 +106,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/me", get(me))
         .route("/logout", post(logout))
+        .route("/auth/options", get(auth_options))
+        .route("/auth/local-admin", post(local_admin_login))
         .route("/auth/github/login", get(oauth_routes::github_login))
         .route("/auth/github/callback", get(oauth_routes::github_callback))
         .route("/datasets", get(list_datasets).post(create_dataset))
@@ -227,19 +224,80 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "service": "labello" }))
 }
 
+async fn auth_options(State(state): State<ApiState>) -> Json<AuthOptions> {
+    Json(AuthOptions {
+        github_oauth: state.github_oauth.is_some(),
+        local_admin_login: state.local_admin_login_enabled(),
+    })
+}
+
+async fn local_admin_login(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let user_id = state
+        .local_admin_user_id()
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("local admin login".to_string()))?;
+    require_configured_origin(&state, &headers)?;
+    let timestamp = labello_domain::now();
+    let account = if let Some(account) = state.server_store.user(&user_id)? {
+        account
+    } else {
+        state
+            .server_store
+            .upsert_user(labello_domain::UserAccount {
+                user_id: user_id.clone(),
+                display_name: user_id.to_string(),
+                github_user_id: None,
+                github_login: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })?
+    };
+    let token = state.create_session(user_id)?;
+    let cookie = crate::session::session_cookie(&token, state.session_cookie_secure());
+    tracing::info!(
+        event = "auth.local_admin.completed",
+        user_id = %account.user_id,
+        "local administrator login completed"
+    );
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie)
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+        )],
+        Json(account),
+    ))
+}
+
+fn require_configured_origin(state: &ApiState, headers: &HeaderMap) -> ApiResult<()> {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return Ok(());
+    };
+    if origins.next().is_some()
+        || origin.to_str().map_or(true, |origin| {
+            !state
+                .browser_origins()
+                .iter()
+                .any(|allowed| allowed == origin)
+        })
+    {
+        return Err(ApiError::Unauthorized("origin is not allowed".to_string()));
+    }
+    Ok(())
+}
+
 async fn me(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<labello_domain::UserAccount>> {
-    let auth_mode = if session_token(&headers).is_some() {
-        "session"
-    } else {
-        "development"
-    };
     let account = current_account(&state, &headers)?;
     tracing::info!(
         event = "auth.completed",
-        auth_mode,
+        auth_mode = "session",
         user_id = %account.user_id,
         "authentication completed"
     );

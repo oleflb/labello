@@ -18,44 +18,30 @@ struct ErrorBody {
 
 use crate::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
-    AssignmentActionRequest, AuthApi, ClientError, ClientResult, CorrectionRequest,
+    AssignmentActionRequest, AuthApi, AuthOptions, ClientError, ClientResult, CorrectionRequest,
     CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery,
     ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi, OAuthCallbackRequest,
     OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
     ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
-#[derive(Clone, Default, PartialEq, Eq)]
-pub enum AuthMode {
-    #[default]
-    Anonymous,
-    Session,
-    Development {
-        user_id: UserId,
-        role: Option<labello_domain::DatasetRole>,
-        dev_token: Option<String>,
-    },
-}
-
 #[derive(Clone)]
 pub struct HttpLabelloApi {
     base_url: Url,
     client: reqwest::Client,
-    auth: AuthMode,
 }
 
 impl HttpLabelloApi {
     pub fn new(base_url: impl AsRef<str>) -> ClientResult<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let client = reqwest::Client::builder().cookie_store(true).build()?;
+        #[cfg(target_arch = "wasm32")]
+        let client = reqwest::Client::new();
+
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
-            client: reqwest::Client::new(),
-            auth: AuthMode::default(),
+            client,
         })
-    }
-
-    pub fn with_auth(mut self, auth: AuthMode) -> Self {
-        self.auth = auth;
-        self
     }
 
     fn endpoint(&self, path: &str) -> ClientResult<Url> {
@@ -63,38 +49,9 @@ impl HttpLabelloApi {
     }
 
     fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
-        let mut request = self.client.request(method, self.endpoint(path)?);
-        match &self.auth {
-            AuthMode::Anonymous => {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    request = request.fetch_credentials_omit();
-                }
-            }
-            AuthMode::Session => {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    request = request.fetch_credentials_include();
-                }
-            }
-            AuthMode::Development {
-                user_id,
-                role,
-                dev_token,
-            } => {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    request = request.fetch_credentials_omit();
-                }
-                request = request.header("x-user-id", user_id.as_str());
-                if let Some(role) = role {
-                    request = request.header("x-user-role", role.to_string());
-                }
-                if let Some(token) = dev_token {
-                    request = request.header("x-dev-token", token);
-                }
-            }
-        }
+        let request = self.client.request(method, self.endpoint(path)?);
+        #[cfg(target_arch = "wasm32")]
+        let request = request.fetch_credentials_include();
         Ok(request)
     }
 
@@ -864,6 +821,23 @@ impl PrelabelApi for HttpLabelloApi {
 }
 
 impl AuthApi for HttpLabelloApi {
+    fn auth_options<'a>(&'a self) -> crate::ApiFuture<'a, AuthOptions> {
+        Box::pin(async move {
+            Self::json(self.request(Method::GET, "/auth/options")?.send().await?).await
+        })
+    }
+
+    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+        Box::pin(async move {
+            Self::json(
+                self.request(Method::POST, "/auth/local-admin")?
+                    .send()
+                    .await?,
+            )
+            .await
+        })
+    }
+
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> crate::ApiFuture<'a, String> {
         Box::pin(async move {
             let mut url = self.endpoint("/auth/github/login")?;
@@ -949,39 +923,78 @@ impl UserApi for HttpLabelloApi {
 mod tests {
     use super::*;
 
-    #[test]
-    fn anonymous_and_session_modes_do_not_add_development_headers() {
-        for mode in [AuthMode::Anonymous, AuthMode::Session] {
-            let request = HttpLabelloApi::new("http://example.invalid")
-                .unwrap()
-                .with_auth(mode)
-                .request(Method::GET, "/me")
-                .unwrap()
-                .build()
-                .unwrap();
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::io::{BufRead, BufReader, Write};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::net::TcpListener;
 
-            assert!(!request.headers().contains_key("x-user-id"));
-            assert!(!request.headers().contains_key("x-user-role"));
-            assert!(!request.headers().contains_key("x-dev-token"));
-        }
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn auth_requests_use_session_mode_and_retain_native_cookie() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let account = UserAccount {
+            user_id: UserId::from("local_admin"),
+            display_name: "Local Administrator".to_string(),
+            github_user_id: None,
+            github_login: None,
+            created_at: labello_domain::now(),
+            updated_at: labello_domain::now(),
+        };
+        let account_json = serde_json::to_string(&account).unwrap();
+        let server = std::thread::spawn(move || {
+            let responses = [
+                (
+                    r#"{"githubOauth":true,"localAdminLogin":true}"#.to_string(),
+                    "",
+                ),
+                (
+                    account_json.clone(),
+                    "Set-Cookie: labello_session=test-session; Path=/; HttpOnly\r\n",
+                ),
+                (account_json, ""),
+            ];
+            let mut requests = Vec::new();
+            for (body, extra_headers) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    request.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                requests.push(request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
 
-    #[test]
-    fn development_mode_adds_only_configured_development_headers() {
-        let request = HttpLabelloApi::new("http://example.invalid")
-            .unwrap()
-            .with_auth(AuthMode::Development {
-                user_id: UserId::from("developer"),
-                role: Some(labello_domain::DatasetRole::Reviewer),
-                dev_token: Some("secret".to_string()),
-            })
-            .request(Method::GET, "/me")
-            .unwrap()
-            .build()
-            .unwrap();
+        let api = HttpLabelloApi::new(format!("http://{address}")).unwrap();
+        assert_eq!(
+            api.auth_options().await.unwrap(),
+            AuthOptions {
+                github_oauth: true,
+                local_admin_login: true,
+            }
+        );
+        assert_eq!(api.local_admin_login().await.unwrap(), account);
+        assert_eq!(api.me().await.unwrap(), account);
 
-        assert_eq!(request.headers()["x-user-id"], "developer");
-        assert_eq!(request.headers()["x-user-role"], "reviewer");
-        assert_eq!(request.headers()["x-dev-token"], "secret");
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /auth/options HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with("POST /auth/local-admin HTTP/1.1\r\n"));
+        assert!(
+            requests[2]
+                .to_ascii_lowercase()
+                .contains("cookie: labello_session=test-session\r\n")
+        );
     }
 }

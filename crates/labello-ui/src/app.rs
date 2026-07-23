@@ -9,8 +9,8 @@ use std::{future::Future, pin::Pin};
 
 use eframe::egui::{self, TextureHandle};
 use labello_client::{
-    CorrectionRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob, LabelloApi,
-    SnapshotFile,
+    AuthOptions, CorrectionRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
+    LabelloApi, SnapshotFile,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
@@ -36,7 +36,6 @@ const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 pub struct AppConfig {
     pub api_base_url: String,
     pub application_url: Option<String>,
-    pub dev_token: String,
     pub user_id: UserId,
     pub dataset_id: DatasetId,
     pub queue_size: usize,
@@ -47,7 +46,6 @@ impl Default for AppConfig {
         Self {
             api_base_url: "http://127.0.0.1:8080".to_string(),
             application_url: None,
-            dev_token: "dev-local-token".to_string(),
             user_id: UserId::from("demo_user"),
             dataset_id: DatasetId::from("demo"),
             queue_size: IMAGE_QUEUE_SIZE,
@@ -139,6 +137,10 @@ pub(crate) struct RequestIdentity {
 
 #[derive(Debug)]
 pub(crate) enum UiMessage {
+    AuthOptionsLoaded {
+        request: RequestIdentity,
+        result: Result<AuthOptions, String>,
+    },
     SessionLoaded {
         request: RequestIdentity,
         result: Result<UserAccount, String>,
@@ -265,7 +267,13 @@ pub(crate) enum UiMessage {
 }
 
 pub(crate) enum UiCommand {
+    AuthOptions {
+        request: RequestIdentity,
+    },
     Session {
+        request: RequestIdentity,
+    },
+    LocalAdminLogin {
         request: RequestIdentity,
     },
     Logout {
@@ -415,7 +423,9 @@ pub(crate) enum UiCommand {
 impl UiCommand {
     pub(crate) fn request(&self) -> &RequestIdentity {
         match self {
-            Self::Session { request }
+            Self::AuthOptions { request }
+            | Self::Session { request }
+            | Self::LocalAdminLogin { request }
             | Self::Logout { request }
             | Self::GithubLogin { request, .. }
             | Self::DatasetList { request }
@@ -448,7 +458,8 @@ impl UiCommand {
 impl UiMessage {
     pub(crate) fn request(&self) -> Option<&RequestIdentity> {
         match self {
-            Self::SessionLoaded { request, .. }
+            Self::AuthOptionsLoaded { request, .. }
+            | Self::SessionLoaded { request, .. }
             | Self::LogoutFinished { request, .. }
             | Self::GithubLoginUrl { request, .. }
             | Self::DatasetList { request, .. }
@@ -632,14 +643,16 @@ pub(crate) struct SetupState {
     pub create_dataset_id: String,
     pub create_dataset_name: String,
     pub started: bool,
-    pub dev_auth: bool,
 }
 
 pub(crate) struct AuthState {
     pub account: Option<UserAccount>,
+    pub options: AuthOptions,
+    pub options_checked: bool,
     pub checked: bool,
     pub session_request_id: u64,
     pub active_session_request_id: Option<u64>,
+    pub local_admin_login_pending: bool,
 }
 
 pub(crate) struct DatasetState {
@@ -828,7 +841,6 @@ impl LabelloApp {
             create_dataset_id: config.dataset_id.to_string(),
             create_dataset_name: "Demo Dataset".to_string(),
             started: true,
-            dev_auth: !config.dev_token.is_empty(),
         };
         let work = WorkState {
             classes,
@@ -876,9 +888,15 @@ impl LabelloApp {
             setup,
             auth: AuthState {
                 account: None,
+                options: AuthOptions {
+                    github_oauth: false,
+                    local_admin_login: false,
+                },
+                options_checked: true,
                 checked: true,
                 session_request_id: 0,
                 active_session_request_id: None,
+                local_admin_login_pending: false,
             },
             datasets: DatasetState::new(),
             admin_tools: AdminToolsState::default(),
@@ -897,6 +915,7 @@ impl LabelloApp {
         app.setup.started = false;
         app.setup.create_dataset_id.clear();
         app.setup.create_dataset_name.clear();
+        app.auth.options_checked = false;
         app.auth.checked = false;
         app.current = None;
         app.queue.clear();

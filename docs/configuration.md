@@ -34,8 +34,7 @@ browserOrigins = [
 sessionCookieSecure = false
 
 [developmentAuth]
-enabled = true
-token = "dev-local-token"
+localAdminLogin = true
 
 # [githubOauth]
 # clientId = "your-github-client-id"
@@ -45,7 +44,7 @@ token = "dev-local-token"
 
 The parser rejects unknown fields. Every uncommented field shown above is
 required. The `[githubOauth]` section is optional, but all three of its fields
-are required when the section is present.
+are required when present.
 
 ## Top-Level Settings
 
@@ -77,26 +76,21 @@ Dataset access remains controlled by the annotator, reviewer, adjudicator, and
 data-admin roles stored with each dataset. Keep at least one reachable account
 in the list when dataset creation is required.
 
-## Development Authentication
+## Local Development Login
 
 The `[developmentAuth]` section is required.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `developmentAuth.enabled` | `true` | Enables trusted development identities supplied through Labello's development-auth headers. |
-| `developmentAuth.token` | `"dev-local-token"` | Shared token required by development-auth requests. It must be nonempty when development authentication is enabled. |
+| `developmentAuth.localAdminLogin` | `true` | Enables one-click session login as the first configured bootstrap administrator. It requires a loopback bind address and a valid bootstrap administrator. |
 
-Development authentication is intended only for a trusted local environment.
+Local administrator login is intended only for a trusted local environment.
 Disable it for any internet-facing deployment:
 
 ```toml
 [developmentAuth]
-enabled = false
-token = "unused"
+localAdminLogin = false
 ```
-
-The token field remains required when development authentication is disabled,
-but its value is not used.
 
 ## GitHub OAuth
 
@@ -145,7 +139,7 @@ replace GitHub OAuth. A partial set is ignored. See
 
 - Terminate TLS in front of the browser client and API.
 - Set `sessionCookieSecure = true` for HTTPS.
-- Set `developmentAuth.enabled = false` outside trusted development networks.
+- Set `developmentAuth.localAdminLogin = false` outside local development.
 - Store OAuth secrets outside tracked files.
 - Restrict `browserOrigins` to the exact deployed browser origins.
 - Run only one Labello server process against a dataset root because filesystem

@@ -1,5 +1,5 @@
 use eframe::egui::{self, RichText};
-use labello_domain::{DatasetId, DatasetRole, UserId};
+use labello_domain::{DatasetId, DatasetRole};
 
 use crate::{
     app::{AppView, LabelloApp, PendingTransition},
@@ -45,13 +45,20 @@ impl LabelloApp {
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.heading("Connection");
+            let mut reconnect = false;
             form_row(ui, "API URL", |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 44.0],
+                let response = ui.add_sized(
+                    [ui.available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.config.api_base_url),
-                )
-                .on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.")
+                );
+                reconnect = response.lost_focus();
+                response.on_hover_text("Backend API base URL, for example http://127.0.0.1:8080.")
             });
+            if reconnect {
+                self.rebuild_http_api();
+                self.auth.options_checked = false;
+                self.auth.checked = false;
+            }
             if self.loading.session {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -63,47 +70,23 @@ impl LabelloApp {
                     ui.small(format!("GitHub: @{login}"));
                 }
                 ui.small(format!("User ID: {}", account.user_id));
-            } else if !self.setup.dev_auth && ui.button("Sign in with GitHub").clicked() {
-                self.request_github_login();
-            }
-
-            ui.separator();
-            ui.checkbox(&mut self.setup.dev_auth, "Development authentication")
-                .on_hover_text(
-                    "Use explicit local user headers only when server dev auth is enabled.",
-                );
-            if self.setup.dev_auth {
-                form_row(ui, "Dev token", |ui| {
-                    ui.add_sized(
-                        [ui.available_width(), 44.0],
-                        egui::TextEdit::singleline(&mut self.config.dev_token).password(true),
-                    )
-                    .on_hover_text("Must match the development authentication token on the server.")
-                });
-                let mut user_id = self.config.user_id.to_string();
-                form_row(ui, "Development user ID", |ui| {
-                    let response = ui.add_sized(
-                        [ui.available_width(), 44.0],
-                        egui::TextEdit::singleline(&mut user_id),
-                    );
-                    if response.changed() {
-                        self.config.user_id = UserId::from(user_id);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    if self.auth.options.local_admin_login
+                        && ui.button("Continue as local admin").clicked()
+                    {
+                        self.request_local_admin_login();
                     }
-                    response
-                });
-                if ui.button("Apply development login").clicked() {
-                    if let Err(error) = self.config.user_id.validate_path_segment() {
-                        self.runtime.error = Some(format!("User ID: {error}"));
-                    } else {
-                        self.auth.account = None;
-                        self.current = None;
-                        self.datasets.metadata = None;
-                        self.datasets.admin_config = None;
-                        self.datasets.admin_baseline = None;
-                        self.datasets.summaries.clear();
-                        self.rebuild_http_api();
-                        self.request_session();
+                    if self.auth.options.github_oauth && ui.button("Sign in with GitHub").clicked()
+                    {
+                        self.request_github_login();
                     }
+                });
+                if self.auth.options_checked
+                    && !self.auth.options.local_admin_login
+                    && !self.auth.options.github_oauth
+                {
+                    ui.label("No interactive sign-in method is enabled on this server.");
                 }
             }
         });

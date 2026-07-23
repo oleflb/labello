@@ -11,8 +11,7 @@ browserOrigins = [
 sessionCookieSecure = false
 
 [developmentAuth]
-enabled = true
-token = "dev-local-token"
+localAdminLogin = true
 
 # GitHub OAuth is disabled by default. Uncomment the complete section to enable it.
 # [githubOauth]

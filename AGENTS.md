@@ -144,10 +144,10 @@ EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 
 The inspector uses deterministic demo state and does not connect to the Labello
 API by default. Pass `-- --live` to connect it to a local server with
-development authentication. Live inspection can mutate datasets and claim
-assignments, so use disposable development data. Keep the inspector isolated
-from production code. Restart OpenCode after changing `opencode.json` so the
-`egui` MCP server configuration reloads.
+local administrator login enabled. Live inspection can mutate datasets and
+claim assignments, so use disposable development data. Keep the inspector
+isolated from production code. Restart OpenCode after changing `opencode.json`
+so the `egui` MCP server configuration reloads.
 
 See `dev/egui-mcp-inspector/README.md` for setup details.
 The inspector does not prove browser networking, cookies, persistence, or

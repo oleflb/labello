@@ -12,7 +12,7 @@ Labello currently supports:
 - object-level approval review and correction workflows;
 - dataset, task, class, tutorial, role, and keybinding administration;
 - filesystem image ingestion, duplicate detection, statistics, and snapshots;
-- development authentication and GitHub OAuth.
+- loopback-only local administrator login and GitHub OAuth.
 
 The project is under active development. See [Current limitations](#current-limitations)
 before using it in production.
@@ -47,9 +47,9 @@ In another terminal, start the browser client from `apps/labello-wasm`:
 trunk serve --address 127.0.0.1 --port 8081
 ```
 
-Open <http://127.0.0.1:8081>. Select development authentication and use the
-default user `admin` and token `dev-local-token`. The `admin` user is allowed
-to create the first dataset.
+Open <http://127.0.0.1:8081> and select `Continue as local admin`. The default
+loopback-only server configuration enables this session login for the `admin`
+bootstrap user, which can create the first dataset.
 
 The client normally connects to port `8080` on the same hostname used to open
 the UI. Override this with the `api` query parameter when needed. The annotation
@@ -84,12 +84,11 @@ browserOrigins = [
 sessionCookieSecure = false
 
 [developmentAuth]
-enabled = true
-token = "dev-local-token"
+localAdminLogin = true
 ```
 
 `browserOrigins` must contain exact browser origins without paths. Unknown or
-missing configuration fields are rejected.
+missing required configuration fields are rejected.
 
 The server supports these environment variables:
 
@@ -108,16 +107,15 @@ All three `GITHUB_*` variables must be set to enable or override GitHub OAuth.
 
 ## Authentication
 
-### Development Authentication
+### Local Development Login
 
-Development authentication permits local identities protected by the shared
-token in `[developmentAuth]`. It is intended only for trusted development
-environments. Disable it on any internet-facing server:
+The local default enables one-click session login as the first configured
+bootstrap admin. This is accepted only on a loopback bind. Disable it on any
+internet-facing server:
 
 ```toml
 [developmentAuth]
-enabled = false
-token = "unused"
+localAdminLogin = false
 ```
 
 Dataset permissions remain role-based. The available roles are annotator,
@@ -241,8 +239,8 @@ cargo install egui_mcp --locked
 EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
-To inspect the native UI against a running local server, use development
-authentication and start the inspector in live mode:
+To inspect the native UI against a running local server, enable local
+administrator login and start the inspector in live mode:
 
 ```sh
 EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --live
@@ -251,8 +249,8 @@ EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml --
 The repository's `opencode.json` configures the `egui` MCP server. Restart
 OpenCode after changing that configuration. The inspector exposes the shared
 egui accessibility tree and accepts inspection input after attaching. Live
-mode can mutate real server data and is limited to development authentication;
-use a disposable development dataset. Use Chromium to validate actual WASM
+mode can mutate real server data through the local administrator session; use
+a disposable development dataset. Use Chromium to validate actual WASM
 startup, browser behavior, cookies, and responsive rendering.
 See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
@@ -260,7 +258,7 @@ See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
 - Terminate TLS in front of both the UI and API.
 - Set `sessionCookieSecure = true` when using HTTPS.
-- Disable development authentication.
+- Disable `developmentAuth.localAdminLogin`.
 - Store OAuth secrets outside committed configuration.
 - Configure `browserOrigins` and the OAuth callback with exact public URLs.
 - Run one Labello server process per dataset root; filesystem locks are

@@ -9,10 +9,10 @@ use labello_domain::{
 
 use crate::{
     AnnotationBatchRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
-    ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetSummary,
-    DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestReport,
-    OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest, PrelabelSuggestionRequest,
-    SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    AuthOptions, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest,
+    DatasetSummary, DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob,
+    IngestReport, OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest,
+    PrelabelSuggestionRequest, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -295,6 +295,22 @@ pub trait PrelabelApi {
 }
 
 pub trait AuthApi {
+    fn auth_options<'a>(&'a self) -> ApiFuture<'a, AuthOptions> {
+        Box::pin(async {
+            Ok(AuthOptions {
+                github_oauth: false,
+                local_admin_login: false,
+            })
+        })
+    }
+    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+        Box::pin(async {
+            Err(ClientError::Api {
+                status: 401,
+                message: "local administrator login is not available".to_string(),
+            })
+        })
+    }
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String>;
     fn github_callback<'a>(&'a self, request: OAuthCallbackRequest) -> ApiFuture<'a, UserAccount>;
     fn me<'a>(&'a self) -> ApiFuture<'a, UserAccount> {

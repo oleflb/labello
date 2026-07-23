@@ -2,8 +2,8 @@ use std::{future::Future, rc::Rc};
 
 use eframe::egui;
 use labello_client::{
-    AuthMode, HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest,
-    SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    HttpLabelloApi, IngestJob, IngestJobStatus, OAuthLoginRequest, SetDatasetRolesRequest,
+    UpdateDatasetConfigRequest,
 };
 use web_time::{Duration, Instant};
 
@@ -15,18 +15,7 @@ use crate::app::{
 impl LabelloApp {
     pub(crate) fn rebuild_http_api(&mut self) {
         self.begin_auth_epoch();
-        match HttpLabelloApi::new(&self.config.api_base_url).map(|api| {
-            let auth = if self.setup.dev_auth {
-                AuthMode::Development {
-                    user_id: self.config.user_id.clone(),
-                    role: None,
-                    dev_token: non_empty(&self.config.dev_token),
-                }
-            } else {
-                AuthMode::Session
-            };
-            api.with_auth(auth)
-        }) {
+        match HttpLabelloApi::new(&self.config.api_base_url) {
             Ok(api) => {
                 self.runtime.api = Some(Rc::new(api));
                 self.runtime.error = None;
@@ -67,11 +56,27 @@ impl LabelloApp {
                 continue;
             }
             match message {
+                UiMessage::AuthOptionsLoaded { result, .. } => {
+                    self.loading.session = false;
+                    self.auth.options_checked = true;
+                    match result {
+                        Ok(options) => {
+                            self.auth.options = options;
+                            self.runtime.error = None;
+                        }
+                        Err(error) => {
+                            self.auth.checked = true;
+                            self.runtime.error = Some(error);
+                        }
+                    }
+                }
                 UiMessage::SessionLoaded { request, result } => {
                     if self.auth.active_session_request_id != Some(request.request_id) {
                         continue;
                     }
+                    let show_error = self.auth.local_admin_login_pending;
                     self.auth.active_session_request_id = None;
+                    self.auth.local_admin_login_pending = false;
                     self.loading.session = false;
                     self.auth.checked = true;
                     match result {
@@ -88,7 +93,7 @@ impl LabelloApp {
                         Err(error) => {
                             self.auth.account = None;
                             self.datasets.summaries.clear();
-                            if self.setup.dev_auth {
+                            if show_error {
                                 self.runtime.error = Some(error);
                             } else {
                                 self.runtime.error = None;
@@ -656,12 +661,29 @@ impl LabelloApp {
             return;
         };
         match command {
+            UiCommand::AuthOptions { request } => self.spawn_message(request.clone(), async move {
+                UiMessage::AuthOptionsLoaded {
+                    request,
+                    result: api.auth_options().await.map_err(|error| error.to_string()),
+                }
+            }),
             UiCommand::Session { request } => self.spawn_message(request.clone(), async move {
                 UiMessage::SessionLoaded {
                     request,
                     result: api.me().await.map_err(|error| error.to_string()),
                 }
             }),
+            UiCommand::LocalAdminLogin { request } => {
+                self.spawn_message(request.clone(), async move {
+                    UiMessage::SessionLoaded {
+                        request,
+                        result: api
+                            .local_admin_login()
+                            .await
+                            .map_err(|error| error.to_string()),
+                    }
+                })
+            }
             UiCommand::Logout { request } => self.spawn_message(request.clone(), async move {
                 UiMessage::LogoutFinished {
                     request,
@@ -872,9 +894,31 @@ impl LabelloApp {
     }
 
     pub(crate) fn start_setup_load(&mut self) {
-        if self.runtime.api.is_some() && !self.auth.checked && !self.loading.session {
+        if self.runtime.api.is_some() && !self.auth.options_checked && !self.loading.session {
+            self.request_auth_options();
+        } else if self.runtime.api.is_some()
+            && self.auth.options_checked
+            && !self.auth.checked
+            && !self.loading.session
+        {
             self.request_session();
         }
+    }
+
+    pub(crate) fn request_auth_options(&mut self) {
+        if self.runtime.api.is_none() {
+            return;
+        }
+        self.begin_auth_epoch();
+        let request = self.request_identity(None);
+        self.auth.options = labello_client::AuthOptions {
+            github_oauth: false,
+            local_admin_login: false,
+        };
+        self.auth.options_checked = false;
+        self.auth.checked = false;
+        self.loading.session = true;
+        self.queue_command(UiCommand::AuthOptions { request });
     }
 
     pub(crate) fn request_logout(&mut self) {
@@ -905,9 +949,24 @@ impl LabelloApp {
         let request = self.request_identity(None);
         self.auth.session_request_id = request.request_id;
         self.auth.active_session_request_id = Some(request.request_id);
+        self.auth.local_admin_login_pending = false;
         self.auth.checked = false;
         self.loading.session = true;
         self.queue_command(UiCommand::Session { request });
+    }
+
+    pub(crate) fn request_local_admin_login(&mut self) {
+        if self.loading.session || self.runtime.api.is_none() {
+            return;
+        }
+        self.begin_auth_epoch();
+        let request = self.request_identity(None);
+        self.auth.session_request_id = request.request_id;
+        self.auth.active_session_request_id = Some(request.request_id);
+        self.auth.local_admin_login_pending = true;
+        self.auth.checked = false;
+        self.loading.session = true;
+        self.queue_command(UiCommand::LocalAdminLogin { request });
     }
 
     pub(crate) fn refresh_stats_if_due(&mut self) {
@@ -971,9 +1030,15 @@ impl LabelloApp {
             .active_requests
             .remove(&command.request().request_id);
         match command {
-            UiCommand::Session { .. } => {
+            UiCommand::AuthOptions { .. } => {
+                self.loading.session = false;
+                self.auth.options_checked = true;
+                self.auth.checked = true;
+            }
+            UiCommand::Session { .. } | UiCommand::LocalAdminLogin { .. } => {
                 self.loading.session = false;
                 self.auth.active_session_request_id = None;
+                self.auth.local_admin_login_pending = false;
                 self.auth.checked = true;
             }
             UiCommand::Logout { .. } => self.loading.logout = false,

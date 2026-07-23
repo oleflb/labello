@@ -17,10 +17,10 @@ To connect the inspector to a running Labello server instead, use live mode:
 EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --live
 ```
 
-Live mode defaults to `http://127.0.0.1:8080` and supports development
-authentication only. Enable development authentication in the setup view and
-enter the token in its masked field. Do not pass credentials in arguments or
-URLs.
+Live mode defaults to `http://127.0.0.1:8080`. When the loopback server enables
+`developmentAuth.localAdminLogin`, use `Continue as local admin` in the setup
+view. The inspector retains that local session without exposing credentials in
+arguments, URLs, or UI fields.
 
 Live mode uses real server state: opening work can claim an assignment, and UI
 actions can modify the selected dataset. Use a disposable development dataset

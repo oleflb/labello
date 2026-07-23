@@ -16,8 +16,7 @@ use crate::{GithubOAuthConfig, error::ApiResult, session::ServerStore};
 pub struct ApiState {
     datasets_root: Arc<PathBuf>,
     bootstrap_admins: Arc<BTreeSet<UserId>>,
-    dev_auth_token: Option<Arc<String>>,
-    dev_auth_enabled: bool,
+    local_admin_user_id: Option<Arc<UserId>>,
     browser_origins: Arc<Vec<String>>,
     session_cookie_secure: bool,
     pub(crate) server_store: ServerStore,
@@ -35,8 +34,7 @@ impl ApiState {
             server_store: ServerStore::new(&datasets_root),
             datasets_root: Arc::new(datasets_root),
             bootstrap_admins: Arc::new(BTreeSet::from([UserId::from("admin")])),
-            dev_auth_token: None,
-            dev_auth_enabled: cfg!(test),
+            local_admin_user_id: None,
             browser_origins: Arc::new(Vec::new()),
             session_cookie_secure: true,
             ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -56,18 +54,17 @@ impl ApiState {
         self
     }
 
-    pub fn with_dev_auth_token(mut self, token: Option<String>) -> Self {
-        self.dev_auth_enabled = token.is_some();
-        self.dev_auth_token = token.filter(|token| !token.is_empty()).map(Arc::new);
+    pub fn with_local_admin_login(mut self, user_id: Option<UserId>) -> Self {
+        self.local_admin_user_id = user_id.map(Arc::new);
         self
     }
 
-    pub fn dev_auth_enabled(&self) -> bool {
-        self.dev_auth_enabled
+    pub fn local_admin_login_enabled(&self) -> bool {
+        self.local_admin_user_id.is_some()
     }
 
-    pub fn dev_auth_token(&self) -> Option<&str> {
-        self.dev_auth_token.as_deref().map(String::as_str)
+    pub(crate) fn local_admin_user_id(&self) -> Option<&UserId> {
+        self.local_admin_user_id.as_deref()
     }
 
     pub fn is_bootstrap_admin(&self, user_id: &UserId) -> bool {

@@ -1,14 +1,52 @@
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
+    http::{HeaderValue, Request, StatusCode, header},
+    middleware::Next,
 };
 use image::{ImageBuffer, Rgba};
-use labello_domain::ImageId;
+use labello_domain::{ImageId, UserAccount, UserId, now};
 use serde_json::json;
 use std::io::Cursor;
 use tower::ServiceExt;
 
-use crate::{ApiState, router};
+use crate::{ApiState, router as production_router};
+
+fn router(state: ApiState) -> axum::Router {
+    let session_state = state.clone();
+    production_router(state).layer(axum::middleware::from_fn(
+        move |mut request: Request<Body>, next: Next| {
+            let state = session_state.clone();
+            async move {
+                let test_user = request
+                    .headers_mut()
+                    .remove("x-test-user-id")
+                    .and_then(|value| value.to_str().ok().map(str::to_string));
+                if request.headers().get(header::COOKIE).is_none()
+                    && let Some(user_id) = test_user.map(UserId::from)
+                {
+                    let timestamp = now();
+                    state
+                        .server_store
+                        .upsert_user(UserAccount {
+                            user_id: user_id.clone(),
+                            display_name: user_id.to_string(),
+                            github_user_id: None,
+                            github_login: None,
+                            created_at: timestamp,
+                            updated_at: timestamp,
+                        })
+                        .unwrap();
+                    let token = state.create_session(user_id).unwrap();
+                    request.headers_mut().insert(
+                        header::COOKIE,
+                        HeaderValue::from_str(&format!("labello_session={token}")).unwrap(),
+                    );
+                }
+                next.run(request).await
+            }
+        },
+    ))
+}
 
 #[tokio::test]
 async fn responses_receive_and_propagate_request_ids() {
@@ -68,7 +106,7 @@ async fn internal_errors_are_sanitized_and_correlated() {
         .oneshot(
             Request::builder()
                 .uri("/me")
-                .header("x-user-id", "admin")
+                .header(header::COOKIE, "labello_session=invalid")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -86,7 +124,140 @@ async fn internal_errors_are_sanitized_and_correlated() {
 }
 
 #[tokio::test]
-async fn creates_dataset_and_enforces_dataset_headers() {
+async fn auth_options_are_public_and_only_advertise_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(
+        ApiState::new(temp.path())
+            .with_local_admin_login(Some(labello_domain::UserId::from("local_admin")))
+            .with_github_oauth(crate::GithubOAuthConfig {
+                client_id: "client-id".to_string(),
+                client_secret: "oauth-secret".to_string(),
+                redirect_uri: "https://api.example.com/auth/github/callback".to_string(),
+            }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auth/options")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let options: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        options,
+        json!({ "githubOauth": true, "localAdminLogin": true })
+    );
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!body.contains("oauth-secret"));
+    assert!(!body.contains("local_admin"));
+}
+
+#[tokio::test]
+async fn local_admin_login_is_not_found_when_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let response = router(ApiState::new(temp.path()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/local-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn local_admin_login_creates_session_and_requires_configured_browser_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(
+        ApiState::new(temp.path())
+            .with_browser_origins(vec!["https://app.example.com".to_string()])
+            .unwrap()
+            .with_session_cookie_secure(false)
+            .with_local_admin_login(Some(labello_domain::UserId::from("bootstrap_admin"))),
+    );
+
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/local-admin")
+                .header(header::ORIGIN, "https://other.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/local-admin")
+                .header(header::ORIGIN, "https://app.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.starts_with("labello_session="));
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("SameSite=Lax"));
+    assert!(!cookie.contains("; Secure"));
+    let body = to_bytes(login.into_body(), usize::MAX).await.unwrap();
+    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(account["userId"], "bootstrap_admin");
+    assert_eq!(account["displayName"], "bootstrap_admin");
+    assert!(account["githubUserId"].is_null());
+    assert!(account["githubLogin"].is_null());
+
+    let me = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/me")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(me.status(), StatusCode::OK);
+    let body = to_bytes(me.into_body(), usize::MAX).await.unwrap();
+    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(account["userId"], "bootstrap_admin");
+
+    let native_login = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/local-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(native_login.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn creates_dataset_and_requires_authentication() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));
     let response = app
@@ -95,8 +266,7 @@ async fn creates_dataset_and_enforces_dataset_headers() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -150,8 +320,7 @@ async fn creates_dataset_and_enforces_dataset_headers() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -176,8 +345,7 @@ async fn rejects_unsafe_dataset_ids_and_existing_datasets() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -199,8 +367,7 @@ async fn rejects_unsafe_dataset_ids_and_existing_datasets() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -222,8 +389,7 @@ async fn rejects_unsafe_dataset_ids_and_existing_datasets() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/images/bad%5Cid/record")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -236,8 +402,7 @@ async fn rejects_unsafe_dataset_ids_and_existing_datasets() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/keybindings")
-                .header("x-user-id", "../escape")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "../escape")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -249,8 +414,7 @@ async fn rejects_unsafe_dataset_ids_and_existing_datasets() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -271,8 +435,7 @@ async fn protects_admin_dataset_config() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -293,8 +456,7 @@ async fn protects_admin_dataset_config() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "intruder")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "intruder")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -307,8 +469,7 @@ async fn protects_admin_dataset_config() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -327,8 +488,7 @@ async fn protects_admin_dataset_config() {
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -355,8 +515,7 @@ async fn protects_admin_dataset_config() {
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -378,40 +537,14 @@ async fn protects_admin_dataset_config() {
 }
 
 #[tokio::test]
-async fn rejects_dev_header_identity_without_configured_token() {
+async fn development_headers_do_not_authenticate() {
     let temp = tempfile::tempdir().unwrap();
-    let app = router(ApiState::new(temp.path()).with_dev_auth_token(Some("secret".to_string())));
-
-    let missing_token = app
-        .clone()
+    let response = production_router(ApiState::new(temp.path()))
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "datasetId": "ds",
-                        "name": "Dataset",
-                        "adminUserId": "admin"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing_token.status(), StatusCode::UNAUTHORIZED);
-
-    let valid_token = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header(axum::http::HeaderName::from_static("x-user-id"), "admin")
                 .header("x-dev-token", "secret")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -426,7 +559,7 @@ async fn rejects_dev_header_identity_without_configured_token() {
         )
         .await
         .unwrap();
-    assert_eq!(valid_token.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -442,8 +575,7 @@ async fn review_and_adjudication_actor_ids_must_match_caller() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/images/img_1/reviews?assignmentId=asg_1&imageId=img_1&taskId=task_1&kind=review")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "reviewer")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -477,8 +609,7 @@ async fn review_and_adjudication_actor_ids_must_match_caller() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/images/img_1/adjudications?assignmentId=asg_1&imageId=img_1&taskId=task_1&kind=adjudication")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "adjudicator")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -532,8 +663,7 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/offline-sync")
-                .header("x-user-id", "someone_else")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "someone_else")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.clone()))
                 .unwrap(),
@@ -549,8 +679,7 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/offline-sync")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -599,8 +728,7 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/offline-sync")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -632,8 +760,7 @@ async fn config_endpoints_do_not_parse_image_index() {
             .oneshot(
                 Request::builder()
                     .uri(uri)
-                    .header("x-user-id", "admin")
-                    .header("x-user-role", "data_admin")
+                    .header("x-test-user-id", "admin")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -655,8 +782,7 @@ async fn starts_and_polls_ingest_job() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/ingest-jobs")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -675,8 +801,7 @@ async fn starts_and_polls_ingest_job() {
             .oneshot(
                 Request::builder()
                     .uri(format!("/datasets/ds/ingest-jobs/{job_id}"))
-                    .header("x-user-id", "admin")
-                    .header("x-user-role", "data_admin")
+                    .header("x-test-user-id", "admin")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -707,8 +832,7 @@ async fn uploads_images_and_serves_record_and_preview() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=uploads/test&ingest=true")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={}", TEST_BOUNDARY),
@@ -729,8 +853,7 @@ async fn uploads_images_and_serves_record_and_preview() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -747,8 +870,7 @@ async fn uploads_images_and_serves_record_and_preview() {
         .oneshot(
             Request::builder()
                 .uri(format!("/datasets/ds/images/{image_id}/record"))
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -765,8 +887,7 @@ async fn uploads_images_and_serves_record_and_preview() {
         .oneshot(
             Request::builder()
                 .uri(format!("/datasets/ds/images/{image_id}/preview?max=256"))
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1171,8 +1292,7 @@ async fn config_rejects_enabling_independent_agreement() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1187,8 +1307,7 @@ async fn config_rejects_enabling_independent_agreement() {
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -1226,8 +1345,7 @@ async fn assign_next_uses_camel_case_json_body() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=uploads/test&ingest=true")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={}", TEST_BOUNDARY),
@@ -1245,8 +1363,7 @@ async fn assign_next_uses_camel_case_json_body() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/images/next")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -1271,8 +1388,7 @@ async fn assign_next_uses_camel_case_json_body() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind=annotation")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -1397,8 +1513,7 @@ async fn assignment_lifecycle_is_exact_owned_and_resumable() {
                     "/datasets/ds/images/{}/events?{query}",
                     first["imageId"].as_str().unwrap()
                 ))
-                .header("x-user-id", "other_annotator")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "other_annotator")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -1502,8 +1617,7 @@ async fn annotation_batch_validates_atomically_and_returns_resulting_state() {
                 .uri(format!(
                     "/datasets/ds/images/{image_id}/annotation-batch?{query}"
                 ))
-                .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -1577,8 +1691,7 @@ async fn upload_requires_admin_and_rejects_unsafe_paths() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=uploads/test&ingest=true")
-                .header("x-user-id", "intruder")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "intruder")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={}", TEST_BOUNDARY),
@@ -1596,8 +1709,7 @@ async fn upload_requires_admin_and_rejects_unsafe_paths() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=../escape&ingest=true")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={}", TEST_BOUNDARY),
@@ -1614,8 +1726,7 @@ async fn upload_requires_admin_and_rejects_unsafe_paths() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=uploads/test&ingest=true")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={}", TEST_BOUNDARY),
@@ -1648,18 +1759,14 @@ async fn session_survives_state_recreation_and_logout_invalidates_it() {
         .create_session(labello_domain::UserId::from("session_user"))
         .unwrap();
 
-    let app = router(
-        ApiState::new(temp.path())
-            .with_dev_auth_token(None)
-            .with_session_cookie_secure(false),
-    );
+    let app = production_router(ApiState::new(temp.path()).with_session_cookie_secure(false));
     let me = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri("/me")
                 .header(header::COOKIE, format!("labello_session={token}"))
-                .header("x-user-id", "spoofed")
+                .header(axum::http::HeaderName::from_static("x-user-id"), "spoofed")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1878,7 +1985,7 @@ async fn data_admin_lists_discovered_users_and_assigns_roles() {
         .oneshot(
             Request::builder()
                 .uri("/me")
-                .header("x-user-id", "worker")
+                .header("x-test-user-id", "worker")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1892,7 +1999,7 @@ async fn data_admin_lists_discovered_users_and_assigns_roles() {
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/roles")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({ "userId": "worker", "roles": ["annotator", "reviewer"] }).to_string(),
@@ -1907,7 +2014,7 @@ async fn data_admin_lists_discovered_users_and_assigns_roles() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/users")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1939,10 +2046,7 @@ async fn credentialed_cors_only_allows_configured_origins() {
                 .uri("/me")
                 .header(header::ORIGIN, "https://app.remote.example")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
-                .header(
-                    header::ACCESS_CONTROL_REQUEST_HEADERS,
-                    "content-type,x-dev-token,x-user-id,x-user-role",
-                )
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1960,9 +2064,7 @@ async fn credentialed_cors_only_allows_configured_origins() {
     let allowed_headers = response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
         .to_str()
         .unwrap();
-    for expected in ["content-type", "x-dev-token", "x-user-id", "x-user-role"] {
-        assert!(allowed_headers.contains(expected), "{allowed_headers}");
-    }
+    assert_eq!(allowed_headers, "content-type");
 
     let actual = app
         .clone()
@@ -2035,7 +2137,7 @@ async fn data_admin_explores_images_with_bounded_pagination_and_filters() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/images")
-                .header("x-user-id", "intruder")
+                .header("x-test-user-id", "intruder")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2048,7 +2150,7 @@ async fn data_admin_explores_images_with_bounded_pagination_and_filters() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/images?page=1&pageSize=1&status=pending&taskId=bounding_box%3Apixel")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2069,7 +2171,7 @@ async fn data_admin_explores_images_with_bounded_pagination_and_filters() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/images?pageSize=500&search=BETA")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2096,7 +2198,7 @@ async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/snapshots")
-                .header("x-user-id", "intruder")
+                .header("x-test-user-id", "intruder")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2110,7 +2212,7 @@ async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/snapshots")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2146,7 +2248,7 @@ async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
                 .uri(format!(
                     "/datasets/ds/snapshots/{snapshot_id}/files/manifest.json"
                 ))
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2168,7 +2270,7 @@ async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
                 .uri(format!(
                     "/datasets/ds/snapshots/{snapshot_id}/files/images-index.json"
                 ))
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2185,7 +2287,7 @@ async fn data_admin_creates_lists_and_downloads_native_snapshot_files() {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/snapshots")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2207,8 +2309,7 @@ async fn create_dataset(app: &axum::Router) {
             Request::builder()
                 .method("POST")
                 .uri("/datasets")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2235,8 +2336,7 @@ async fn configure_pixel_task_review(app: &axum::Router, required_reviews: u32, 
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2312,8 +2412,7 @@ async fn configure_pixel_task_review(app: &axum::Router, required_reviews: u32, 
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2346,7 +2445,7 @@ async fn prepare_correction_task(
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2374,7 +2473,7 @@ async fn prepare_correction_task(
             Request::builder()
                 .method("PUT")
                 .uri("/datasets/ds/admin")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2455,8 +2554,7 @@ async fn upload_test_image(app: &axum::Router, file_name: &str, bytes: &[u8]) {
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/uploads?root=uploads/test&ingest=true")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(
                     header::CONTENT_TYPE,
                     format!("multipart/form-data; boundary={TEST_BOUNDARY}"),
@@ -2476,8 +2574,7 @@ async fn append_test_event(app: &axum::Router, image_id: &ImageId, payload: serd
             Request::builder()
                 .method("POST")
                 .uri(format!("/datasets/ds/images/{image_id}/admin/events"))
-                .header("x-user-id", "admin")
-                .header("x-user-role", "data_admin")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(json!({ "payload": payload }).to_string()))
                 .unwrap(),
@@ -2502,8 +2599,7 @@ async fn submit_test_task_for_task(app: &axum::Router, image_id: &ImageId, task_
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/assignments/complete")
-                .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "admin")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2542,8 +2638,7 @@ async fn post_test_review(
             Request::builder()
                 .method("POST")
                 .uri(format!("/datasets/ds/images/{image_id}/reviews?{query}"))
-                .header("x-user-id", reviewer)
-                .header("x-user-role", "reviewer")
+                .header("x-test-user-id", reviewer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2592,20 +2687,12 @@ async fn claim_assignment_with_body(
     user_id: &str,
     request: serde_json::Value,
 ) -> axum::response::Response {
-    let kind = request["kind"].as_str().unwrap_or("annotation");
-    let role = match kind {
-        "annotation" => "annotator",
-        "review" => "reviewer",
-        "adjudication" => "adjudicator",
-        _ => unreachable!(),
-    };
     app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/datasets/ds/images/next")
-                .header("x-user-id", user_id)
-                .header("x-user-role", role)
+                .header("x-test-user-id", user_id)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(request.to_string()))
                 .unwrap(),
@@ -2634,8 +2721,7 @@ async fn post_test_correction(
                 .uri(format!(
                     "/datasets/ds/images/{image_id}/corrections?{query}"
                 ))
-                .header("x-user-id", reviewer)
-                .header("x-user-role", "reviewer")
+                .header("x-test-user-id", reviewer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(request.to_string()))
                 .unwrap(),
@@ -2661,7 +2747,7 @@ async fn get_test_stats(app: &axum::Router) -> serde_json::Value {
         .oneshot(
             Request::builder()
                 .uri("/datasets/ds/stats")
-                .header("x-user-id", "admin")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2683,8 +2769,7 @@ async fn post_assignment_action(
             Request::builder()
                 .method("POST")
                 .uri(format!("/datasets/ds/assignments/{action}"))
-                .header("x-user-id", user_id)
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", user_id)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
@@ -2707,8 +2792,7 @@ async fn load_test_image_state(app: &axum::Router, image_id: &ImageId) -> serde_
         .oneshot(
             Request::builder()
                 .uri(format!("/datasets/ds/images/{image_id}"))
-                .header("x-user-id", "admin")
-                .header("x-user-role", "annotator")
+                .header("x-test-user-id", "admin")
                 .body(Body::empty())
                 .unwrap(),
         )

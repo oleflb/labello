@@ -17,7 +17,7 @@ use egui_kittest::{
 };
 use labello_client::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, ApiFuture, AppendEventRequest,
-    AssignNextRequest, AssignmentActionRequest, AuthApi, ClientError, ClientResult,
+    AssignNextRequest, AssignmentActionRequest, AuthApi, AuthOptions, ClientError, ClientResult,
     CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi,
     ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
     KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
@@ -97,6 +97,7 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
 
     assert!(harness.query_by_label("Choose where to work").is_some());
     assert_eq!(api.counts().me, 1);
+    assert_eq!(api.counts().auth_options, 1);
     assert!(harness.query_all_by_label("Annotate").next().is_some());
     assert!(harness.query_all_by_label("Admin").next().is_some());
 
@@ -343,13 +344,12 @@ fn session_is_restored_before_datasets_load_and_logout_clears_it() {
 }
 
 #[test]
-fn signed_out_session_auth_hides_raw_credentials_and_offers_github() {
+fn signed_out_setup_offers_advertised_login_methods_without_raw_credentials() {
     let api = Rc::new(SpyApi::new());
     api.fail_me();
-    let mut app = base_live_app(api);
-    app.setup.dev_auth = false;
-    app.config.dev_token.clear();
+    let mut app = base_live_app(api.clone());
     app.auth.checked = false;
+    app.auth.options_checked = false;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1000.0, 780.0))
         .with_max_steps(20)
@@ -357,8 +357,13 @@ fn signed_out_session_auth_hides_raw_credentials_and_offers_github() {
     step_until(&mut harness, 8, |app| app.auth.checked);
 
     assert!(harness.query_by_label("Sign in with GitHub").is_some());
+    assert!(harness.query_by_label("Continue as local admin").is_some());
     assert!(harness.query_by_label("Dev token").is_none());
     assert!(harness.query_by_label("Development user ID").is_none());
+
+    click(&mut harness, "Continue as local admin");
+    step_until(&mut harness, 8, |app| app.auth.account.is_some());
+    assert_eq!(api.counts().local_admin_login, 1);
 }
 
 #[test]
@@ -1352,12 +1357,9 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
         .next()
         .expect("API URL field should have an accessible label");
-    assert!(api_url.rect().height() >= 43.0);
-    let user_id = harness
-        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Development user ID")
-        .next()
-        .expect("development user ID field should have an accessible label");
-    assert!(user_id.rect().height() >= 43.0);
+    assert!(api_url.rect().height() <= 25.0);
+    assert!(harness.query_by_label("Development user ID").is_none());
+    assert!(harness.query_by_label("Dev token").is_none());
 
     harness.set_size(egui::vec2(390.0, 844.0));
     harness.step();
@@ -1365,7 +1367,7 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
         .next()
         .expect("compact API URL field should retain its accessible label");
-    assert!(compact_api_url.rect().height() >= 43.0);
+    assert!(compact_api_url.rect().height() <= 25.0);
     assert!(compact_api_url.rect().right() <= 390.5);
 }
 
@@ -2818,7 +2820,6 @@ fn base_live_app(api: Rc<SpyApi>) -> LabelloApp {
     let mut app = LabelloApp::live_http(AppConfig {
         api_base_url: "http://example.invalid".to_string(),
         application_url: Some("https://app.example.test/label?dataset=demo".to_string()),
-        dev_token: "dev".to_string(),
         user_id: UserId::from("admin"),
         dataset_id: DatasetId::from("demo"),
         queue_size: IMAGE_QUEUE_SIZE,
@@ -3124,6 +3125,8 @@ impl SpyApi {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CallCounts {
+    auth_options: usize,
+    local_admin_login: usize,
     me: usize,
     logout: usize,
     list_datasets: usize,
@@ -4092,6 +4095,20 @@ impl PrelabelApi for SpyApi {
 }
 
 impl AuthApi for SpyApi {
+    fn auth_options<'a>(&'a self) -> ApiFuture<'a, AuthOptions> {
+        self.state.borrow_mut().counts.auth_options += 1;
+        ready(Ok(AuthOptions {
+            github_oauth: true,
+            local_admin_login: true,
+        }))
+    }
+
+    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+        let mut state = self.state.borrow_mut();
+        state.counts.local_admin_login += 1;
+        ready(Ok(state.users[0].account.clone()))
+    }
+
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String> {
         self.state.borrow_mut().last_oauth_return_to = request.return_to;
         ready(Ok("https://example.invalid/login".to_string()))

@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AuthOptions {
+    pub github_oauth: bool,
+    pub local_admin_login: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateDatasetRequest {
     pub dataset_id: DatasetId,
     pub name: String,
@@ -263,6 +270,22 @@ pub struct OfflineSyncEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_options_use_camel_case_json() {
+        let options = AuthOptions {
+            github_oauth: true,
+            local_admin_login: false,
+        };
+
+        assert_eq!(
+            serde_json::to_value(options).unwrap(),
+            serde_json::json!({
+                "githubOauth": true,
+                "localAdminLogin": false
+            })
+        );
+    }
 
     #[test]
     fn assign_next_request_uses_camel_case_json() {

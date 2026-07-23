@@ -91,11 +91,7 @@ fn app_config_from_url() -> Result<labello_ui::AppConfig, JsValue> {
     Ok(labello_ui::AppConfig {
         api_base_url: param(&params, "api", &default_api_url),
         application_url: Some(location.href()?),
-        // Tokens must never be accepted through the URL, where browser history,
-        // referrers, and copied links can expose them. Development users enter
-        // the token in the masked connection field instead.
-        dev_token: String::new(),
-        user_id: labello_domain::UserId::from(param(&params, "user", "admin")),
+        user_id: labello_domain::UserId::from("demo_user"),
         dataset_id: labello_domain::DatasetId::from(param(&params, "dataset", "demo")),
         queue_size: queue_size(params.get("queueSize").as_deref()),
     })

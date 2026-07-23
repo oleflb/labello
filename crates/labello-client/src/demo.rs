@@ -9,11 +9,11 @@ use labello_domain::{
 
 use crate::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
-    AssignmentActionRequest, AuthApi, ClientError, CorrectionRequest, CreateDatasetRequest,
-    DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageFile, ImagePreview, IngestJob,
-    IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi,
-    SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    AssignmentActionRequest, AuthApi, AuthOptions, ClientError, CorrectionRequest,
+    CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageFile,
+    ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest,
+    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
+    ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Default)]
@@ -506,6 +506,24 @@ impl PrelabelApi for DemoLabelloApi {
 }
 
 impl AuthApi for DemoLabelloApi {
+    fn auth_options<'a>(&'a self) -> crate::ApiFuture<'a, AuthOptions> {
+        Box::pin(async move {
+            Ok(AuthOptions {
+                github_oauth: true,
+                local_admin_login: false,
+            })
+        })
+    }
+
+    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+        Box::pin(async move {
+            Err(ClientError::Api {
+                status: 401,
+                message: "local administrator login is not available in demo mode".to_string(),
+            })
+        })
+    }
+
     fn github_login_url<'a>(&'a self, _request: OAuthLoginRequest) -> crate::ApiFuture<'a, String> {
         Box::pin(async move { Ok("https://github.com/login/oauth/authorize".to_string()) })
     }
@@ -602,5 +620,27 @@ impl UserApi for DemoLabelloApi {
                 roles: request.roles,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_admin_login_is_not_available() {
+        let api = DemoLabelloApi::new();
+
+        assert_eq!(
+            api.auth_options().await.unwrap(),
+            AuthOptions {
+                github_oauth: true,
+                local_admin_login: false,
+            }
+        );
+        assert!(matches!(
+            api.local_admin_login().await,
+            Err(ClientError::Api { status: 401, .. })
+        ));
     }
 }

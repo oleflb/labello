@@ -31,8 +31,8 @@ console at `DEBUG` and above. Release builds report only warnings and errors.
 
 - `ERROR`: internal API failures, corrupt authentication state, failed or
   panicked background jobs, poisoned-lock recovery.
-- `WARN`: authorization denials, invalid development tokens, skipped corrupt
-  datasets, unreadable images, cache recovery, browser persistence failures.
+- `WARN`: authorization denials, skipped corrupt datasets, unreadable images,
+  cache recovery, browser persistence failures.
 - `INFO`: server lifecycle, HTTP completion, successful authentication,
   dataset administration, ingest, upload, snapshots, and offline sync.
 - `DEBUG`: assignment, annotation, review, correction, adjudication, and
@@ -42,8 +42,8 @@ console at `DEBUG` and above. Release builds report only warnings and errors.
 
 Logs must never contain:
 
-- Cookies, development tokens, OAuth codes or state, access tokens, client
-  secrets, or authorization headers.
+- Cookies, OAuth codes or state, access tokens, client secrets, or authorization
+  headers.
 - Raw URLs, query strings, request or response bodies, multipart content, or
   uploaded file names.
 - Image bytes, annotation geometry, review comments, event payloads, or browser
