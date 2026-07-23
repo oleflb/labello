@@ -2221,15 +2221,8 @@ impl eframe::App for LabelloApp {
             && (self.datasets.admin_config != self.datasets.admin_baseline
                 || self.datasets.users != self.datasets.users_baseline)
         {
-            let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
             egui::Panel::bottom("admin_save_status")
-                .exact_size(if layout != LayoutMode::Compact {
-                    68.0
-                } else if config_dirty {
-                    164.0
-                } else {
-                    68.0
-                })
+                .exact_size(self.admin_status_height(layout))
                 .frame(theme::top_bar_frame())
                 .show(ui, |ui| self.admin_status_bar(ui));
         }

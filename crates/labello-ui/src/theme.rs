@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Margin, Shadow, Stroke, Style, TextStyle, Vec2, Visuals,
+    Button, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId,
+    Frame, Margin, Response, RichText, Shadow, Stroke, Style, TextEdit, TextStyle, Ui, Vec2,
+    Visuals,
     style::{ScrollAnimation, ScrollStyle, WidgetVisuals},
 };
 
@@ -62,6 +63,23 @@ pub const RED: Color32 = DANGER;
 
 const INTER_REGULAR: &str = "Inter Regular";
 const INTER_SEMIBOLD: &str = "Inter SemiBold";
+
+#[derive(Clone, Copy)]
+pub enum Intent {
+    Neutral,
+    Accent,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonKind {
+    Primary,
+    Quiet,
+    Danger,
+}
 
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(font_definitions());
@@ -257,9 +275,253 @@ pub fn card_frame() -> Frame {
         .stroke(Stroke::new(1.0, BORDER_STRONG))
 }
 
+pub fn inset_frame() -> Frame {
+    Frame::new()
+        .fill(SURFACE)
+        .corner_radius(CornerRadius::same(INSET_RADIUS))
+        .inner_margin(Margin::symmetric(SPACE_3 as i8, 6))
+        .stroke(Stroke::new(1.0, BORDER))
+}
+
+pub fn selected_card_frame(selected: bool) -> Frame {
+    if selected {
+        card_frame()
+            .fill(Color32::from_rgb(32, 48, 76))
+            .stroke(Stroke::new(1.5, ACCENT.gamma_multiply(0.75)))
+    } else {
+        card_frame()
+    }
+}
+
+pub fn primary_button(ui: &mut Ui, enabled: bool, button: Button<'_>) -> Response {
+    semantic_button(ui, enabled, button, ButtonKind::Primary, None)
+}
+
+pub fn primary_button_sized(ui: &mut Ui, size: Vec2, button: Button<'_>) -> Response {
+    semantic_button(ui, true, button, ButtonKind::Primary, Some(size))
+}
+
+pub fn quiet_button(ui: &mut Ui, enabled: bool, button: Button<'_>) -> Response {
+    semantic_button(ui, enabled, button, ButtonKind::Quiet, None)
+}
+
+pub fn danger_button(ui: &mut Ui, enabled: bool, button: Button<'_>) -> Response {
+    semantic_button(ui, enabled, button, ButtonKind::Danger, None)
+}
+
+fn semantic_button(
+    ui: &mut Ui,
+    enabled: bool,
+    button: Button<'_>,
+    kind: ButtonKind,
+    size: Option<Vec2>,
+) -> Response {
+    let original_style = ui.style().clone();
+    let (inactive, hovered, active, foreground, border) = match kind {
+        ButtonKind::Primary => (ACCENT, ACCENT_HOVER, ACCENT_PRESSED, APP_BG, ACCENT_PRESSED),
+        ButtonKind::Quiet => (
+            Color32::TRANSPARENT,
+            SURFACE,
+            SURFACE_ELEVATED,
+            TEXT,
+            BORDER,
+        ),
+        ButtonKind::Danger => (
+            DANGER.gamma_multiply(0.16),
+            DANGER.gamma_multiply(0.24),
+            DANGER.gamma_multiply(0.32),
+            DANGER,
+            DANGER.gamma_multiply(0.55),
+        ),
+    };
+    {
+        let widgets = &mut ui.style_mut().visuals.widgets;
+        for (visuals, fill, stroke) in [
+            (&mut widgets.inactive, inactive, Stroke::new(1.0, border)),
+            (&mut widgets.hovered, hovered, Stroke::new(1.0, border)),
+            (&mut widgets.active, active, Stroke::new(1.5, FOCUS_RING)),
+            (&mut widgets.open, hovered, Stroke::new(1.5, FOCUS_RING)),
+        ] {
+            visuals.bg_fill = fill;
+            visuals.weak_bg_fill = fill;
+            visuals.bg_stroke = stroke;
+            visuals.fg_stroke = Stroke::new(1.0, foreground);
+        }
+    }
+    let response = if let Some(size) = size {
+        ui.add_sized(size, button)
+    } else {
+        ui.add_enabled(enabled, button)
+    };
+    ui.set_style(original_style);
+    response
+}
+
+impl Intent {
+    pub fn color(self) -> Color32 {
+        match self {
+            Self::Neutral => TEXT_MUTED,
+            Self::Accent => ACCENT,
+            Self::Info => INFO,
+            Self::Success => SUCCESS,
+            Self::Warning => WARNING,
+            Self::Error => DANGER,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Neutral => "Note",
+            Self::Accent => "Update",
+            Self::Info => "Info",
+            Self::Success => "Success",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+        }
+    }
+}
+
+pub fn badge(ui: &mut Ui, text: &str, intent: Intent) -> Response {
+    badge_inner(ui, text, intent, None)
+}
+
+pub fn bounded_badge(ui: &mut Ui, text: &str, intent: Intent, width: f32) -> Response {
+    badge_inner(ui, text, intent, Some(width))
+}
+
+fn badge_inner(ui: &mut Ui, text: &str, intent: Intent, width: Option<f32>) -> Response {
+    let color = intent.color();
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            36,
+        ))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.55)))
+        .corner_radius(CornerRadius::same(BADGE_RADIUS))
+        .inner_margin(Margin::symmetric(9, SPACE_1 as i8))
+        .show(ui, |ui| {
+            if let Some(width) = width {
+                ui.add_sized(
+                    [width, 24.0],
+                    egui::Label::new(RichText::new(text).color(color).strong()).truncate(),
+                )
+            } else {
+                ui.label(RichText::new(text).color(color).strong())
+            }
+        })
+        .inner
+}
+
+pub fn metric(ui: &mut Ui, label: &str, value: impl Into<String>) {
+    metric_inner(ui, label, value.into(), false);
+}
+
+pub fn compact_metric(ui: &mut Ui, label: &str, value: impl Into<String>) {
+    metric_inner(ui, label, value.into(), true);
+}
+
+fn metric_inner(ui: &mut Ui, label: &str, value: String, compact: bool) {
+    let response = inset_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        if compact {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).color(TEXT_MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(value)
+                            .size(SECTION_HEADING_SIZE)
+                            .strong()
+                            .color(TEXT),
+                    );
+                });
+            });
+        } else {
+            ui.set_min_height(72.0);
+            ui.label(RichText::new(label).color(TEXT_MUTED));
+            ui.label(RichText::new(value).size(METRIC_SIZE).strong().color(TEXT));
+        }
+    });
+    response.response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("Metric {label}"))
+    });
+}
+
+pub fn labeled_text_field(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut String,
+    field_height: f32,
+) -> Response {
+    if ui.available_width() < 520.0 {
+        ui.vertical(|ui| {
+            let label = ui.label(label);
+            ui.add_sized(
+                [ui.available_width(), field_height],
+                TextEdit::singleline(value),
+            )
+            .labelled_by(label.id)
+        })
+        .inner
+    } else {
+        ui.horizontal(|ui| {
+            let label = ui.add_sized([140.0, 44.0], egui::Label::new(label));
+            ui.add_sized(
+                [ui.available_width(), field_height],
+                TextEdit::singleline(value),
+            )
+            .labelled_by(label.id)
+        })
+        .inner
+    }
+}
+
+pub fn inline_message(ui: &mut Ui, intent: Intent, message: impl Into<String>) -> Response {
+    let color = intent.color();
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            20,
+        ))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
+        .corner_radius(CornerRadius::same(CONTROL_RADIUS))
+        .inner_margin(Margin::symmetric(10, SPACE_2 as i8))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(intent.label()).strong().color(color));
+                ui.label(RichText::new(message.into()).color(TEXT))
+            })
+            .inner
+        })
+        .inner
+}
+
+pub fn empty_state(
+    ui: &mut Ui,
+    title: &str,
+    explanation: &str,
+    action: Option<Button<'_>>,
+) -> bool {
+    inset_frame()
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(title).strong().color(TEXT));
+            ui.label(RichText::new(explanation).color(TEXT_MUTED));
+            action.is_some_and(|button| primary_button(ui, true, button).clicked())
+        })
+        .inner
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
 
     #[test]
     fn theme_installs_inter_and_complete_widget_states() {
@@ -288,5 +550,43 @@ mod tests {
         assert_eq!(style.visuals.text_edit_bg_color(), INPUT_BG);
         assert_eq!(style.visuals.disabled_alpha, 0.55);
         assert_eq!(style.spacing.interact_size, Vec2::splat(44.0));
+    }
+
+    #[test]
+    fn components_keep_accessible_labels_states_and_touch_targets() {
+        let mut value = String::new();
+        let harness = Harness::builder()
+            .with_size(Vec2::new(320.0, 400.0))
+            .build_ui(move |ui| {
+                let inactive = ui.visuals().widgets.inactive;
+                primary_button(ui, false, Button::new("Primary action"));
+                assert_eq!(ui.visuals().widgets.inactive, inactive);
+                primary_button_sized(
+                    ui,
+                    Vec2::new(180.0, 44.0),
+                    Button::new("Bounded primary action").truncate(),
+                );
+                quiet_button(ui, true, Button::new("Quiet action"));
+                danger_button(ui, true, Button::new("Danger action"));
+                labeled_text_field(ui, "Field label", &mut value, 44.0);
+                empty_state(
+                    ui,
+                    "Nothing here",
+                    "Create the first item to continue.",
+                    Some(Button::new("Create item")),
+                );
+            });
+
+        let primary =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, "Primary action");
+        let danger = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Danger action");
+        let field = harness.get_by_role_and_label(egui::accesskit::Role::TextInput, "Field label");
+        let bounded =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, "Bounded primary action");
+        assert!(primary.accesskit_node().is_disabled());
+        assert!(!danger.accesskit_node().is_disabled());
+        assert!(field.rect().height() >= 44.0);
+        assert_eq!(bounded.rect().width(), 180.0);
+        assert!(harness.query_by_label("Create item").is_some());
     }
 }

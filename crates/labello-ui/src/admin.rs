@@ -10,7 +10,10 @@ use labello_domain::{
     TutorialContent, UserId,
 };
 
-use crate::{app::LabelloApp, theme};
+use crate::{
+    app::{LabelloApp, LayoutMode},
+    theme,
+};
 
 impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
@@ -77,17 +80,17 @@ impl LabelloApp {
                     .strong(),
                 );
                 if self.datasets.admin_config.is_some()
-                    && ui
-                        .add_enabled(
-                            !config_dirty && !permissions_dirty,
-                            egui::Button::new("Reload"),
-                        )
-                        .on_hover_text(if config_dirty || permissions_dirty {
-                            "Discard or save staged changes before reloading."
-                        } else {
-                            "Reload configuration from the server."
-                        })
-                        .clicked()
+                    && theme::quiet_button(
+                        ui,
+                        !config_dirty && !permissions_dirty,
+                        egui::Button::new("Reload"),
+                    )
+                    .on_hover_text(if config_dirty || permissions_dirty {
+                        "Discard or save staged changes before reloading."
+                    } else {
+                        "Reload configuration from the server."
+                    })
+                    .clicked()
                 {
                     self.request_admin_dataset();
                 }
@@ -95,9 +98,9 @@ impl LabelloApp {
             if self.datasets.admin_config.is_some() {
                 ui.add_space(8.0);
                 ui.columns(3, |columns| {
-                    admin_metric(&mut columns[0], "Users", user_count.to_string());
-                    admin_metric(&mut columns[1], "Indexed images", image_count);
-                    admin_metric(
+                    theme::metric(&mut columns[0], "Users", user_count.to_string());
+                    theme::metric(&mut columns[1], "Indexed images", image_count);
+                    theme::metric(
                         &mut columns[2],
                         "Active workflows",
                         workflow_count.to_string(),
@@ -108,10 +111,17 @@ impl LabelloApp {
         ui.add_space(8.0);
         if let Some(error) = load_error {
             ui.horizontal_wrapped(|ui| {
-                ui.colored_label(theme::RED, format!("Admin load failed: {error}"));
-                if ui
-                    .add_enabled(!self.loading.admin, egui::Button::new("Retry admin load"))
-                    .clicked()
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Error,
+                    format!("Admin load failed: {error}"),
+                );
+                if theme::quiet_button(
+                    ui,
+                    !self.loading.admin,
+                    egui::Button::new("Retry admin load"),
+                )
+                .clicked()
                 {
                     self.request_admin_dataset();
                 }
@@ -123,11 +133,15 @@ impl LabelloApp {
                     ui.spinner();
                     ui.label("Loading admin configuration...");
                 });
-            } else if self.admin_tools.load_error.is_none() {
-                ui.label(RichText::new("Admin config is not loaded.").color(theme::MUTED));
-                if ui.button("Load admin config").clicked() {
-                    self.request_admin_dataset();
-                }
+            } else if self.admin_tools.load_error.is_none()
+                && theme::empty_state(
+                    ui,
+                    "Admin config is not loaded",
+                    "Load the dataset configuration before editing it.",
+                    Some(egui::Button::new("Load admin config")),
+                )
+            {
+                self.request_admin_dataset();
             }
             return;
         }
@@ -160,7 +174,7 @@ impl LabelloApp {
             theme::card_frame().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.heading("Dataset Details");
-                labeled_text(ui, "Dataset name", &mut config.name)
+                theme::labeled_text_field(ui, "Dataset name", &mut config.name, 44.0)
                     .on_hover_text("Human-readable name stored in labello.dataset.toml.");
                 show_issues(ui, &dataset_name_issues(&config.name));
             });
@@ -176,8 +190,8 @@ impl LabelloApp {
                     "images",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
+                    if theme::primary_button(
+                        ui,
                             !config_dirty && !permissions_dirty,
                             egui::Button::new("Pick folder and upload"),
                         )
@@ -225,7 +239,11 @@ impl LabelloApp {
                 ui.set_min_width(ui.available_width());
                 ui.heading("Validation Summary");
                 if issues.is_empty() {
-                    ui.label(RichText::new("Configuration is ready to save.").color(theme::TEAL));
+                    theme::inline_message(
+                        ui,
+                        theme::Intent::Success,
+                        "Configuration is ready to save.",
+                    );
                 } else {
                     ui.label(
                         RichText::new(format!(
@@ -241,8 +259,8 @@ impl LabelloApp {
 
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
+                if theme::primary_button(
+                    ui,
                         !config_dirty && !permissions_dirty,
                         egui::Button::new("Run Ingest"),
                     )
@@ -286,22 +304,22 @@ impl LabelloApp {
                 .strong(),
             );
             if config_dirty {
-                if ui
-                    .add_enabled(
-                        issues.is_empty() && !self.loading.admin,
-                        egui::Button::new("Save Admin Config"),
-                    )
-                    .on_disabled_hover_text("Fix validation errors before saving.")
-                    .clicked()
+                if theme::primary_button(
+                    ui,
+                    issues.is_empty() && !self.loading.admin,
+                    egui::Button::new("Save Admin Config"),
+                )
+                .on_disabled_hover_text("Fix validation errors before saving.")
+                .clicked()
                 {
                     self.request_admin_save();
                 }
-                if ui
-                    .add_enabled(
-                        !self.loading.admin,
-                        egui::Button::new("Discard staged changes"),
-                    )
-                    .clicked()
+                if theme::danger_button(
+                    ui,
+                    !self.loading.admin,
+                    egui::Button::new("Discard staged changes"),
+                )
+                .clicked()
                 {
                     self.datasets.admin_config = self.datasets.admin_baseline.clone();
                     self.clear_admin_draft();
@@ -309,12 +327,34 @@ impl LabelloApp {
                 }
             }
             if !issues.is_empty() {
-                ui.colored_label(theme::RED, format!("{} validation error(s)", issues.len()));
+                ui.label(
+                    RichText::new(format!("{} validation error(s)", issues.len()))
+                        .color(theme::DANGER),
+                );
             }
             if permissions_dirty {
                 ui.label("Save changed permissions in the People section.");
             }
         });
+    }
+
+    pub(crate) fn admin_status_height(&self, layout: LayoutMode) -> f32 {
+        if layout == LayoutMode::Wide {
+            return 68.0;
+        }
+        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
+        let has_issues = self
+            .datasets
+            .admin_config
+            .as_ref()
+            .is_some_and(|config| !config_issues(config, &self.config.user_id).is_empty());
+        (if layout == LayoutMode::Compact && config_dirty {
+            164.0
+        } else {
+            68.0
+        }) + if has_issues { 24.0 } else { 0.0 }
+            + if permissions_dirty { 44.0 } else { 0.0 }
     }
 
     fn people_section(&mut self, ui: &mut egui::Ui) {
@@ -348,59 +388,58 @@ impl LabelloApp {
             let mut save_user = None;
             for user in &mut self.datasets.users {
                 ui.add_space(4.0);
-                egui::Frame::new()
-                    .fill(theme::PANEL_ALT)
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        let compact = ui.available_width() < 760.0;
-                        let save_clicked = if compact {
-                            ui.vertical(|ui| {
-                                user_identity(ui, user);
-                                ui.add_space(4.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    user_role_controls(
-                                        ui,
-                                        user,
-                                        &baseline,
-                                        &current_user,
-                                        admin_count,
-                                        admin_loading,
-                                        saving.as_ref(),
-                                    )
-                                })
-                                .inner
-                            })
-                            .inner
-                        } else {
+                theme::inset_frame().show(ui, |ui| {
+                    let compact = ui.available_width() < 760.0;
+                    let save_clicked = if compact {
+                        ui.vertical(|ui| {
+                            user_identity(ui, user);
+                            ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.set_width(210.0);
-                                    user_identity(ui, user);
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    user_role_controls(
-                                        ui,
-                                        user,
-                                        &baseline,
-                                        &current_user,
-                                        admin_count,
-                                        admin_loading,
-                                        saving.as_ref(),
-                                    )
-                                })
-                                .inner
+                                user_role_controls(
+                                    ui,
+                                    user,
+                                    &baseline,
+                                    &current_user,
+                                    admin_count,
+                                    admin_loading,
+                                    saving.as_ref(),
+                                )
                             })
                             .inner
-                        };
-                        if save_clicked {
-                            save_user = Some(user.account.user_id.clone());
-                        }
-                    });
+                        })
+                        .inner
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(210.0);
+                                user_identity(ui, user);
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                user_role_controls(
+                                    ui,
+                                    user,
+                                    &baseline,
+                                    &current_user,
+                                    admin_count,
+                                    admin_loading,
+                                    saving.as_ref(),
+                                )
+                            })
+                            .inner
+                        })
+                        .inner
+                    };
+                    if save_clicked {
+                        save_user = Some(user.account.user_id.clone());
+                    }
+                });
             }
             if self.datasets.users.is_empty() && !self.loading.admin {
-                ui.label(
-                    RichText::new("No users are in the server directory yet.").color(theme::MUTED),
+                theme::empty_state(
+                    ui,
+                    "No people yet",
+                    "People appear here after they sign in to this server.",
+                    None,
                 );
             }
             if let Some(user_id) = save_user {
@@ -533,16 +572,22 @@ impl LabelloApp {
                                     );
                                 }
                             });
-                        if ui
-                            .add_enabled(!self.loading.images, egui::Button::new("Apply filters"))
-                            .clicked()
+                        if theme::primary_button(
+                            ui,
+                            !self.loading.images,
+                            egui::Button::new("Apply filters"),
+                        )
+                        .clicked()
                         {
                             self.admin_tools.image_query.page = 1;
                             self.request_images();
                         }
-                        if ui
-                            .add_enabled(!self.loading.images, egui::Button::new("Refresh images"))
-                            .clicked()
+                        if theme::quiet_button(
+                            ui,
+                            !self.loading.images,
+                            egui::Button::new("Refresh images"),
+                        )
+                        .clicked()
                         {
                             self.request_images();
                         }
@@ -556,7 +601,7 @@ impl LabelloApp {
                         ui.horizontal_wrapped(show_filters);
                     }
                     if let Some(error) = &self.admin_tools.images_error {
-                        ui.colored_label(theme::RED, error);
+                        theme::inline_message(ui, theme::Intent::Error, error);
                     }
                     if let Some(page) = self.admin_tools.images.clone() {
                         let previous = page.page > 1;
@@ -594,8 +639,11 @@ impl LabelloApp {
                             }
                         });
                         if page.items.is_empty() {
-                            ui.label(
-                                RichText::new("No images match these filters.").color(theme::MUTED),
+                            theme::empty_state(
+                                ui,
+                                "No matching images",
+                                "Change the filters or ingest more images.",
+                                None,
                             );
                         }
                         for item in &page.items {
@@ -615,55 +663,56 @@ impl LabelloApp {
                                 .map(ToString::to_string)
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            egui::Frame::new()
-                                .fill(theme::PANEL_ALT)
-                                .corner_radius(egui::CornerRadius::same(10))
-                                .inner_margin(egui::Margin::symmetric(12, 10))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new(&item.image.file_name).strong());
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} x {} | {}",
-                                                item.image.width,
-                                                item.image.height,
-                                                human_bytes(item.image.byte_size)
-                                            ))
-                                            .color(theme::BLUE),
-                                        );
-                                    });
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&item.image.canonical_path)
-                                                .color(theme::MUTED),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&item.image.canonical_path);
-                                    let class_summary = if classes.is_empty() {
-                                        "No classes".to_string()
-                                    } else {
-                                        format!("Classes: {classes}")
-                                    };
+                            theme::inset_frame().show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(&item.image.file_name).strong());
                                     ui.label(
                                         RichText::new(format!(
-                                            "{} | {class_summary}",
-                                            task_status_summary(&statuses)
+                                            "{} x {} | {}",
+                                            item.image.width,
+                                            item.image.height,
+                                            human_bytes(item.image.byte_size)
                                         ))
-                                        .color(theme::MUTED),
-                                    )
-                                    .on_hover_text(
-                                        if status_details.is_empty() {
-                                            "No workflow status".to_string()
-                                        } else {
-                                            status_details
-                                        },
+                                        .color(theme::BLUE),
                                     );
                                 });
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&item.image.canonical_path)
+                                            .color(theme::MUTED),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&item.image.canonical_path);
+                                let class_summary = if classes.is_empty() {
+                                    "No classes".to_string()
+                                } else {
+                                    format!("Classes: {classes}")
+                                };
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} | {class_summary}",
+                                        task_status_summary(&statuses)
+                                    ))
+                                    .color(theme::MUTED),
+                                )
+                                .on_hover_text(
+                                    if status_details.is_empty() {
+                                        "No workflow status".to_string()
+                                    } else {
+                                        status_details
+                                    },
+                                );
+                            });
                         }
                     } else if !self.loading.images && self.admin_tools.images_error.is_none() {
-                        ui.label(RichText::new("No image results loaded.").color(theme::MUTED));
+                        theme::empty_state(
+                            ui,
+                            "No image results",
+                            "Apply filters or refresh to load indexed images.",
+                            None,
+                        );
                     }
                 });
         });
@@ -680,8 +729,8 @@ impl LabelloApp {
                         .color(theme::MUTED),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
+                    if theme::primary_button(
+                        ui,
                             !self.loading.creating_snapshot,
                             egui::Button::new("Create snapshot"),
                         )
@@ -689,8 +738,8 @@ impl LabelloApp {
                     {
                         self.request_snapshot_create();
                     }
-                    if ui
-                        .add_enabled(
+                    if theme::quiet_button(
+                        ui,
                             !self.loading.snapshots,
                             egui::Button::new("Refresh snapshots"),
                         )
@@ -703,13 +752,18 @@ impl LabelloApp {
                     }
                 });
                 if let Some(error) = &self.admin_tools.snapshots_error {
-                    ui.colored_label(theme::RED, error);
+                    theme::inline_message(ui, theme::Intent::Error, error);
                 }
                 if self.admin_tools.snapshots.is_empty()
                     && self.admin_tools.snapshots_loaded
                     && !self.loading.snapshots
                 {
-                    ui.label(RichText::new("No snapshots have been created.").color(theme::MUTED));
+                    theme::empty_state(
+                        ui,
+                        "No snapshots yet",
+                        "Create a snapshot to preserve the current dataset state.",
+                        None,
+                    );
                 }
                 let snapshots = self.admin_tools.snapshots.clone();
                 for snapshot in snapshots {
@@ -752,8 +806,7 @@ impl LabelloApp {
             if self.loading.stats {
                 ui.spinner();
             }
-            if ui
-                .add_enabled(!self.loading.stats, egui::Button::new("Refresh now"))
+            if theme::quiet_button(ui, !self.loading.stats, egui::Button::new("Refresh now"))
                 .on_hover_text("Refresh statistics immediately. They also refresh automatically.")
                 .clicked()
             {
@@ -761,7 +814,11 @@ impl LabelloApp {
             }
         });
         if let Some(error) = &self.datasets.stats_error {
-            ui.colored_label(theme::RED, format!("Statistics refresh failed: {error}"));
+            theme::inline_message(
+                ui,
+                theme::Intent::Error,
+                format!("Statistics refresh failed: {error}"),
+            );
         }
         if initial_loading {
             theme::card_frame().show(ui, |ui| {
@@ -816,7 +873,7 @@ impl LabelloApp {
         for row in metrics.chunks(column_count) {
             ui.columns(column_count, |columns| {
                 for (column, (label, value)) in columns.iter_mut().zip(row) {
-                    metric(column, label, value.to_string());
+                    theme::metric(column, label, value.to_string());
                 }
             });
         }
@@ -825,7 +882,12 @@ impl LabelloApp {
             ui.heading("Per Task");
             let rows = &self.datasets.stats.per_task;
             if rows.is_empty() {
-                ui.label(RichText::new("No enabled tasks.").color(theme::MUTED));
+                theme::empty_state(
+                    ui,
+                    "No enabled tasks",
+                    "Enable a labeling workflow to collect task statistics.",
+                    None,
+                );
             } else if compact {
                 for (task_id, stats) in rows {
                     theme::card_frame().show(ui, |ui| {
@@ -895,7 +957,12 @@ impl LabelloApp {
             ui.heading("Per Class");
             let rows = &self.datasets.stats.per_class;
             if rows.is_empty() {
-                ui.label(RichText::new("No classes configured.").color(theme::MUTED));
+                theme::empty_state(
+                    ui,
+                    "No classes configured",
+                    "Add a class to collect class-level statistics.",
+                    None,
+                );
             } else if compact {
                 for (class_id, stats) in rows {
                     theme::card_frame().show(ui, |ui| {
@@ -938,7 +1005,12 @@ impl LabelloApp {
         theme::card_frame().show(ui, |ui| {
             ui.heading("Throughput");
             if self.datasets.stats.throughput.is_empty() {
-                ui.label(RichText::new("No completed activity yet.").color(theme::MUTED));
+                theme::empty_state(
+                    ui,
+                    "No completed activity",
+                    "Throughput appears after annotations or reviews are completed.",
+                    None,
+                );
             }
             for point in self.datasets.stats.throughput.iter().rev().take(14).rev() {
                 ui.label(format!(
@@ -1003,7 +1075,8 @@ fn user_role_controls(
         .find(|existing| existing.account.user_id == user.account.user_id)
         .is_none_or(|existing| existing.roles != user.roles);
     let this_saving = saving == Some(&user.account.user_id);
-    ui.add_enabled(
+    theme::primary_button(
+        ui,
         dirty && saving.is_none() && !admin_loading,
         egui::Button::new(if this_saving {
             "Saving..."
@@ -1012,25 +1085,6 @@ fn user_role_controls(
         }),
     )
     .clicked()
-}
-
-fn admin_metric(ui: &mut egui::Ui, label: &str, value: String) {
-    let response = egui::Frame::new()
-        .fill(theme::PANEL_ALT)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(10, 8))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(label).color(theme::MUTED));
-            ui.heading(value);
-        });
-    response.response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Other,
-            true,
-            format!("Admin metric {label}"),
-        )
-    });
 }
 
 fn task_statuses() -> [TaskStatus; 6] {
@@ -1314,16 +1368,12 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [Tas
         let wide = ui.available_width() >= 820.0;
         for (index, label) in labels.iter_mut().enumerate() {
             ui.add_space(4.0);
-            egui::Frame::new()
-                .fill(theme::PANEL_ALT)
-                .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    if edit_class_card(ui, index, label, tasks, wide) {
-                        remove = Some(index);
-                    }
-                });
+            theme::inset_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if edit_class_card(ui, index, label, tasks, wide) {
+                    remove = Some(index);
+                }
+            });
         }
         if let Some(index) = remove {
             let removed = labels.remove(index).class_id;
@@ -1415,16 +1465,17 @@ fn edit_class_card(
         });
         (id_changed, description_changed)
     } else {
-        labeled_text(ui, "Name", &mut label.name)
+        theme::labeled_text_field(ui, "Name", &mut label.name, 44.0)
             .on_hover_text("Display name shown to annotators.");
-        let id_changed = labeled_text(ui, "ID", &mut class_id)
+        let id_changed = theme::labeled_text_field(ui, "ID", &mut class_id, 44.0)
             .on_hover_text("Stable class id used by annotations and linked workflows.")
             .changed();
-        labeled_text(ui, "Color", &mut label.color)
+        theme::labeled_text_field(ui, "Color", &mut label.color, 44.0)
             .on_hover_text("Class color as a hex value, for example #5eead4.");
-        let description_changed = labeled_text(ui, "Description", &mut description)
-            .on_hover_text("Optional guidance about what belongs in this class.")
-            .changed();
+        let description_changed =
+            theme::labeled_text_field(ui, "Description", &mut description, 44.0)
+                .on_hover_text("Optional guidance about what belongs in this class.")
+                .changed();
         (id_changed, description_changed)
     };
 
@@ -1479,10 +1530,7 @@ fn edit_tasks(
                 if task.enabled { "Enabled" } else { "Disabled" }
             );
             ui.add_space(4.0);
-            egui::Frame::new()
-                .fill(theme::PANEL_ALT)
-                .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::symmetric(12, 6))
+            theme::inset_frame()
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     egui::CollapsingHeader::new(summary)
@@ -1554,13 +1602,14 @@ fn edit_workflow_basics(
 ) -> bool {
     ui.label(RichText::new("Workflow").color(theme::BLUE).strong());
     let mut task_id = task.task_id.to_string();
-    if labeled_text(ui, "Task ID", &mut task_id)
+    if theme::labeled_text_field(ui, "Task ID", &mut task_id, 44.0)
         .on_hover_text("Stable task id used by assignments and event logs.")
         .changed()
     {
         task.task_id = TaskId::from(task_id);
     }
-    labeled_text(ui, "Name", &mut task.name).on_hover_text("Task name shown in the work panel.");
+    theme::labeled_text_field(ui, "Name", &mut task.name, 44.0)
+        .on_hover_text("Task name shown in the work panel.");
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut task.enabled, "Enabled");
         ui.label("Annotation type");
@@ -1644,7 +1693,7 @@ fn edit_workflow_instructions(ui: &mut egui::Ui, task: &mut TaskDefinition) {
             .color(theme::BLUE)
             .strong(),
     );
-    labeled_text(ui, "Title", &mut task.instructions.title)
+    theme::labeled_text_field(ui, "Title", &mut task.instructions.title, 44.0)
         .on_hover_text("Tutorial/instruction title.");
     ui.label("Tutorial instructions");
     ui.add(
@@ -2465,45 +2514,16 @@ fn is_hex_color(value: &str) -> bool {
             .all(|character| character.is_ascii_hexdigit())
 }
 
-fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) -> egui::Response {
-    if ui.available_width() < 400.0 {
-        ui.vertical(|ui| {
-            let label = ui.label(label);
-            ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
-                .labelled_by(label.id)
-        })
-        .inner
-    } else {
-        ui.horizontal(|ui| {
-            let label = ui.add_sized([110.0, 44.0], egui::Label::new(label));
-            ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
-                .labelled_by(label.id)
-        })
-        .inner
-    }
-}
-
 fn destructive_button(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.button(format!("Double-click {label}"))
+    theme::danger_button(ui, true, egui::Button::new(format!("Double-click {label}")))
         .on_hover_text("Double-click to confirm this removal.")
         .double_clicked()
 }
 
 fn show_issues(ui: &mut egui::Ui, issues: &[String]) {
     for issue in issues {
-        ui.label(RichText::new(format!("- {issue}")).color(theme::RED));
+        ui.label(RichText::new(format!("- {issue}")).color(theme::DANGER));
     }
-}
-
-fn metric(ui: &mut egui::Ui, label: &str, value: String) {
-    let response = theme::card_frame().show(ui, |ui| {
-        ui.set_min_height(72.0);
-        ui.label(RichText::new(label).color(theme::MUTED));
-        ui.heading(value);
-    });
-    response.response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("Metric {label}"))
-    });
 }
 
 #[allow(clippy::too_many_arguments)]

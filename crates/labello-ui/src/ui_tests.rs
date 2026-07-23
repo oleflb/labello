@@ -2274,7 +2274,7 @@ fn admin_geometry_keeps_save_and_discard_visible() {
         .admin_config
         .as_mut()
         .unwrap()
-        .name = "Unsaved responsive admin name".to_string();
+        .name = String::new();
 
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
@@ -2289,6 +2289,7 @@ fn admin_geometry_keeps_save_and_discard_visible() {
                 height,
             );
         }
+        assert_label_inside(&harness, "1 validation error(s)", width, height);
         assert_visible_controls_clamped(&harness, width, height);
     }
 }
@@ -2388,6 +2389,34 @@ fn settings_and_transition_modals_are_viewport_constrained() {
         harness.step();
         assert_label_inside(&harness, "Keyboard shortcuts", width, height);
         assert_visible_controls_clamped(&harness, width, height);
+        if width == 320.0 {
+            let draft = harness
+                .state_mut()
+                .shortcut_settings
+                .draft
+                .as_mut()
+                .expect("settings draft");
+            let chord = draft.bindings[&labello_domain::UserAction::UndoEdit].clone();
+            draft
+                .bindings
+                .insert(labello_domain::UserAction::RedoEdit, chord);
+            harness.step();
+            assert!(
+                harness
+                    .query_by_label("Resolve 1 shortcut conflict(s) before saving.")
+                    .is_some()
+            );
+            for label in ["Restore all defaults", "Cancel", "Save changes"] {
+                assert_control_inside(
+                    &harness,
+                    label,
+                    egui::accesskit::Role::Button,
+                    width,
+                    height,
+                );
+            }
+            assert_visible_controls_clamped(&harness, width, height);
+        }
 
         harness.state_mut().show_settings = false;
         harness.state_mut().pending_transition =
@@ -2405,6 +2434,14 @@ fn settings_and_transition_modals_are_viewport_constrained() {
         assert_visible_controls_clamped(&harness, width, height);
         harness.state_mut().pending_transition = None;
     }
+
+    harness.set_size(egui::vec2(600.0, 568.0));
+    harness.state_mut().show_settings = true;
+    harness.step();
+    for label in ["Restore all defaults", "Cancel", "Save changes"] {
+        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 600.0, 568.0);
+    }
+    assert_visible_controls_clamped(&harness, 600.0, 568.0);
 }
 
 #[test]
