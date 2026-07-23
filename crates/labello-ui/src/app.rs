@@ -705,6 +705,7 @@ pub struct WorkState {
     pub(crate) persisted_annotations: BTreeSet<AnnotationId>,
     pub(crate) modified_annotations: BTreeSet<AnnotationId>,
     pub(crate) accepted_prelabels: Vec<String>,
+    pub(crate) selected_prelabel: Option<String>,
     pub(crate) selected_annotation: Option<AnnotationId>,
     pub(crate) active_skeleton: Option<AnnotationId>,
     pub(crate) skeleton_keypoint_index: usize,
@@ -724,12 +725,22 @@ pub struct WorkState {
     pub(crate) pending_transition: Option<PendingTransition>,
     pub(crate) drawer: Option<Drawer>,
     pub(crate) show_settings: bool,
+    pub(crate) shortcut_settings: ShortcutSettingsState,
     pub(crate) next_operation_id: u64,
     pub(crate) active_load_id: Option<u64>,
     pub(crate) active_prefetch_id: Option<u64>,
     pub(crate) active_operation_id: Option<u64>,
     pub(crate) one_shot_excluded_image_id: Option<ImageId>,
     pub(crate) next_demo_image_index: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct ShortcutSettingsState {
+    pub(crate) draft: Option<KeybindingSet>,
+    pub(crate) baseline: Option<KeybindingSet>,
+    pub(crate) search: String,
+    pub(crate) recording: Option<labello_domain::UserAction>,
+    pub(crate) confirm_discard: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -856,6 +867,7 @@ impl LabelloApp {
             persisted_annotations: BTreeSet::new(),
             modified_annotations: BTreeSet::new(),
             accepted_prelabels: Vec::new(),
+            selected_prelabel: None,
             selected_annotation: None,
             active_skeleton: None,
             skeleton_keypoint_index: 0,
@@ -875,6 +887,7 @@ impl LabelloApp {
             pending_transition: None,
             drawer: None,
             show_settings: false,
+            shortcut_settings: ShortcutSettingsState::default(),
             next_operation_id: 0,
             active_load_id: None,
             active_prefetch_id: None,
@@ -1238,6 +1251,7 @@ impl LabelloApp {
         self.persisted_annotations.clear();
         self.modified_annotations.clear();
         self.accepted_prelabels.clear();
+        self.selected_prelabel = None;
         self.selected_annotation = None;
         if self.runtime.api.is_some() {
             self.request_next_image();
@@ -1817,7 +1831,227 @@ impl LabelloApp {
         }
     }
 
+    pub(crate) fn open_shortcut_settings(&mut self) {
+        let mut draft = self.keybindings.clone();
+        draft.normalize();
+        self.shortcut_settings.baseline = Some(draft.clone());
+        self.shortcut_settings.draft = Some(draft);
+        self.shortcut_settings.recording = None;
+        self.shortcut_settings.confirm_discard = false;
+        self.show_settings = true;
+    }
+
+    pub(crate) fn shortcut_text(
+        &self,
+        ctx: &egui::Context,
+        action: labello_domain::UserAction,
+    ) -> String {
+        self.keybindings
+            .bindings
+            .get(&action)
+            .and_then(keyboard_shortcut)
+            .map(|shortcut| ctx.format_shortcut(&shortcut))
+            .unwrap_or_default()
+    }
+
+    fn cycle_workflow(&mut self, direction: isize) {
+        let choices = self.workflow_choices();
+        if choices.len() < 2 {
+            return;
+        }
+        let current = choices
+            .iter()
+            .position(|choice| Some(&choice.task_id) == self.selected_task_id.as_ref())
+            .unwrap_or(0);
+        let next = (current as isize + direction).rem_euclid(choices.len() as isize) as usize;
+        self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
+    }
+
+    fn cycle_object(&mut self, direction: isize) {
+        let objects = self
+            .annotations
+            .iter()
+            .filter(|annotation| {
+                !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
+            })
+            .map(|annotation| annotation.annotation_id.clone())
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            self.selected_annotation = None;
+            return;
+        }
+        let current = self
+            .selected_annotation
+            .as_ref()
+            .and_then(|selected| objects.iter().position(|id| id == selected));
+        let next = current.map_or_else(
+            || if direction < 0 { objects.len() - 1 } else { 0 },
+            |current| (current as isize + direction).rem_euclid(objects.len() as isize) as usize,
+        );
+        self.selected_annotation = Some(objects[next].clone());
+    }
+
+    fn cycle_prelabel(&mut self, direction: isize) {
+        let prelabels = self.visible_prelabels();
+        if prelabels.is_empty() {
+            self.selected_prelabel = None;
+            return;
+        }
+        let current = self.selected_prelabel.as_ref().and_then(|selected| {
+            prelabels
+                .iter()
+                .position(|suggestion| &suggestion.suggestion_id == selected)
+        });
+        let next = current.map_or_else(
+            || {
+                if direction < 0 {
+                    prelabels.len() - 1
+                } else {
+                    0
+                }
+            },
+            |current| (current as isize + direction).rem_euclid(prelabels.len() as isize) as usize,
+        );
+        self.selected_prelabel = Some(prelabels[next].suggestion_id.clone());
+    }
+
+    fn active_prelabel(&self) -> Option<labello_domain::PrelabelSuggestion> {
+        let prelabels = self.visible_prelabels();
+        self.selected_prelabel
+            .as_ref()
+            .and_then(|selected| {
+                prelabels
+                    .iter()
+                    .find(|suggestion| &suggestion.suggestion_id == selected)
+            })
+            .cloned()
+            .or_else(|| prelabels.into_iter().next())
+    }
+
+    pub(crate) fn discard_prelabel(&mut self, suggestion_id: String) {
+        if !self.accepted_prelabels.contains(&suggestion_id) {
+            self.accepted_prelabels.push(suggestion_id);
+        }
+        self.selected_prelabel = self
+            .visible_prelabels()
+            .first()
+            .map(|suggestion| suggestion.suggestion_id.clone());
+    }
+
+    pub(crate) fn trigger_user_action(&mut self, action: labello_domain::UserAction) {
+        use labello_domain::UserAction;
+        let ready = (self.assignment.is_some() || self.runtime.api.is_none())
+            && !self.loading.saving
+            && !self.loading.image
+            && self.pending_transition.is_none()
+            && !self.canvas.is_dragging();
+        match action {
+            UserAction::NextImage if self.view == AppView::Annotate && ready => {
+                self.submit_and_advance()
+            }
+            UserAction::UndoEdit if self.view == AppView::Annotate && ready => self.undo(),
+            UserAction::RedoEdit if self.view == AppView::Annotate && ready => self.redo(),
+            UserAction::SaveAnnotations if self.view == AppView::Annotate && ready => {
+                self.autosave()
+            }
+            UserAction::SkipAssignment if self.work_view() && ready => self.skip_assignment(),
+            UserAction::DeleteAnnotation if self.view == AppView::Annotate && ready => {
+                self.delete_selected()
+            }
+            UserAction::OpenTutorial => self.show_tutorial = !self.show_tutorial,
+            UserAction::ToggleWorkflowPanel => {
+                self.drawer = (self.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow)
+            }
+            UserAction::ToggleInspectorPanel => {
+                self.drawer = (self.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector)
+            }
+            UserAction::OpenSettings => self.open_shortcut_settings(),
+            UserAction::SelectPreviousWorkflow if self.view == AppView::Annotate && ready => {
+                self.cycle_workflow(-1)
+            }
+            UserAction::SelectNextWorkflow if self.view == AppView::Annotate && ready => {
+                self.cycle_workflow(1)
+            }
+            UserAction::SelectPreviousObject if self.view == AppView::Annotate && ready => {
+                self.cycle_object(-1)
+            }
+            UserAction::SelectNextObject if self.view == AppView::Annotate && ready => {
+                self.cycle_object(1)
+            }
+            UserAction::SelectPreviousPrelabel if self.view == AppView::Annotate && ready => {
+                self.cycle_prelabel(-1)
+            }
+            UserAction::SelectNextPrelabel if self.view == AppView::Annotate && ready => {
+                self.cycle_prelabel(1)
+            }
+            UserAction::AcceptPrelabel if self.view == AppView::Annotate && ready => {
+                if let Some(suggestion) = self.active_prelabel() {
+                    self.accept_prelabel(&suggestion);
+                    self.selected_prelabel = self
+                        .visible_prelabels()
+                        .first()
+                        .map(|suggestion| suggestion.suggestion_id.clone());
+                }
+            }
+            UserAction::DiscardPrelabel if self.view == AppView::Annotate && ready => {
+                if let Some(suggestion) = self.active_prelabel() {
+                    self.discard_prelabel(suggestion.suggestion_id);
+                }
+            }
+            UserAction::ToggleKeypointHidden if self.view == AppView::Annotate && ready => {
+                if self
+                    .selected_task()
+                    .and_then(|task| task.skeleton.as_ref())
+                    .is_some_and(|spec| spec.allow_hidden)
+                {
+                    self.next_keypoint_hidden = !self.next_keypoint_hidden;
+                }
+            }
+            UserAction::MarkKeypointAbsent if self.view == AppView::Annotate && ready => {
+                if self.active_skeleton.is_some()
+                    && self
+                        .selected_task()
+                        .and_then(|task| task.skeleton.as_ref())
+                        .is_some_and(|spec| spec.allow_absent)
+                {
+                    self.skip_keypoint();
+                }
+            }
+            UserAction::RetryImageLoad
+                if self.view == AppView::Annotate
+                    && self.current.is_none()
+                    && !self.loading.image =>
+            {
+                self.retry_assignment_load()
+            }
+            UserAction::TogglePanMode if self.view == AppView::Annotate => {
+                self.canvas.toggle_pan_mode()
+            }
+            UserAction::ZoomIn if self.view == AppView::Annotate => self.canvas.zoom_in(),
+            UserAction::ZoomOut if self.view == AppView::Annotate => self.canvas.zoom_out(),
+            UserAction::FitImage if self.view == AppView::Annotate => self.canvas.fit_view(),
+            UserAction::AcceptReviewObject if self.view == AppView::Review => {
+                if self.correction_draft.is_none() {
+                    self.request_review(labello_domain::ReviewDecision::Approved);
+                }
+            }
+            UserAction::RejectReviewObject if self.view == AppView::Review => {
+                if self.correction_draft.is_none() {
+                    self.request_review(labello_domain::ReviewDecision::Rejected);
+                }
+            }
+            UserAction::PreviousImage
+            | UserAction::SelectBoundingBoxTool
+            | UserAction::SelectKeypointTool
+            | UserAction::ToggleOfflineMode => {}
+            _ => {}
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.canvas.exit_pan_mode();
+        }
         if !self.work_view()
             || ctx.text_edit_focused()
             || self.loading.saving
@@ -1828,77 +2062,46 @@ impl LabelloApp {
         {
             return;
         }
-        use labello_domain::UserAction;
-        let undo = ctx.input_mut(|input| {
-            input.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::Z,
-            )) || input.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL,
-                egui::Key::Z,
-            ))
-        });
-        let redo = ctx.input_mut(|input| {
-            input.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::Z,
-            )) || input.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL,
-                egui::Key::Y,
-            ))
-        });
-        if undo {
-            if self.correction_draft.is_some() {
-                self.undo_correction();
-            } else {
-                self.undo();
-            }
+        if self.view == AppView::Review
+            && self.correction_draft.is_some()
+            && ctx.input_mut(|input| {
+                input.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::Z,
+                )) || input.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::Z,
+                ))
+            })
+        {
+            self.undo_correction();
         }
-        if redo && self.correction_draft.is_none() {
-            self.redo();
-        }
-        let pressed = self
+        let mut bindings = self
             .keybindings
             .bindings
             .iter()
-            .filter_map(|(action, chord)| shortcut_pressed(ctx, chord).then_some(action.clone()))
+            .filter(|(action, _)| match action.context() {
+                labello_domain::ActionContext::WorkWorkspace => self.work_view(),
+                labello_domain::ActionContext::AnnotateWorkspace => self.view == AppView::Annotate,
+                labello_domain::ActionContext::AnnotateImage => {
+                    self.view == AppView::Annotate && self.current.is_some()
+                }
+                labello_domain::ActionContext::AnnotateNoImage => {
+                    self.view == AppView::Annotate && self.current.is_none()
+                }
+                labello_domain::ActionContext::Review => self.view == AppView::Review,
+                labello_domain::ActionContext::Legacy => false,
+            })
+            .map(|(action, chord)| (*action, chord.clone()))
             .collect::<Vec<_>>();
-        for action in pressed {
-            match action {
-                UserAction::NextImage if self.view == AppView::Annotate => {
-                    self.submit_and_advance()
-                }
-                UserAction::SaveAnnotations if self.view == AppView::Annotate => self.autosave(),
-                UserAction::DeleteAnnotation if self.view == AppView::Annotate => {
-                    self.delete_selected()
-                }
-                UserAction::AcceptReviewObject if self.view == AppView::Review => {
-                    if self.correction_draft.is_none() {
-                        self.request_review(labello_domain::ReviewDecision::Approved)
-                    }
-                }
-                UserAction::RejectReviewObject if self.view == AppView::Review => {
-                    if self.correction_draft.is_none() {
-                        self.request_review(labello_domain::ReviewDecision::Rejected)
-                    }
-                }
-                UserAction::OpenTutorial => self.show_tutorial = !self.show_tutorial,
-                UserAction::SelectBoundingBoxTool
-                    if self.selected_task().is_some_and(|task| {
-                        task.annotation_type == AnnotationType::BoundingBox
-                    }) =>
-                {
-                    self.tool = Tool::BoundingBox;
-                }
-                UserAction::SelectKeypointTool
-                    if self
-                        .selected_task()
-                        .is_some_and(|task| task.annotation_type == AnnotationType::Skeleton) =>
-                {
-                    self.tool = Tool::Keypoints;
-                }
-                UserAction::PreviousImage | UserAction::ToggleOfflineMode => {}
-                _ => {}
+        bindings.sort_by_key(|(_, chord)| {
+            std::cmp::Reverse(
+                chord.shift as u8 + chord.alt as u8 + (chord.ctrl || chord.command) as u8,
+            )
+        });
+        for (action, chord) in bindings {
+            if consume_keyboard_shortcut(ctx, &chord) {
+                self.trigger_user_action(action);
             }
         }
     }
@@ -1913,35 +2116,33 @@ fn push_history(stack: &mut Vec<EditSnapshot>, snapshot: EditSnapshot) {
     }
 }
 
-fn shortcut_pressed(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> bool {
-    let Some(key) = parse_key(&chord.key) else {
+fn keyboard_shortcut(chord: &labello_domain::KeyChord) -> Option<egui::KeyboardShortcut> {
+    let key = parse_key(&chord.key)?;
+    let mut modifiers = egui::Modifiers::NONE;
+    modifiers.command = chord.ctrl || chord.command;
+    modifiers.shift = chord.shift;
+    modifiers.alt = chord.alt;
+    Some(egui::KeyboardShortcut::new(modifiers, key))
+}
+
+fn consume_keyboard_shortcut(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> bool {
+    let Some(shortcut) = keyboard_shortcut(chord) else {
         return false;
     };
-    ctx.input(|input| {
-        input.key_pressed(key)
-            && input.modifiers.ctrl == chord.ctrl
-            && input.modifiers.shift == chord.shift
-            && input.modifiers.alt == chord.alt
-            && input.modifiers.command == chord.command
-    })
+    if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+        return true;
+    }
+    if chord.ctrl || chord.command {
+        let mut ctrl_shortcut = shortcut;
+        ctrl_shortcut.modifiers.command = false;
+        ctrl_shortcut.modifiers.ctrl = true;
+        return ctx.input_mut(|input| input.consume_shortcut(&ctrl_shortcut));
+    }
+    false
 }
 
 pub(crate) fn parse_key(key: &str) -> Option<egui::Key> {
-    use egui::Key;
-    Some(match key {
-        "ArrowRight" => Key::ArrowRight,
-        "ArrowLeft" => Key::ArrowLeft,
-        "Delete" => Key::Delete,
-        "?" => Key::Questionmark,
-        "A" => Key::A,
-        "B" => Key::B,
-        "K" => Key::K,
-        "N" => Key::N,
-        "O" => Key::O,
-        "S" => Key::S,
-        "Y" => Key::Y,
-        _ => return None,
-    })
+    egui::Key::from_name(key)
 }
 
 pub(crate) fn tool_for_annotation_type(annotation_type: &AnnotationType) -> Tool {

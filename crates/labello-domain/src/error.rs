@@ -47,6 +47,9 @@ pub enum DomainError {
     #[error("keybinding conflict for {chord}: {actions:?}")]
     KeybindingConflict { chord: String, actions: Vec<String> },
 
+    #[error("invalid keybindings: {0}")]
+    InvalidKeybindings(String),
+
     #[error("offline sync conflict for image {image_id}: {reason}")]
     SyncConflict { image_id: String, reason: String },
 }

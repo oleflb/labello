@@ -39,6 +39,7 @@ impl LabelloApp {
         self.persisted_annotations.clear();
         self.modified_annotations.clear();
         self.accepted_prelabels.clear();
+        self.selected_prelabel = None;
         self.selected_annotation = None;
         self.active_skeleton = None;
         self.skeleton_keypoint_index = 0;

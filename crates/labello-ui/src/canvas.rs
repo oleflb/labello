@@ -99,6 +99,8 @@ pub struct CanvasState {
     zoom: f32,
     pan: Vec2,
     space_pan: bool,
+    pan_mode: bool,
+    primary_pan: bool,
     last_canvas_click: Option<(f64, Pos2)>,
     review_target: ReviewViewTarget,
     pending_review_view: Option<Option<Rect>>,
@@ -113,6 +115,8 @@ impl Default for CanvasState {
             zoom: MIN_ZOOM,
             pan: Vec2::ZERO,
             space_pan: false,
+            pan_mode: false,
+            primary_pan: false,
             last_canvas_click: None,
             review_target: ReviewViewTarget::Disabled,
             pending_review_view: None,
@@ -145,6 +149,25 @@ impl CanvasState {
         self.zoom
     }
 
+    pub fn pan_mode(&self) -> bool {
+        self.pan_mode
+    }
+
+    pub fn can_pan(&self) -> bool {
+        self.zoom > MIN_ZOOM
+    }
+
+    pub fn toggle_pan_mode(&mut self) {
+        self.cancel_drag();
+        self.primary_pan = false;
+        self.pan_mode = self.zoom > MIN_ZOOM && !self.pan_mode;
+    }
+
+    pub fn exit_pan_mode(&mut self) {
+        self.primary_pan = false;
+        self.pan_mode = false;
+    }
+
     pub(crate) fn stored_transform(&self) -> crate::persistence::StoredCanvasTransform {
         crate::persistence::StoredCanvasTransform {
             zoom: self.zoom,
@@ -160,6 +183,8 @@ impl CanvasState {
     ) {
         let transform = transform.clamped();
         self.cancel_drag();
+        self.pan_mode = false;
+        self.primary_pan = false;
         self.zoom = transform.zoom;
         self.pan = vec2(transform.pan_x, transform.pan_y);
     }
@@ -180,6 +205,8 @@ impl CanvasState {
         self.pan *= self.zoom / old_zoom;
         if self.zoom == MIN_ZOOM {
             self.pan = Vec2::ZERO;
+            self.pan_mode = false;
+            self.primary_pan = false;
         }
     }
 
@@ -188,6 +215,8 @@ impl CanvasState {
         self.cancel_drag();
         self.zoom = MIN_ZOOM;
         self.pan = Vec2::ZERO;
+        self.pan_mode = false;
+        self.primary_pan = false;
     }
 
     /// Focus a review object once when it becomes active, or fit the full image
@@ -218,6 +247,8 @@ impl CanvasState {
         self.zoom = finite_or(self.zoom, MIN_ZOOM).clamp(MIN_ZOOM, MAX_ZOOM);
         if self.zoom == MIN_ZOOM {
             self.pan = Vec2::ZERO;
+            self.pan_mode = false;
+            self.primary_pan = false;
         }
         self.pan = clamp_pan(viewport, fitted_image, self.zoom, self.pan);
     }
@@ -369,6 +400,15 @@ pub fn show_canvas_configured(
         ui.id().with("annotation_canvas"),
         Sense::click_and_drag(),
     );
+    let response = if state.pan_mode {
+        response.on_hover_cursor(if ui.input(|input| input.pointer.primary_down()) {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        })
+    } else {
+        response
+    };
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Annotation canvas"));
     if !valid_rect(interaction_rect) {
         state.cancel_drag();
@@ -781,27 +821,33 @@ fn handle_view_gestures(
         return true;
     }
 
-    let (space_down, primary_down, primary_pressed, primary_released, pointer_delta) =
-        ui.input(|input| {
-            (
-                input.key_down(Key::Space),
-                input.pointer.primary_down(),
-                input.pointer.primary_pressed(),
-                input.pointer.primary_released(),
-                input.pointer.delta(),
-            )
-        });
-    if space_down && primary_pressed && response.is_pointer_button_down_on() {
-        state.space_pan = true;
+    if response.double_clicked() {
+        state.fit_view();
+        state.cancel_drag();
+        return true;
     }
-    if state.space_pan {
+
+    let (space_down, primary_down, primary_pressed, pointer_delta) = ui.input(|input| {
+        (
+            input.key_down(Key::Space),
+            input.pointer.primary_down(),
+            input.pointer.primary_pressed(),
+            input.pointer.delta(),
+        )
+    });
+    if primary_pressed && response.is_pointer_button_down_on() {
+        state.space_pan = space_down;
+        state.primary_pan = state.pan_mode;
+    }
+    if state.space_pan || state.primary_pan {
         if primary_down {
             state.pan += pointer_delta;
             state.clamp_to_viewport(viewport, fitted_image);
         }
         state.cancel_drag();
-        if primary_released {
+        if !primary_down {
             state.space_pan = false;
+            state.primary_pan = false;
         }
         return true;
     }
@@ -1516,6 +1562,30 @@ mod tests {
         harness.step();
     }
 
+    fn stepped_primary_drag(
+        harness: &mut Harness<'_, InteractiveTestState>,
+        start: Pos2,
+        end: Pos2,
+    ) {
+        harness.event(Event::PointerMoved(start));
+        harness.event(Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        harness.event(Event::PointerMoved(end));
+        harness.step();
+        harness.event(Event::PointerButton {
+            pos: end,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+    }
+
     fn bbox(x: f32, y: f32, width: f32, height: f32) -> BoundingBox {
         BoundingBox {
             x,
@@ -2169,6 +2239,50 @@ mod tests {
         harness.key_up(Key::Space);
         harness.step();
         assert!(harness.state().canvas.pan.x < pan_before.x);
+        assert!(harness.state().actions.is_empty());
+    }
+
+    #[test]
+    fn pan_mode_primary_drag_pans_and_fit_restores_annotation_mode() {
+        let mut harness = canvas_harness(true);
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.toggle_pan_mode();
+        harness.step();
+        assert!(harness.state().canvas.pan_mode());
+
+        stepped_primary_drag(&mut harness, pos2(200.0, 150.0), pos2(230.0, 175.0));
+        assert_ne!(harness.state().canvas.pan, Vec2::ZERO);
+        assert!(harness.state().actions.is_empty());
+
+        harness.state_mut().canvas.fit_view();
+        harness.step();
+        assert!(!harness.state().canvas.pan_mode());
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            pos2(100.0, 100.0),
+            pos2(180.0, 160.0),
+        );
+        assert!(matches!(
+            harness.state().actions.last(),
+            Some(CanvasAction::CreateBoundingBox(_))
+        ));
+    }
+
+    #[test]
+    fn double_click_still_fits_while_pan_mode_is_active() {
+        let mut harness = canvas_harness(true);
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.toggle_pan_mode();
+        harness.step();
+
+        click_at(&mut harness, pos2(200.0, 150.0));
+        click_at(&mut harness, pos2(200.0, 150.0));
+
+        assert_eq!(harness.state().canvas.zoom, MIN_ZOOM);
+        assert!(!harness.state().canvas.pan_mode());
         assert!(harness.state().actions.is_empty());
     }
 

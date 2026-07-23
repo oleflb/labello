@@ -109,6 +109,12 @@ impl ApiError {
             ApiError::Storage(labello_storage::StorageError::InvalidCorrection(_)) => {
                 StatusCode::BAD_REQUEST
             }
+            ApiError::Storage(labello_storage::StorageError::Domain(
+                labello_domain::DomainError::InvalidKeybindings(_),
+            )) => StatusCode::BAD_REQUEST,
+            ApiError::Storage(labello_storage::StorageError::Domain(
+                labello_domain::DomainError::KeybindingConflict { .. },
+            )) => StatusCode::CONFLICT,
             ApiError::Storage(labello_storage::StorageError::AssignmentConflict(_)) => {
                 StatusCode::CONFLICT
             }
@@ -149,6 +155,10 @@ impl ApiError {
             | Self::Storage(labello_storage::StorageError::AssignmentConflict(message)) => {
                 message.clone()
             }
+            Self::Storage(labello_storage::StorageError::Domain(
+                error @ (labello_domain::DomainError::InvalidKeybindings(_)
+                | labello_domain::DomainError::KeybindingConflict { .. }),
+            )) => error.to_string(),
             error if error.status().is_server_error() => "internal server error".to_string(),
             error => error.to_string(),
         }
@@ -156,3 +166,24 @@ impl ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keybinding_validation_errors_are_client_errors() {
+        let invalid = ApiError::Storage(labello_storage::StorageError::Domain(
+            labello_domain::DomainError::InvalidKeybindings("missing action".to_string()),
+        ));
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let conflict = ApiError::Storage(labello_storage::StorageError::Domain(
+            labello_domain::DomainError::KeybindingConflict {
+                chord: "P".to_string(),
+                actions: vec!["A".to_string(), "B".to_string()],
+            },
+        ));
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+}

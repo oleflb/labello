@@ -4,7 +4,7 @@ use labello_domain::{AdjudicationDecision, AnnotationGeometry, KeypointState, Re
 use crate::{
     app::{
         AppView, Drawer, LabelloApp, LayoutMode, PendingTransition, SaveStatus, Tool,
-        annotation_type_label, parse_key,
+        annotation_type_label,
     },
     canvas::{CanvasAction, CanvasInteraction, show_canvas_configured},
     theme,
@@ -90,16 +90,44 @@ impl LabelloApp {
                 self.compact_navigation(ui);
                 if self.work_view() {
                     ui.menu_button("Panels", |ui| {
-                        if ui.button("Workflow").clicked() {
-                            self.drawer = Some(Drawer::Workflow);
+                        if ui
+                            .add(
+                                egui::Button::new("Workflow").shortcut_text(self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::ToggleWorkflowPanel,
+                                )),
+                            )
+                            .clicked()
+                        {
+                            self.trigger_user_action(
+                                labello_domain::UserAction::ToggleWorkflowPanel,
+                            );
                             ui.close();
                         }
-                        if ui.button("Inspector").clicked() {
-                            self.drawer = Some(Drawer::Inspector);
+                        if ui
+                            .add(
+                                egui::Button::new("Inspector").shortcut_text(self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::ToggleInspectorPanel,
+                                )),
+                            )
+                            .clicked()
+                        {
+                            self.trigger_user_action(
+                                labello_domain::UserAction::ToggleInspectorPanel,
+                            );
                             ui.close();
                         }
-                        if ui.button("Settings").clicked() {
-                            self.show_settings = true;
+                        if ui
+                            .add(egui::Button::new("Settings").shortcut_text(
+                                self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::OpenSettings,
+                                ),
+                            ))
+                            .clicked()
+                        {
+                            self.open_shortcut_settings();
                             ui.close();
                         }
                     });
@@ -117,23 +145,37 @@ impl LabelloApp {
         ui.horizontal_wrapped(|ui| {
             self.mode_toolbar(ui);
             if layout != LayoutMode::Wide && self.work_view() {
-                if ui.button("Workflow").clicked() {
-                    self.drawer = if self.drawer == Some(Drawer::Workflow) {
-                        None
-                    } else {
-                        Some(Drawer::Workflow)
-                    };
+                if ui
+                    .add(egui::Button::new("Workflow").shortcut_text(
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::ToggleWorkflowPanel,
+                        ),
+                    ))
+                    .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::ToggleWorkflowPanel);
                 }
-                if ui.button("Inspector").clicked() {
-                    self.drawer = if self.drawer == Some(Drawer::Inspector) {
-                        None
-                    } else {
-                        Some(Drawer::Inspector)
-                    };
+                if ui
+                    .add(egui::Button::new("Inspector").shortcut_text(
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::ToggleInspectorPanel,
+                        ),
+                    ))
+                    .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::ToggleInspectorPanel);
                 }
             }
-            if self.work_view() && ui.button("Settings").clicked() {
-                self.show_settings = true;
+            if self.work_view()
+                && ui
+                    .add(egui::Button::new("Settings").shortcut_text(
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::OpenSettings),
+                    ))
+                    .clicked()
+            {
+                self.open_shortcut_settings();
             }
             if layout == LayoutMode::Wide {
                 self.workspace_actions(ui, layout);
@@ -168,39 +210,62 @@ impl LabelloApp {
             if ui
                 .add_enabled(
                     ready && !self.undo_stack.is_empty(),
-                    egui::Button::new("Undo"),
+                    egui::Button::new("Undo").shortcut_text(wide_shortcut(
+                        self,
+                        ui.ctx(),
+                        layout,
+                        labello_domain::UserAction::UndoEdit,
+                    )),
                 )
                 .on_hover_text("Undo the last annotation edit (Ctrl/Cmd+Z).")
                 .clicked()
             {
-                self.undo();
+                self.trigger_user_action(labello_domain::UserAction::UndoEdit);
             }
             if ui
                 .add_enabled(
                     ready && !self.redo_stack.is_empty(),
-                    egui::Button::new("Redo"),
+                    egui::Button::new("Redo").shortcut_text(wide_shortcut(
+                        self,
+                        ui.ctx(),
+                        layout,
+                        labello_domain::UserAction::RedoEdit,
+                    )),
                 )
                 .on_hover_text("Redo the last undone edit (Ctrl/Cmd+Shift+Z or Ctrl+Y).")
                 .clicked()
             {
-                self.redo();
+                self.trigger_user_action(labello_domain::UserAction::RedoEdit);
             }
             if ui
                 .add_enabled(
                     ready && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry),
-                    egui::Button::new("Save"),
+                    egui::Button::new("Save").shortcut_text(wide_shortcut(
+                        self,
+                        ui.ctx(),
+                        layout,
+                        labello_domain::UserAction::SaveAnnotations,
+                    )),
                 )
                 .on_hover_text("Save edits and keep this assignment active.")
                 .clicked()
             {
-                self.autosave();
+                self.trigger_user_action(labello_domain::UserAction::SaveAnnotations);
             }
             if ui
-                .add_enabled(ready, egui::Button::new("Submit & next"))
+                .add_enabled(
+                    ready,
+                    egui::Button::new("Submit & next").shortcut_text(wide_shortcut(
+                        self,
+                        ui.ctx(),
+                        layout,
+                        labello_domain::UserAction::NextImage,
+                    )),
+                )
                 .on_hover_text("Save, complete this assignment, and claim another.")
                 .clicked()
             {
-                self.submit_and_advance();
+                self.trigger_user_action(labello_domain::UserAction::NextImage);
             }
         }
         if layout != LayoutMode::Wide
@@ -213,13 +278,35 @@ impl LabelloApp {
             self.adjudication_decision_buttons(ui, false);
         }
         if ui
-            .add_enabled(ready, egui::Button::new("Skip"))
+            .add_enabled(
+                ready,
+                egui::Button::new("Skip").shortcut_text(wide_shortcut(
+                    self,
+                    ui.ctx(),
+                    layout,
+                    labello_domain::UserAction::SkipAssignment,
+                )),
+            )
             .on_hover_text("Release this assignment and claim another.")
             .clicked()
         {
-            self.skip_assignment();
+            self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
         }
-        ui.toggle_value(&mut self.show_tutorial, "Tutorial");
+        if ui
+            .add(
+                egui::Button::selectable(self.show_tutorial, "Tutorial").shortcut_text(
+                    wide_shortcut(
+                        self,
+                        ui.ctx(),
+                        layout,
+                        labello_domain::UserAction::OpenTutorial,
+                    ),
+                ),
+            )
+            .clicked()
+        {
+            self.trigger_user_action(labello_domain::UserAction::OpenTutorial);
+        }
     }
 
     pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
@@ -230,10 +317,15 @@ impl LabelloApp {
         ui.horizontal_wrapped(|ui| {
             if self.view == AppView::Annotate
                 && ui
-                    .add_enabled(ready, egui::Button::new("Submit & next"))
+                    .add_enabled(
+                        ready,
+                        egui::Button::new("Submit & next").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::NextImage),
+                        ),
+                    )
                     .clicked()
             {
-                self.submit_and_advance();
+                self.trigger_user_action(labello_domain::UserAction::NextImage);
             }
             if self.view == AppView::Review && self.correction_draft.is_none() {
                 self.review_decision_buttons(ui);
@@ -252,21 +344,31 @@ impl LabelloApp {
                         if ui
                             .add_enabled(
                                 ready && !self.undo_stack.is_empty(),
-                                egui::Button::new("Undo"),
+                                egui::Button::new("Undo").shortcut_text(
+                                    self.shortcut_text(
+                                        ui.ctx(),
+                                        labello_domain::UserAction::UndoEdit,
+                                    ),
+                                ),
                             )
                             .clicked()
                         {
-                            self.undo();
+                            self.trigger_user_action(labello_domain::UserAction::UndoEdit);
                             ui.close();
                         }
                         if ui
                             .add_enabled(
                                 ready && !self.redo_stack.is_empty(),
-                                egui::Button::new("Redo"),
+                                egui::Button::new("Redo").shortcut_text(
+                                    self.shortcut_text(
+                                        ui.ctx(),
+                                        labello_domain::UserAction::RedoEdit,
+                                    ),
+                                ),
                             )
                             .clicked()
                         {
-                            self.redo();
+                            self.trigger_user_action(labello_domain::UserAction::RedoEdit);
                             ui.close();
                         }
                         if ui
@@ -276,22 +378,42 @@ impl LabelloApp {
                                         self.save_status,
                                         SaveStatus::Dirty | SaveStatus::Retry
                                     ),
-                                egui::Button::new("Save"),
+                                egui::Button::new("Save").shortcut_text(self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::SaveAnnotations,
+                                )),
                             )
                             .clicked()
                         {
-                            self.autosave();
+                            self.trigger_user_action(labello_domain::UserAction::SaveAnnotations);
                             ui.close();
                         }
                     }
-                    if ui.add_enabled(ready, egui::Button::new("Skip")).clicked() {
-                        self.skip_assignment();
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new("Skip").shortcut_text(self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::SkipAssignment,
+                            )),
+                        )
+                        .clicked()
+                    {
+                        self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
                         ui.close();
                     }
                     if ui
-                        .toggle_value(&mut self.show_tutorial, "Tutorial")
+                        .add(
+                            egui::Button::selectable(self.show_tutorial, "Tutorial").shortcut_text(
+                                self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::OpenTutorial,
+                                ),
+                            ),
+                        )
                         .clicked()
                     {
+                        self.trigger_user_action(labello_domain::UserAction::OpenTutorial);
                         ui.close();
                     }
                 },
@@ -319,6 +441,17 @@ impl LabelloApp {
             frame.show(ui, |ui| {
                 if ui
                     .selectable_label(selected, RichText::new(workflow.label()).strong())
+                    .on_hover_text(format!(
+                        "Previous: {} · Next: {}",
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::SelectPreviousWorkflow,
+                        ),
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::SelectNextWorkflow,
+                        )
+                    ))
                     .clicked()
                     && !selected
                 {
@@ -441,11 +574,27 @@ impl LabelloApp {
         ui.label(RichText::new("Objects").strong());
         for (annotation_id, label) in objects {
             let selected = self.selected_annotation.as_ref() == Some(&annotation_id);
-            if ui.selectable_label(selected, label).clicked() {
+            if ui
+                .selectable_label(selected, label)
+                .on_hover_text(format!(
+                    "Previous: {} · Next: {}",
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectPreviousObject,),
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject,)
+                ))
+                .clicked()
+            {
                 self.selected_annotation = Some(annotation_id);
             }
         }
-        if self.selected_annotation.is_some() && ui.button("Delete selected annotation").clicked() {
+        if self.selected_annotation.is_some()
+            && ui
+                .add(
+                    egui::Button::new("Delete selected annotation").shortcut_text(
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::DeleteAnnotation),
+                    ),
+                )
+                .clicked()
+        {
             self.delete_selected();
         }
     }
@@ -472,11 +621,25 @@ impl LabelloApp {
                 ui.add_enabled_ui(!self.loading.saving, |ui| {
                     ui.horizontal(|ui| {
                         if spec.allow_hidden {
-                            ui.checkbox(&mut self.next_keypoint_hidden, "Hidden");
+                            ui.checkbox(&mut self.next_keypoint_hidden, "Hidden")
+                                .on_hover_text(format!(
+                                    "Shortcut: {}",
+                                    self.shortcut_text(
+                                        ui.ctx(),
+                                        labello_domain::UserAction::ToggleKeypointHidden,
+                                    )
+                                ));
                         }
                         if spec.allow_absent
                             && self.active_skeleton.is_some()
-                            && ui.button("Mark absent").clicked()
+                            && ui
+                                .add(egui::Button::new("Mark absent").shortcut_text(
+                                    self.shortcut_text(
+                                        ui.ctx(),
+                                        labello_domain::UserAction::MarkKeypointAbsent,
+                                    ),
+                                ))
+                                .clicked()
                         {
                             self.skip_keypoint();
                         }
@@ -766,6 +929,51 @@ impl LabelloApp {
                 if let Some(workflow) = self.selected_workflow() {
                     badge(ui, &workflow.label(), theme::TEAL);
                 }
+                if self.view == AppView::Annotate {
+                    if ui
+                        .add_enabled(
+                            self.canvas.can_pan(),
+                            egui::Button::selectable(self.canvas.pan_mode(), "Pan").shortcut_text(
+                                self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::TogglePanMode,
+                                ),
+                            ),
+                        )
+                        .on_disabled_hover_text("Zoom in before enabling Pan mode.")
+                        .clicked()
+                    {
+                        self.trigger_user_action(labello_domain::UserAction::TogglePanMode);
+                    }
+                    if ui
+                        .add(egui::Button::new("Zoom out").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomOut),
+                        ))
+                        .clicked()
+                    {
+                        self.trigger_user_action(labello_domain::UserAction::ZoomOut);
+                    }
+                    ui.label(format!("{:.0}%", self.canvas.current_zoom() * 100.0));
+                    if ui
+                        .add(egui::Button::new("Zoom in").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomIn),
+                        ))
+                        .clicked()
+                    {
+                        self.trigger_user_action(labello_domain::UserAction::ZoomIn);
+                    }
+                    if ui
+                        .add(egui::Button::new("Fit").shortcut_text(
+                            self.shortcut_text(ui.ctx(), labello_domain::UserAction::FitImage),
+                        ))
+                        .clicked()
+                    {
+                        self.trigger_user_action(labello_domain::UserAction::FitImage);
+                    }
+                    if self.canvas.pan_mode() {
+                        ui.label(RichText::new("Primary-drag to pan").color(theme::TEAL));
+                    }
+                }
             });
             ui.add_space(2.0);
             let texture = self.current_texture.clone();
@@ -866,7 +1074,15 @@ impl LabelloApp {
                     ui.label("Loading assignment...");
                 } else if let Some(error) = self.runtime.error.clone() {
                     ui.colored_label(theme::AMBER, error);
-                    if ui.button("Retry image load").clicked() {
+                    if ui
+                        .add(egui::Button::new("Retry image load").shortcut_text(
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::RetryImageLoad,
+                            ),
+                        ))
+                        .clicked()
+                    {
                         self.retry_assignment_load();
                     }
                 } else {
@@ -876,7 +1092,15 @@ impl LabelloApp {
                         AppView::Adjudicate => "No adjudication assignments available.",
                         _ => "No assignments available.",
                     });
-                    if ui.button("Retry image load").clicked() {
+                    if ui
+                        .add(egui::Button::new("Retry image load").shortcut_text(
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::RetryImageLoad,
+                            ),
+                        ))
+                        .clicked()
+                    {
                         self.retry_assignment_load();
                     }
                 }
@@ -1102,86 +1326,276 @@ impl LabelloApp {
         if !self.show_settings {
             return;
         }
+        if self.shortcut_settings.draft.is_none() {
+            let mut draft = self.keybindings.clone();
+            draft.normalize();
+            self.shortcut_settings.baseline = Some(draft.clone());
+            self.shortcut_settings.draft = Some(draft);
+        }
+        if !self.loading.keybindings
+            && let Some(action) = self.shortcut_settings.recording
+        {
+            let captured = ctx.input(|input| {
+                input.events.iter().rev().find_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+            });
+            if let Some((key, modifiers)) = captured {
+                if key == egui::Key::Escape {
+                    self.shortcut_settings.recording = None;
+                } else if let Some(draft) = self.shortcut_settings.draft.as_mut() {
+                    draft.bindings.insert(
+                        action,
+                        labello_domain::KeyChord {
+                            key: key.name().to_string(),
+                            ctrl: false,
+                            shift: modifiers.shift,
+                            alt: modifiers.alt,
+                            command: modifiers.command || modifiers.ctrl,
+                        },
+                    );
+                    self.shortcut_settings.recording = None;
+                }
+            }
+        }
         let mut open = self.show_settings;
         let screen = ctx.content_rect();
-        let width = 560.0_f32.min((screen.width() - 24.0).max(240.0));
-        egui::Window::new("Settings")
-            .open(&mut open)
+        let width = 720.0_f32.min((screen.width() - 24.0).max(240.0));
+        let mut record = None;
+        let mut reset_action = None;
+        let mut save = false;
+        let mut cancel = false;
+        let mut reset_all = false;
+        let window = egui::Window::new("Settings")
             .default_width(width)
             .max_width(width)
             .max_height((screen.height() - 24.0).max(240.0))
-            .constrain_to(screen)
-            .show(ctx, |ui| {
-                ui.heading("Keyboard shortcuts");
-                egui::ScrollArea::vertical()
-                    .max_height((screen.height() - 190.0).clamp(160.0, 360.0))
-                    .show(ui, |ui| {
-                        for (action, chord) in &mut self.keybindings.bindings {
-                            if matches!(
-                                action,
-                                labello_domain::UserAction::PreviousImage
-                                    | labello_domain::UserAction::ToggleOfflineMode
-                            ) {
-                                continue;
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(action_label(action));
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut chord.key).desired_width(88.0),
-                                );
-                                ui.checkbox(&mut chord.ctrl, "Ctrl");
-                                ui.checkbox(&mut chord.shift, "Shift");
-                                ui.checkbox(&mut chord.alt, "Alt");
-                                ui.checkbox(&mut chord.command, "Cmd");
-                            });
+            .constrain_to(screen);
+        let window = if self.loading.keybindings {
+            window
+        } else {
+            window.open(&mut open)
+        };
+        window.show(ctx, |ui| {
+            ui.heading("Keyboard shortcuts");
+            ui.label(
+                RichText::new("Choose an action, then press its new key combination.")
+                    .color(theme::MUTED),
+            );
+            ui.add_space(6.0);
+            let search_label = ui.label("Search actions");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.shortcut_settings.search)
+                    .hint_text("Search by action or category")
+                    .desired_width(f32::INFINITY),
+            )
+            .labelled_by(search_label.id);
+            ui.add_space(8.0);
+            let conflicts = self
+                .shortcut_settings
+                .draft
+                .as_ref()
+                .map(|draft| draft.conflicts())
+                .unwrap_or_default();
+            let conflicting_actions = conflicts
+                .iter()
+                .flat_map(|(_, actions)| actions.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>();
+            let query = self.shortcut_settings.search.trim().to_ascii_lowercase();
+            egui::ScrollArea::vertical()
+                .max_height((screen.height() - 260.0).clamp(180.0, 520.0))
+                .show(ui, |ui| {
+                    let mut current_category = "";
+                    for action in labello_domain::UserAction::ACTIVE {
+                        let label = action_label(&action);
+                        let category = action_category(action);
+                        let description = action_description(action);
+                        if !query.is_empty()
+                            && !label.to_ascii_lowercase().contains(&query)
+                            && !category.to_ascii_lowercase().contains(&query)
+                            && !description.to_ascii_lowercase().contains(&query)
+                        {
+                            continue;
                         }
-                    });
-                let conflicts = self.keybindings.validate_conflicts().err();
-                let unsupported = self
-                    .keybindings
-                    .bindings
-                    .iter()
-                    .find(|(_, chord)| parse_key(&chord.key).is_none())
-                    .map(|(action, chord)| {
-                        format!(
-                            "{} uses unsupported key '{}'. Use ArrowRight, ArrowLeft, Delete, ?, A, B, K, N, O, S, or Y.",
-                            action_label(action),
-                            chord.key
-                        )
-                    });
-                if let Some(error) = conflicts.as_ref() {
-                    ui.colored_label(theme::RED, error.to_string());
+                        if category != current_category {
+                            if !current_category.is_empty() {
+                                ui.add_space(8.0);
+                            }
+                            current_category = category;
+                            ui.heading(RichText::new(category).size(16.0));
+                        }
+                        let Some(chord) = self
+                            .shortcut_settings
+                            .draft
+                            .as_ref()
+                            .and_then(|draft| draft.bindings.get(&action))
+                        else {
+                            continue;
+                        };
+                        let recording = self.shortcut_settings.recording == Some(action);
+                        let conflict = conflicting_actions.contains(&action);
+                        theme::card_frame().show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(label).strong());
+                                    ui.small(RichText::new(description).color(theme::MUTED));
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let reset_response = ui.add_enabled(
+                                            !self.loading.keybindings,
+                                            egui::Button::new("Reset")
+                                                .min_size(egui::vec2(64.0, 44.0)),
+                                        );
+                                        reset_response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                true,
+                                                format!("Reset {label}"),
+                                            )
+                                        });
+                                        if reset_response.clicked() {
+                                            reset_action = Some(action);
+                                        }
+                                        let text = if recording {
+                                            "Press shortcut…".to_string()
+                                        } else {
+                                            format_chord(ctx, chord)
+                                        };
+                                        let record_response = ui
+                                            .add_enabled(
+                                                !self.loading.keybindings,
+                                                egui::Button::new(&text)
+                                                    .selected(recording)
+                                                    .min_size(egui::vec2(140.0, 44.0)),
+                                            )
+                                            .on_hover_text(format!("Record shortcut for {label}"));
+                                        record_response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                true,
+                                                format!("Record shortcut for {label}: {text}"),
+                                            )
+                                        });
+                                        if record_response.clicked() {
+                                            record = Some(action);
+                                        }
+                                    },
+                                );
+                            });
+                            if conflict {
+                                ui.colored_label(theme::RED, "Conflicts in this context");
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            if !conflicts.is_empty() {
+                ui.colored_label(
+                    theme::RED,
+                    format!(
+                        "Resolve {} shortcut conflict(s) before saving.",
+                        conflicts.len()
+                    ),
+                );
+            }
+            let dirty = self.shortcut_settings.draft != self.shortcut_settings.baseline;
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.loading.keybindings,
+                        egui::Button::new("Restore all defaults"),
+                    )
+                    .clicked()
+                {
+                    reset_all = true;
                 }
-                if let Some(error) = unsupported.as_ref() {
-                    ui.colored_label(theme::RED, error);
-                }
-                ui.horizontal_wrapped(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add_enabled(
-                            conflicts.is_none()
-                                && unsupported.is_none()
-                                && !self.loading.keybindings,
-                            egui::Button::new("Save shortcuts"),
+                            dirty && conflicts.is_empty() && !self.loading.keybindings,
+                            egui::Button::new(if self.loading.keybindings {
+                                "Saving…"
+                            } else {
+                                "Save changes"
+                            }),
                         )
                         .clicked()
                     {
-                        self.request_keybindings_save();
+                        save = true;
                     }
-                    if ui.button("Reset defaults").clicked() {
-                        self.keybindings.reset_to_defaults();
-                        self.keybindings
-                            .bindings
-                            .remove(&labello_domain::UserAction::PreviousImage);
-                        self.keybindings
-                            .bindings
-                            .remove(&labello_domain::UserAction::ToggleOfflineMode);
+                    if ui
+                        .add_enabled(!self.loading.keybindings, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+                if dirty {
+                    ui.label(RichText::new("Unsaved changes").color(theme::AMBER));
+                }
+            });
+        });
+        if let Some(action) = record {
+            self.shortcut_settings.recording = Some(action);
+        }
+        if let Some(action) = reset_action {
+            let default = labello_domain::KeybindingSet::defaults_for(self.config.user_id.clone())
+                .bindings
+                .get(&action)
+                .cloned();
+            if let (Some(draft), Some(default)) = (self.shortcut_settings.draft.as_mut(), default) {
+                draft.bindings.insert(action, default);
+            }
+        }
+        if reset_all {
+            self.shortcut_settings.draft = Some(labello_domain::KeybindingSet::defaults_for(
+                self.config.user_id.clone(),
+            ));
+            self.shortcut_settings.recording = None;
+        }
+        if save {
+            self.request_keybindings_save();
+        }
+        let dirty = self.shortcut_settings.draft != self.shortcut_settings.baseline;
+        if cancel || !open {
+            if dirty {
+                self.shortcut_settings.confirm_discard = true;
+                self.show_settings = true;
+            } else {
+                self.show_settings = false;
+                self.shortcut_settings.draft = None;
+                self.shortcut_settings.baseline = None;
+            }
+        }
+        if self.shortcut_settings.confirm_discard {
+            egui::Modal::new(egui::Id::new("discard-shortcut-settings")).show(ctx, |ui| {
+                ui.heading("Discard shortcut changes?");
+                ui.label("Your recorded shortcuts have not been saved.");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Keep editing").clicked() {
+                        self.shortcut_settings.confirm_discard = false;
+                    }
+                    if ui.button("Discard changes").clicked() {
+                        self.shortcut_settings.confirm_discard = false;
+                        self.shortcut_settings.draft = None;
+                        self.shortcut_settings.baseline = None;
+                        self.show_settings = false;
                     }
                 });
             });
-        self.show_settings = open;
+        }
     }
 
-    fn visible_prelabels(&self) -> Vec<labello_domain::PrelabelSuggestion> {
+    pub(crate) fn visible_prelabels(&self) -> Vec<labello_domain::PrelabelSuggestion> {
         if self.view != AppView::Annotate {
             return Vec::new();
         }
@@ -1208,13 +1622,33 @@ impl LabelloApp {
         ui.separator();
         ui.heading("Prelabels");
         let prelabels = self.visible_prelabels();
+        if self.selected_prelabel.as_ref().is_none_or(|selected| {
+            !prelabels
+                .iter()
+                .any(|suggestion| &suggestion.suggestion_id == selected)
+        }) {
+            self.selected_prelabel = prelabels
+                .first()
+                .map(|suggestion| suggestion.suggestion_id.clone());
+        }
         if prelabels.is_empty() {
             ui.label(RichText::new("No suggestions for this image.").color(theme::MUTED));
         }
         for suggestion in &prelabels {
-            theme::card_frame().show(ui, |ui| {
+            let selected = self.selected_prelabel.as_ref() == Some(&suggestion.suggestion_id);
+            let frame = if selected {
+                theme::card_frame().stroke(egui::Stroke::new(1.5, theme::TEAL))
+            } else {
+                theme::card_frame()
+            };
+            frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(suggestion.class_id.to_string());
+                    if ui
+                        .selectable_label(selected, suggestion.class_id.to_string())
+                        .clicked()
+                    {
+                        self.selected_prelabel = Some(suggestion.suggestion_id.clone());
+                    }
                     badge(
                         ui,
                         &format!("{:.0}%", suggestion.confidence * 100.0),
@@ -1222,16 +1656,33 @@ impl LabelloApp {
                     );
                     if ui
                         .add_enabled(!self.loading.saving, egui::Button::new("Accept"))
+                        .on_hover_text(format!(
+                            "Shortcut: {}",
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::AcceptPrelabel,
+                            )
+                        ))
                         .clicked()
                     {
                         self.accept_prelabel(suggestion);
+                        self.selected_prelabel = self
+                            .visible_prelabels()
+                            .first()
+                            .map(|suggestion| suggestion.suggestion_id.clone());
                     }
                     if ui
                         .add_enabled(!self.loading.saving, egui::Button::new("Discard"))
+                        .on_hover_text(format!(
+                            "Shortcut: {}",
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::DiscardPrelabel,
+                            )
+                        ))
                         .clicked()
                     {
-                        self.accepted_prelabels
-                            .push(suggestion.suggestion_id.clone());
+                        self.discard_prelabel(suggestion.suggestion_id.clone());
                     }
                 });
             });
@@ -1310,6 +1761,27 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
     use labello_domain::UserAction;
     match action {
         UserAction::NextImage => "Submit and next",
+        UserAction::UndoEdit => "Undo annotation edit",
+        UserAction::RedoEdit => "Redo annotation edit",
+        UserAction::SkipAssignment => "Skip assignment",
+        UserAction::ToggleWorkflowPanel => "Toggle Workflow panel",
+        UserAction::ToggleInspectorPanel => "Toggle Inspector panel",
+        UserAction::OpenSettings => "Open shortcut settings",
+        UserAction::SelectPreviousWorkflow => "Previous workflow",
+        UserAction::SelectNextWorkflow => "Next workflow",
+        UserAction::SelectPreviousObject => "Previous object",
+        UserAction::SelectNextObject => "Next object",
+        UserAction::SelectPreviousPrelabel => "Previous prelabel",
+        UserAction::SelectNextPrelabel => "Next prelabel",
+        UserAction::AcceptPrelabel => "Accept active prelabel",
+        UserAction::DiscardPrelabel => "Discard active prelabel",
+        UserAction::ToggleKeypointHidden => "Toggle keypoint hidden",
+        UserAction::MarkKeypointAbsent => "Mark keypoint absent",
+        UserAction::RetryImageLoad => "Retry image load",
+        UserAction::TogglePanMode => "Toggle Pan mode",
+        UserAction::ZoomIn => "Zoom in",
+        UserAction::ZoomOut => "Zoom out",
+        UserAction::FitImage => "Fit image",
         UserAction::PreviousImage => "Previous image",
         UserAction::SaveAnnotations => "Save annotations",
         UserAction::DeleteAnnotation => "Delete annotation",
@@ -1319,6 +1791,103 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
         UserAction::RejectReviewObject => "Reject review object",
         UserAction::OpenTutorial => "Open tutorial",
         UserAction::ToggleOfflineMode => "Offline mode",
+    }
+}
+
+fn action_category(action: labello_domain::UserAction) -> &'static str {
+    use labello_domain::UserAction;
+    match action {
+        UserAction::NextImage
+        | UserAction::UndoEdit
+        | UserAction::RedoEdit
+        | UserAction::SaveAnnotations
+        | UserAction::SkipAssignment => "Assignment",
+        UserAction::SelectPreviousWorkflow
+        | UserAction::SelectNextWorkflow
+        | UserAction::SelectPreviousObject
+        | UserAction::SelectNextObject
+        | UserAction::DeleteAnnotation
+        | UserAction::ToggleKeypointHidden
+        | UserAction::MarkKeypointAbsent => "Annotation",
+        UserAction::SelectPreviousPrelabel
+        | UserAction::SelectNextPrelabel
+        | UserAction::AcceptPrelabel
+        | UserAction::DiscardPrelabel => "Prelabels",
+        UserAction::TogglePanMode
+        | UserAction::ZoomIn
+        | UserAction::ZoomOut
+        | UserAction::FitImage => "Canvas",
+        UserAction::OpenTutorial
+        | UserAction::ToggleWorkflowPanel
+        | UserAction::ToggleInspectorPanel
+        | UserAction::OpenSettings
+        | UserAction::RetryImageLoad => "Workspace",
+        UserAction::AcceptReviewObject | UserAction::RejectReviewObject => "Review",
+        UserAction::PreviousImage
+        | UserAction::SelectBoundingBoxTool
+        | UserAction::SelectKeypointTool
+        | UserAction::ToggleOfflineMode => "Legacy",
+    }
+}
+
+fn action_description(action: labello_domain::UserAction) -> &'static str {
+    use labello_domain::UserAction;
+    match action {
+        UserAction::NextImage => "Save, complete, and claim another image.",
+        UserAction::UndoEdit => "Reverse the last annotation edit.",
+        UserAction::RedoEdit => "Restore the last undone edit.",
+        UserAction::SaveAnnotations => "Save without leaving the assignment.",
+        UserAction::SkipAssignment => "Release this image and claim another.",
+        UserAction::DeleteAnnotation => "Delete the selected object.",
+        UserAction::OpenTutorial => "Show or hide workflow instructions.",
+        UserAction::ToggleWorkflowPanel => "Open or close workflow navigation.",
+        UserAction::ToggleInspectorPanel => "Open or close object controls.",
+        UserAction::OpenSettings => "Open this keyboard shortcut editor.",
+        UserAction::SelectPreviousWorkflow => "Cycle to the previous enabled workflow.",
+        UserAction::SelectNextWorkflow => "Cycle to the next enabled workflow.",
+        UserAction::SelectPreviousObject => "Select the previous annotation.",
+        UserAction::SelectNextObject => "Select the next annotation.",
+        UserAction::SelectPreviousPrelabel => "Highlight the previous suggestion.",
+        UserAction::SelectNextPrelabel => "Highlight the next suggestion.",
+        UserAction::AcceptPrelabel => "Convert the active suggestion to an annotation.",
+        UserAction::DiscardPrelabel => "Hide the active suggestion.",
+        UserAction::ToggleKeypointHidden => "Toggle visibility for the next keypoint.",
+        UserAction::MarkKeypointAbsent => "Skip an allowed optional keypoint.",
+        UserAction::RetryImageLoad => "Try to claim and load an image again.",
+        UserAction::TogglePanMode => "Use primary drag to move a zoomed image.",
+        UserAction::ZoomIn => "Increase canvas magnification.",
+        UserAction::ZoomOut => "Decrease canvas magnification.",
+        UserAction::FitImage => "Fit and center the image.",
+        UserAction::AcceptReviewObject => "Approve the current review object.",
+        UserAction::RejectReviewObject => "Reject the current review object.",
+        UserAction::PreviousImage
+        | UserAction::SelectBoundingBoxTool
+        | UserAction::SelectKeypointTool
+        | UserAction::ToggleOfflineMode => "No longer used.",
+    }
+}
+
+fn format_chord(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> String {
+    let Some(key) = egui::Key::from_name(&chord.key) else {
+        return chord.to_string();
+    };
+    let mut modifiers = egui::Modifiers::NONE;
+    modifiers.command = chord.ctrl || chord.command;
+    modifiers.shift = chord.shift;
+    modifiers.alt = chord.alt;
+    ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
+}
+
+fn wide_shortcut(
+    app: &LabelloApp,
+    ctx: &egui::Context,
+    layout: LayoutMode,
+    action: labello_domain::UserAction,
+) -> String {
+    if layout == LayoutMode::Wide {
+        app.shortcut_text(ctx, action)
+    } else {
+        String::new()
     }
 }
 

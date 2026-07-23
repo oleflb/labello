@@ -149,6 +149,18 @@ GitHub accounts receive an internal ID such as `github_123456`. Add that ID to
 `bootstrapAdmins` if the account should create datasets, or grant it a role on
 an existing dataset through the admin UI.
 
+## Annotation Controls
+
+Every Annotate workspace action has a configurable keyboard shortcut. Open
+`Settings` (`Ctrl+,` on Windows/Linux or `Cmd+,` on macOS) to record shortcuts,
+search actions, resolve contextual conflicts, or restore defaults. Changes are
+staged until `Save changes` is selected.
+
+The canvas zooms with two-finger touchpad movement, pinch, or the configured
+zoom keys. Press `P` to toggle Pan mode, then left-drag a zoomed image. Press
+`P` or `Escape` to return to annotation input. Space+left-drag, middle-drag,
+touch gestures, and double-click-to-fit remain available.
+
 ## Datasets
 
 A bootstrap admin creates a dataset in the setup view. A data admin can then:

@@ -545,7 +545,11 @@ fn image_load_failure_shows_retry_and_loads_image() {
     harness.step();
 
     assert!(harness.state().current.is_none());
-    assert!(harness.query_by_label("Retry image load").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("Retry image load")
+            .is_some()
+    );
     click(&mut harness, "Retry image load");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert!(api.counts().get_image_preview >= 2);
@@ -697,54 +701,136 @@ fn keybindings_are_editable_and_persisted() {
     assert!(harness.query_by_label("Keyboard shortcuts").is_none());
     click(&mut harness, "Settings");
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
-    harness
-        .state_mut()
-        .keybindings
-        .bindings
-        .get_mut(&labello_domain::UserAction::NextImage)
-        .unwrap()
-        .key = "Enter".to_string();
-    harness.step();
-    assert!(
-        harness
-            .query_by_label_contains("uses unsupported key 'Enter'")
-            .is_some()
-    );
-    let save = harness
-        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Save shortcuts")
-        .next()
-        .unwrap();
-    assert!(save.accesskit_node().is_disabled());
-    assert_eq!(api.counts().save_keybindings, 0);
-    click_accesskit_button(&mut harness, "Reset defaults");
+    click(&mut harness, "Record shortcut for Submit and next");
+    harness.key_press(egui::Key::Enter);
     harness.step();
     assert_eq!(
-        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
-        "ArrowRight"
-    );
-    assert!(harness.state().keybindings.validate_conflicts().is_ok());
-    assert!(!harness.state().loading.keybindings);
-    assert!(
         harness
             .state()
-            .keybindings
-            .bindings
-            .values()
-            .all(|chord| crate::app::parse_key(&chord.key).is_some())
+            .shortcut_settings
+            .draft
+            .as_ref()
+            .unwrap()
+            .bindings[&labello_domain::UserAction::NextImage]
+            .key,
+        "Enter"
     );
     let save = harness
-        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Save shortcuts")
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Save changes")
         .next()
         .unwrap();
     assert!(!save.accesskit_node().is_disabled());
-    click_accesskit_button(&mut harness, "Save shortcuts");
+    click_accesskit_button(&mut harness, "Save changes");
     step_until(&mut harness, 8, |app| !app.loading.keybindings);
 
     assert_eq!(api.counts().save_keybindings, 1);
     assert_eq!(
+        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
+        "Enter"
+    );
+    assert_eq!(
         harness.state().runtime.notice.as_deref(),
         Some("Keyboard shortcuts saved")
     );
+    click(&mut harness, "Cancel");
+    harness.key_press(egui::Key::Enter);
+    step_until(&mut harness, 16, |_| api.counts().complete_assignment == 1);
+    assert_eq!(api.counts().complete_assignment, 1);
+}
+
+#[test]
+fn shortcut_settings_cancel_discards_the_draft() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    click(&mut harness, "Settings");
+    click(&mut harness, "Record shortcut for Submit and next");
+    harness.key_press(egui::Key::Enter);
+    harness.step();
+    click(&mut harness, "Cancel");
+    assert!(
+        harness
+            .query_by_label("Discard shortcut changes?")
+            .is_some()
+    );
+    click_accesskit_button(&mut harness, "Discard changes");
+
+    assert!(!harness.state().show_settings);
+    assert_eq!(
+        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
+        "ArrowRight"
+    );
+}
+
+#[test]
+fn shortcut_settings_lock_editing_while_saving() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    click(&mut harness, "Settings");
+    harness.state_mut().loading.keybindings = true;
+    harness.step();
+
+    assert!(harness.query_by_label("Close window").is_none());
+
+    for label in [
+        "Record shortcut for Submit and next",
+        "Reset Submit and next",
+        "Restore all defaults",
+        "Cancel",
+    ] {
+        let control = harness
+            .query_all_by_label_contains(label)
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap_or_else(|| panic!("missing {label}"));
+        assert!(control.accesskit_node().is_disabled(), "{label} is enabled");
+    }
+}
+
+#[test]
+fn pan_mode_shortcut_requires_zoom_and_escape_returns_to_annotation_mode() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    let zoom = harness.state().keybindings.bindings[&labello_domain::UserAction::ZoomIn].clone();
+    harness
+        .state_mut()
+        .keybindings
+        .bindings
+        .insert(labello_domain::UserAction::RetryImageLoad, zoom);
+    assert!(harness.state().keybindings.validate().is_ok());
+
+    harness.key_press(egui::Key::P);
+    harness.step();
+    assert!(!harness.state().canvas.pan_mode());
+    harness.key_press(egui::Key::Plus);
+    harness.step();
+    assert!(harness.state().canvas.current_zoom() > 1.0);
+    harness.key_press(egui::Key::P);
+    harness.step();
+    assert!(harness.state().canvas.pan_mode());
+    assert!(harness.query_by_label_contains("Pan P").is_some());
+
+    harness.key_press(egui::Key::Escape);
+    harness.step();
+    assert!(!harness.state().canvas.pan_mode());
+}
+
+#[test]
+fn logical_primary_and_shifted_punctuation_shortcuts_dispatch() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    harness.state_mut().create_bbox(BoundingBox {
+        x: 0.1,
+        y: 0.1,
+        width: 0.2,
+        height: 0.2,
+    });
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::S);
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.loading.saving);
+    assert_eq!(api.counts().append_event, 1);
+
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Questionmark);
+    harness.step();
+    assert!(harness.state().show_tutorial);
 }
 
 #[test]
@@ -954,7 +1040,7 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     click(&mut harness, "Accept");
     assert_eq!(harness.state().save_status, SaveStatus::Dirty);
     assert_eq!(api.counts().append_event, 0);
-    assert!(harness.query_by_label("Undo").is_some());
+    assert!(harness.query_by_label_contains("Undo").is_some());
 
     harness.state_mut().undo();
     assert!(harness.state().annotations.is_empty());
@@ -1433,6 +1519,17 @@ fn skip_releases_then_claims_another_assignment() {
 }
 
 #[test]
+fn skip_remains_active_in_review() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_review_harness(api.clone());
+
+    click(&mut harness, "Skip");
+    step_until(&mut harness, 8, |_| api.counts().release_assignment == 1);
+
+    assert_eq!(api.counts().release_assignment, 1);
+}
+
+#[test]
 fn entering_admin_clears_the_released_assignment() {
     let mut harness = loaded_work_harness(Rc::new(SpyApi::new()));
 
@@ -1673,7 +1770,10 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             for label in ["Save", "Submit & next", "Skip"] {
                 assert_eq!(
                     harness
-                        .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+                        .query_all_by_label_contains(label)
+                        .filter(|node| {
+                            node.accesskit_node().role() == egui::accesskit::Role::Button
+                        })
                         .count(),
                     1,
                     "duplicate {label} controls at {width}"
@@ -2626,9 +2726,9 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     harness.step();
     click(&mut harness, "Annotate");
     harness.step();
-    assert!(harness.query_by_label("Save").is_some());
-    assert!(harness.query_by_label("Submit & next").is_some());
-    assert!(harness.query_by_label("Skip").is_some());
+    assert!(harness.query_by_label_contains("Save").is_some());
+    assert!(harness.query_by_label_contains("Submit & next").is_some());
+    assert!(harness.query_by_label_contains("Skip").is_some());
 }
 
 #[test]
@@ -2869,7 +2969,15 @@ fn assert_control_inside(
     width: f32,
     height: f32,
 ) {
-    let node = harness.get_by_role_and_label(role, label);
+    let node = harness
+        .query_all_by_role_and_label(role, label)
+        .next()
+        .or_else(|| {
+            harness
+                .query_all_by_label_contains(label)
+                .find(|node| node.accesskit_node().role() == role)
+        })
+        .unwrap_or_else(|| panic!("No {role:?} found containing {label:?}"));
     let rect = node.rect();
     assert!(
         rect.left() >= -0.5
@@ -2985,6 +3093,11 @@ fn click_accesskit_button(harness: &mut Harness<'static, LabelloApp>, label: &st
     harness
         .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
         .next()
+        .or_else(|| {
+            harness
+                .query_all_by_label_contains(label)
+                .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        })
         .unwrap()
         .click_accesskit();
     harness.step();
@@ -2998,6 +3111,12 @@ fn click_visible(harness: &Harness<'static, LabelloApp>, label: &str) -> bool {
         node.click();
         true
     } else if let Some(node) = harness.query_all_by_label(label).next() {
+        node.click();
+        true
+    } else if let Some(node) = harness
+        .query_all_by_label_contains(label)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+    {
         node.click();
         true
     } else {

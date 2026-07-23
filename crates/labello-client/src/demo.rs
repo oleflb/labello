@@ -441,25 +441,28 @@ impl KeybindingApi for DemoLabelloApi {
         user_id: &'a UserId,
     ) -> crate::ApiFuture<'a, KeybindingSet> {
         Box::pin(async move {
-            Ok(self
+            let mut keybindings = self
                 .state
                 .borrow()
                 .keybindings
                 .get(user_id)
                 .cloned()
-                .unwrap_or_else(|| KeybindingSet::defaults_for(user_id.clone())))
+                .unwrap_or_else(|| KeybindingSet::defaults_for(user_id.clone()));
+            keybindings.normalize();
+            Ok(keybindings)
         })
     }
 
     fn save_keybindings<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,
-        keybindings: KeybindingSet,
+        mut keybindings: KeybindingSet,
     ) -> crate::ApiFuture<'a, KeybindingSet> {
         Box::pin(async move {
             keybindings
-                .validate_conflicts()
+                .validate()
                 .map_err(|error| ClientError::Demo(error.to_string()))?;
+            keybindings.normalize();
             self.state
                 .borrow_mut()
                 .keybindings

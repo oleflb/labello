@@ -613,6 +613,10 @@ impl LabelloApp {
                     match result {
                         Ok(keybindings) => {
                             self.keybindings = keybindings;
+                            if self.show_settings {
+                                self.shortcut_settings.baseline = Some(self.keybindings.clone());
+                                self.shortcut_settings.draft = Some(self.keybindings.clone());
+                            }
                             self.runtime.notice = Some("Keyboard shortcuts saved".to_string());
                             self.runtime.error = None;
                         }
@@ -1441,7 +1445,12 @@ impl LabelloApp {
         if self.loading.keybindings || self.runtime.api.is_none() {
             return;
         }
-        if let Err(error) = self.keybindings.validate_conflicts() {
+        let keybindings = self
+            .shortcut_settings
+            .draft
+            .clone()
+            .unwrap_or_else(|| self.keybindings.clone());
+        if let Err(error) = keybindings.validate() {
             self.runtime.error = Some(error.to_string());
             return;
         }
@@ -1450,7 +1459,7 @@ impl LabelloApp {
         self.queue_command(UiCommand::SaveKeybindings {
             request,
             dataset_id: self.config.dataset_id.clone(),
-            keybindings: self.keybindings.clone(),
+            keybindings,
         });
     }
 
@@ -1458,12 +1467,8 @@ impl LabelloApp {
         self.clear_current_image();
         self.sync_work_config(loaded.metadata);
         self.keybindings = loaded.keybindings;
-        self.keybindings
-            .bindings
-            .remove(&labello_domain::UserAction::PreviousImage);
-        self.keybindings
-            .bindings
-            .remove(&labello_domain::UserAction::ToggleOfflineMode);
+        self.keybindings.normalize();
+        self.shortcut_settings = Default::default();
         let requested = self.datasets.requested_view.take().unwrap_or_else(|| {
             [AppView::Annotate, AppView::Review, AppView::Adjudicate]
                 .into_iter()
@@ -1604,6 +1609,7 @@ impl LabelloApp {
             .collect();
         self.modified_annotations.clear();
         self.accepted_prelabels.clear();
+        self.selected_prelabel = None;
         self.selected_annotation = None;
         self.active_skeleton = None;
         self.skeleton_keypoint_index = 0;

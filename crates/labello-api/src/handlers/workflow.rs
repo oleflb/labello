@@ -695,7 +695,7 @@ pub(crate) async fn put_keybindings(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
     headers: HeaderMap,
-    Json(bindings): Json<KeybindingSet>,
+    Json(mut bindings): Json<KeybindingSet>,
 ) -> ApiResult<Json<KeybindingSet>> {
     let actor = actor_from_headers(&state, &headers)?;
     if actor.user_id != bindings.user_id {
@@ -707,6 +707,20 @@ pub(crate) async fn put_keybindings(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset_config().await?;
     ensure_any_dataset_role(&metadata, &actor)?;
+    labello_domain::validate_schema_version(bindings.schema_version)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let complete = labello_domain::UserAction::ACTIVE
+        .into_iter()
+        .all(|action| bindings.bindings.contains_key(&action));
+    if complete {
+        bindings
+            .validate()
+            .map_err(labello_storage::StorageError::from)?;
+    }
+    bindings.normalize();
+    bindings
+        .validate()
+        .map_err(labello_storage::StorageError::from)?;
     repo.save_keybindings(&bindings).await?;
     Ok(Json(bindings))
 }
