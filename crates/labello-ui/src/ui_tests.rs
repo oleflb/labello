@@ -858,6 +858,15 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
             "missing wide Admin destination {section}"
         );
     }
+    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.step();
+    let unscrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
+    harness.state_mut().admin_tools.section = AdminSection::Schema;
+    harness.step();
+    let scrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
+    assert!((unscrolled_admin_x - scrolled_admin_x).abs() <= 0.5);
+    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.step();
     harness
         .state_mut()
         .datasets
@@ -3156,8 +3165,12 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
 
     click(&mut harness, "Zoom in");
     assert!(harness.state().canvas.current_zoom() > 1.0);
+    let pan_before = harness.get_by_label("Pan").rect();
+    let zoom_out_before = harness.get_by_label("Zoom out").rect();
     click(&mut harness, "Pan");
     assert!(harness.state().canvas.pan_mode());
+    assert_eq!(harness.get_by_label("Pan").rect(), pan_before);
+    assert_eq!(harness.get_by_label("Zoom out").rect(), zoom_out_before);
     click(&mut harness, "Pan");
     assert!(!harness.state().canvas.pan_mode());
     click(&mut harness, "Fit");

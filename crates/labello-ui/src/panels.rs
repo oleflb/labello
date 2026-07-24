@@ -1327,8 +1327,9 @@ impl LabelloApp {
         ui.horizontal(|ui| {
             let pan_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
-            let pan = egui::Button::selectable(self.canvas.pan_mode(), "Pan")
-                .min_size(egui::vec2(44.0, 44.0));
+            let pan = egui::Button::new("Pan")
+                .selected(self.canvas.pan_mode())
+                .min_size(egui::vec2(52.0, 44.0));
             if ui
                 .add_enabled(self.canvas.can_pan(), pan)
                 .on_disabled_hover_text("Zoom in before enabling Pan mode.")
@@ -2056,9 +2057,10 @@ impl LabelloApp {
 }
 
 fn centered_scroll(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let available_width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(0.0);
     egui::ScrollArea::vertical().show(ui, |ui| {
-        let width = ui.available_width().min(max_width);
-        let inset = ((ui.available_width() - width) * 0.5).max(0.0);
+        let width = available_width.min(max_width);
+        let inset = ((available_width - width) * 0.5).max(0.0);
         ui.horizontal(|ui| {
             ui.add_space(inset);
             ui.vertical(|ui| {
