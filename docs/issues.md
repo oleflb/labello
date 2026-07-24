@@ -31,4 +31,4 @@ Only after that continue with the next issue.
   - All background cards in the sections should be full width. 
 - [x] The normal non-highlighted button does not look enough like a button. Make it just slightly more different from the background and other text.
 - [x] A section in the admin panel with a scroll bar takes up slightly more horizontal space, causing the entire admin view to shift slightly left when entering a view with a scroll bar. A similar issue is apparent with the pan button in annotate. When the Pan button is activated, it is slightly larger and shifts the entire bar a bit to the right.
-- [ ] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.
+- [x] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.

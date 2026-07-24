@@ -75,7 +75,7 @@ mod tests {
             loaded.bindings[&UserAction::NextImage],
             loaded.bindings[&UserAction::SkipAssignment]
         );
-        assert!(!loaded.bindings.contains_key(&UserAction::PreviousImage));
+        assert_eq!(loaded.bindings[&UserAction::PreviousImage].key, "ArrowLeft");
         assert_eq!(loaded.bindings.len(), UserAction::ACTIVE.len());
 
         repo.save_keybindings(&loaded).await.unwrap();

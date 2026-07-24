@@ -382,6 +382,23 @@ impl ImageApi for HttpLabelloApi {
         })
     }
 
+    fn reopen_assignment<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!("/datasets/{dataset_id}/assignments/reopen"),
+                )?,
+                &request,
+            )
+            .await
+        })
+    }
+
     fn get_image_state<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

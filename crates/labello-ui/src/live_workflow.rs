@@ -214,6 +214,60 @@ impl LabelloApp {
                     result: Box::new(result),
                 }
             }),
+            UiCommand::ReopenAssignment {
+                request,
+                operation_id,
+                dataset_id,
+                assignment,
+                prelabel_config_ids,
+            } => self.spawn_message(request.clone(), async move {
+                let assignment = if assignment.status == labello_domain::AssignmentStatus::Active {
+                    if assignment
+                        .expires_at
+                        .is_some_and(|expires_at| expires_at <= labello_domain::now())
+                    {
+                        return UiMessage::PreviousAssignmentLoaded {
+                            request,
+                            operation_id,
+                            assignment: Some(assignment),
+                            result: Box::new(Err(
+                                "the previous assignment lease expired".to_string()
+                            )),
+                        };
+                    }
+                    assignment
+                } else {
+                    match api
+                        .reopen_assignment(&dataset_id, assignment_action(&assignment))
+                        .await
+                    {
+                        Ok(assignment) => assignment,
+                        Err(error) => {
+                            return UiMessage::PreviousAssignmentLoaded {
+                                request,
+                                operation_id,
+                                assignment: None,
+                                result: Box::new(Err(error.to_string())),
+                            };
+                        }
+                    }
+                };
+                let result = load_image(
+                    api,
+                    dataset_id,
+                    assignment.clone(),
+                    prelabel_config_ids,
+                    true,
+                )
+                .await
+                .map_err(|error| error.to_string());
+                UiMessage::PreviousAssignmentLoaded {
+                    request,
+                    operation_id,
+                    assignment: Some(assignment),
+                    result: Box::new(result),
+                }
+            }),
             UiCommand::SaveAnnotations {
                 request,
                 operation_id,
@@ -454,6 +508,25 @@ impl LabelloApp {
         );
     }
 
+    pub(crate) fn clear_previous_annotation_assignment(&mut self) {
+        let Some(previous) = self.previous_annotation_assignment.take() else {
+            return;
+        };
+        if previous.status == labello_domain::AssignmentStatus::Active
+            && self
+                .assignment
+                .as_ref()
+                .is_none_or(|current| current.assignment_id != previous.assignment_id)
+        {
+            self.release_reservation(self.config.dataset_id.clone(), previous);
+        }
+    }
+
+    pub(crate) fn remember_previous_annotation_assignment(&mut self, assignment: Assignment) {
+        self.clear_previous_annotation_assignment();
+        self.previous_annotation_assignment = Some(assignment);
+    }
+
     pub(crate) fn retry_prefetch_if_due(&mut self, ctx: &egui::Context) {
         if self.queue.retry_due() {
             self.queue.clear_failure();
@@ -532,6 +605,27 @@ impl LabelloApp {
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             assignment,
+        });
+    }
+
+    pub(crate) fn request_reopen_assignment(&mut self, assignment: Assignment) {
+        if self.loading.image || self.loading.saving || self.runtime.api.is_none() {
+            return;
+        }
+        let prelabel_config_ids = self
+            .tasks
+            .iter()
+            .find(|task| task.task_id == assignment.task_id)
+            .map(|task| task.prelabel_config_ids.clone())
+            .unwrap_or_default();
+        let operation_id = self.begin_load();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        self.queue_command(UiCommand::ReopenAssignment {
+            request,
+            operation_id,
+            dataset_id: self.config.dataset_id.clone(),
+            assignment,
+            prelabel_config_ids,
         });
     }
 

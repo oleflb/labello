@@ -2545,6 +2545,102 @@ fn skip_releases_then_claims_another_assignment() {
 }
 
 #[test]
+fn previous_assignment_reopens_the_exact_skipped_image_from_compact_actions() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    harness.set_size(egui::vec2(1500.0, 780.0));
+    harness.step();
+    let original = harness.state().assignment.clone().unwrap();
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+
+    click(&mut harness, "Skip");
+    step_until(&mut harness, 16, |app| {
+        app.assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id != original.image_id)
+            && app.previous_annotation_assignment.is_some()
+    });
+    assert!(harness.query_by_label("Previous").is_some());
+
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
+    click(&mut harness, "More actions");
+    assert!(
+        harness
+            .query_by_label_contains("Previous assignment")
+            .is_some()
+    );
+    click_accesskit_button(&mut harness, "Previous assignment");
+    step_until(&mut harness, 20, |app| {
+        app.assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id == original.image_id)
+            && !app.loading.image
+    });
+
+    assert_eq!(api.counts().reopen_assignment, 1);
+    assert_ne!(
+        harness.state().assignment.as_ref().unwrap().assignment_id,
+        original.assignment_id
+    );
+    assert!(harness.state().previous_annotation_assignment.is_none());
+}
+
+#[test]
+fn previous_assignment_reopens_the_exact_submitted_image() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    harness.set_size(egui::vec2(1500.0, 780.0));
+    harness.step();
+    let original = harness.state().assignment.clone().unwrap();
+    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+
+    click(&mut harness, "Submit & next");
+    step_until(&mut harness, 16, |app| {
+        app.assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id != original.image_id)
+            && app.previous_annotation_assignment.is_some()
+    });
+    click(&mut harness, "Previous");
+    step_until(&mut harness, 20, |app| {
+        app.assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id == original.image_id)
+            && !app.loading.image
+    });
+
+    assert_eq!(api.counts().reopen_assignment, 1);
+    assert_ne!(
+        harness.state().assignment.as_ref().unwrap().assignment_id,
+        original.assignment_id
+    );
+}
+
+#[test]
+fn expired_locally_retained_previous_assignment_is_not_loaded() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    let mut previous = harness.state().assignment.clone().unwrap();
+    previous.assignment_id = AssignmentId::generate();
+    previous.expires_at = Some(now() - chrono::Duration::seconds(1));
+    harness.state_mut().previous_annotation_assignment = Some(previous);
+
+    harness.state_mut().return_to_previous_assignment();
+
+    assert!(harness.state().previous_annotation_assignment.is_none());
+    assert_eq!(api.counts().reopen_assignment, 0);
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("lease expired"))
+    );
+}
+
+#[test]
 fn skip_remains_active_in_review() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_review_harness(api.clone());
@@ -4833,6 +4929,7 @@ struct CallCounts {
     assign_next_image: usize,
     release_assignment: usize,
     complete_assignment: usize,
+    reopen_assignment: usize,
     get_image_record: usize,
     get_image_state: usize,
     get_image_preview: usize,
@@ -4863,6 +4960,7 @@ struct SpyState {
     fail_next_preview: bool,
     no_assignment: bool,
     active_assignments: Vec<Assignment>,
+    reopenable_assignments: Vec<Assignment>,
     exclusions: Vec<Vec<ImageId>>,
     completed_images: BTreeSet<ImageId>,
     summary_roles: Vec<DatasetRole>,
@@ -4968,6 +5066,7 @@ impl SpyState {
             fail_next_preview: false,
             no_assignment: false,
             active_assignments: Vec::new(),
+            reopenable_assignments: Vec::new(),
             exclusions: Vec::new(),
             completed_images: BTreeSet::new(),
             summary_roles: vec![
@@ -5290,6 +5389,7 @@ impl ImageApi for SpyApi {
         let mut assignment = state.active_assignments.remove(position);
         assignment.status = AssignmentStatus::Cancelled;
         assignment.updated_at = now();
+        state.reopenable_assignments.push(assignment.clone());
         ready(Ok(assignment))
     }
 
@@ -5310,6 +5410,45 @@ impl ImageApi for SpyApi {
         let mut assignment = state.active_assignments.remove(position);
         assignment.status = AssignmentStatus::Completed;
         assignment.updated_at = now();
+        state.reopenable_assignments.push(assignment.clone());
+        ready(Ok(assignment))
+    }
+
+    fn reopen_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Assignment> {
+        let mut state = self.state.borrow_mut();
+        state.counts.reopen_assignment += 1;
+        let Some(previous) = state
+            .reopenable_assignments
+            .iter()
+            .find(|assignment| {
+                assignment.assignment_id == request.assignment_id
+                    && assignment.image_id == request.image_id
+                    && assignment.task_id == request.task_id
+                    && assignment.kind == request.kind
+            })
+            .cloned()
+        else {
+            return ready(Err(ClientError::Demo(
+                "assignment cannot be reopened".to_string(),
+            )));
+        };
+        let assignment = Assignment {
+            assignment_id: AssignmentId::generate(),
+            image_id: previous.image_id.clone(),
+            task_id: previous.task_id,
+            assigned_to: previous.assigned_to,
+            kind: AssignmentKind::Annotation,
+            status: AssignmentStatus::Active,
+            expires_at: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.completed_images.remove(&assignment.image_id);
+        state.active_assignments.push(assignment.clone());
         ready(Ok(assignment))
     }
 
@@ -5495,9 +5634,16 @@ impl AnnotationApi for SpyApi {
             .unwrap_or_else(|| ImageState::new(assignment.image_id.clone()));
         if complete {
             state.completed_images.insert(assignment.image_id.clone());
-            state
+            if let Some(position) = state
                 .active_assignments
-                .retain(|active| !assignment_matches(active, &assignment));
+                .iter()
+                .position(|active| assignment_matches(active, &assignment))
+            {
+                let mut completed = state.active_assignments.remove(position);
+                completed.status = AssignmentStatus::Completed;
+                completed.updated_at = now();
+                state.reopenable_assignments.push(completed);
+            }
         } else if let Some(renewed) = state
             .active_assignments
             .iter_mut()

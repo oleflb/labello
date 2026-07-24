@@ -55,8 +55,9 @@ pub enum ActionContext {
 }
 
 impl UserAction {
-    pub const ACTIVE: [Self; 27] = [
+    pub const ACTIVE: [Self; 28] = [
         Self::NextImage,
+        Self::PreviousImage,
         Self::UndoEdit,
         Self::RedoEdit,
         Self::SaveAnnotations,
@@ -104,6 +105,7 @@ impl UserAction {
             }
             Self::RetryImageLoad => ActionContext::AnnotateNoImage,
             Self::NextImage
+            | Self::PreviousImage
             | Self::UndoEdit
             | Self::RedoEdit
             | Self::SaveAnnotations
@@ -117,10 +119,9 @@ impl UserAction {
             | Self::ToggleKeypointHidden
             | Self::MarkKeypointAbsent => ActionContext::AnnotateImage,
             Self::AcceptReviewObject | Self::RejectReviewObject => ActionContext::Review,
-            Self::PreviousImage
-            | Self::SelectBoundingBoxTool
-            | Self::SelectKeypointTool
-            | Self::ToggleOfflineMode => ActionContext::Legacy,
+            Self::SelectBoundingBoxTool | Self::SelectKeypointTool | Self::ToggleOfflineMode => {
+                ActionContext::Legacy
+            }
         }
     }
 
@@ -237,6 +238,7 @@ impl KeybindingSet {
     pub fn defaults_for(user_id: UserId) -> Self {
         let mut bindings = BTreeMap::new();
         bindings.insert(UserAction::NextImage, KeyChord::new("ArrowRight"));
+        bindings.insert(UserAction::PreviousImage, KeyChord::new("ArrowLeft"));
         bindings.insert(UserAction::UndoEdit, KeyChord::primary("Z"));
         let mut redo = KeyChord::primary("Z");
         redo.shift = true;
@@ -479,7 +481,10 @@ mod tests {
         bindings.normalize();
 
         assert_eq!(bindings.bindings[&UserAction::NextImage].key, "Enter");
-        assert!(!bindings.bindings.contains_key(&UserAction::PreviousImage));
+        assert_eq!(
+            bindings.bindings[&UserAction::PreviousImage].key,
+            "ArrowLeft"
+        );
         assert_eq!(bindings.bindings.len(), UserAction::ACTIVE.len());
         assert!(bindings.validate().is_ok());
     }

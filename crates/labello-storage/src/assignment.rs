@@ -309,6 +309,179 @@ impl DatasetRepository {
         Ok(assignment)
     }
 
+    pub async fn reopen_annotation_assignment(
+        &self,
+        user_id: &UserId,
+        assignment_id: &AssignmentId,
+        image_id: &ImageId,
+        task_id: &TaskId,
+        kind: AssignmentKind,
+    ) -> StorageResult<Assignment> {
+        if kind != AssignmentKind::Annotation {
+            return Err(StorageError::InvalidAssignment(
+                "only annotation assignments can be reopened".to_string(),
+            ));
+        }
+        let metadata = self.load_dataset().await?;
+        require_role(
+            &metadata.role_assignments,
+            &metadata.dataset_id,
+            user_id,
+            DatasetRole::Annotator,
+        )?;
+        ensure_assignment_target_exists(&metadata, image_id, task_id)?;
+        if !metadata.task(task_id).is_some_and(|task| task.enabled) {
+            return Err(StorageError::InvalidAssignment(format!(
+                "task {task_id} is disabled"
+            )));
+        }
+
+        let lock = self.image_lock(image_id);
+        let _guard = lock.lock().await;
+        let state = self.load_image_state(image_id).await?;
+        let target_index = state
+            .assignments
+            .iter()
+            .position(|assignment| assignment.assignment_id == *assignment_id)
+            .ok_or_else(|| {
+                StorageError::InvalidAssignment(format!(
+                    "assignment {assignment_id} does not exist"
+                ))
+            })?;
+        let target = &state.assignments[target_index];
+        if target.assigned_to != *user_id {
+            return Err(StorageError::Unauthorized(format!(
+                "assignment {assignment_id} belongs to another user"
+            )));
+        }
+        if target.image_id != *image_id
+            || target.task_id != *task_id
+            || target.kind != AssignmentKind::Annotation
+        {
+            return Err(StorageError::InvalidAssignment(format!(
+                "assignment {assignment_id} does not match the requested image, task, and kind"
+            )));
+        }
+
+        let now = labello_domain::now();
+        let later_assignments = state
+            .assignments
+            .iter()
+            .skip(target_index + 1)
+            .filter(|assignment| assignment.task_id == *task_id)
+            .collect::<Vec<_>>();
+        if let [successor] = later_assignments.as_slice()
+            && successor.kind == AssignmentKind::Annotation
+            && successor.assigned_to == *user_id
+            && successor.status == AssignmentStatus::Active
+            && !assignment_is_expired(successor, now)
+            && state.task_states.get(task_id).is_some_and(|task_state| {
+                matches!(
+                    task_state.status,
+                    TaskStatus::InProgress | TaskStatus::NeedsCorrection
+                )
+            })
+        {
+            let mut successor = (*successor).clone();
+            renew_assignment(&mut successor, now);
+            self.append_payloads_unlocked(
+                image_id,
+                &Actor {
+                    user_id: user_id.clone(),
+                    role: DatasetRole::Annotator,
+                },
+                vec![EventPayload::AssignmentUpdated {
+                    assignment: successor.clone(),
+                }],
+            )
+            .await?;
+            return Ok(successor);
+        }
+        if !later_assignments.is_empty() {
+            return Err(StorageError::AssignmentConflict(format!(
+                "assignment {assignment_id} is no longer the latest attempt for task {task_id}"
+            )));
+        }
+
+        let current_status = state
+            .task_states
+            .get(task_id)
+            .map(|task_state| task_state.status.clone())
+            .unwrap_or(TaskStatus::Pending);
+        let reopened_status = match target.status {
+            AssignmentStatus::Cancelled => match current_status {
+                TaskStatus::Pending => TaskStatus::InProgress,
+                TaskStatus::NeedsCorrection => TaskStatus::NeedsCorrection,
+                status => {
+                    return Err(StorageError::AssignmentConflict(format!(
+                        "cancelled assignment {assignment_id} cannot be reopened from task status {status:?}"
+                    )));
+                }
+            },
+            AssignmentStatus::Completed | AssignmentStatus::Submitted => {
+                if !matches!(
+                    current_status,
+                    TaskStatus::Submitted | TaskStatus::Completed
+                ) {
+                    return Err(StorageError::AssignmentConflict(format!(
+                        "completed assignment {assignment_id} cannot be reopened from task status {current_status:?}"
+                    )));
+                }
+                let events = self.load_events(image_id).await?;
+                annotation_status_before_completion(&events, assignment_id, task_id).ok_or_else(
+                    || {
+                        StorageError::AssignmentConflict(format!(
+                            "assignment {assignment_id} has no replayable annotation state"
+                        ))
+                    },
+                )?
+            }
+            AssignmentStatus::Active => {
+                return Err(StorageError::AssignmentConflict(format!(
+                    "assignment {assignment_id} is still active"
+                )));
+            }
+        };
+
+        let assignment = Assignment {
+            assignment_id: AssignmentId::generate(),
+            image_id: image_id.clone(),
+            task_id: task_id.clone(),
+            assigned_to: user_id.clone(),
+            kind: AssignmentKind::Annotation,
+            status: AssignmentStatus::Active,
+            expires_at: Some(lease_expiration(now)),
+            created_at: now,
+            updated_at: now,
+        };
+        let assigned_to = (reopened_status == TaskStatus::InProgress).then(|| user_id.clone());
+        self.append_payloads_unlocked(
+            image_id,
+            &Actor {
+                user_id: user_id.clone(),
+                role: DatasetRole::Annotator,
+            },
+            vec![
+                EventPayload::AssignmentUpdated {
+                    assignment: assignment.clone(),
+                },
+                EventPayload::TaskStateChanged {
+                    task_state: TaskState {
+                        task_id: task_id.clone(),
+                        status: reopened_status,
+                        outcome: None,
+                        assigned_to,
+                        completed_by: None,
+                        completed_at: None,
+                        updated_at: now,
+                    },
+                },
+            ],
+        )
+        .await?;
+        Ok(assignment)
+    }
+
     pub async fn complete_assignment(
         &self,
         user_id: &UserId,
@@ -1045,6 +1218,39 @@ fn current_task_reviews_from_events(
             _ => None,
         })
         .collect()
+}
+
+fn annotation_status_before_completion(
+    events: &[EventLogEntry],
+    assignment_id: &AssignmentId,
+    task_id: &TaskId,
+) -> Option<TaskStatus> {
+    let completion = events.iter().rposition(|event| {
+        matches!(
+            &event.payload,
+            EventPayload::AssignmentUpdated { assignment }
+                if assignment.assignment_id == *assignment_id
+                    && matches!(
+                        assignment.status,
+                        AssignmentStatus::Completed | AssignmentStatus::Submitted
+                    )
+        )
+    })?;
+    events[..completion]
+        .iter()
+        .rev()
+        .find_map(|event| match &event.payload {
+            EventPayload::TaskStateChanged { task_state }
+                if task_state.task_id == *task_id
+                    && matches!(
+                        task_state.status,
+                        TaskStatus::InProgress | TaskStatus::NeedsCorrection
+                    ) =>
+            {
+                Some(task_state.status.clone())
+            }
+            _ => None,
+        })
 }
 
 fn validate_annotation_batch(
@@ -1787,6 +1993,251 @@ mod tests {
             .unwrap();
         assert_eq!(reclaimed.image_id, first.image_id);
         assert_ne!(reclaimed.assignment_id, first.assignment_id);
+    }
+
+    #[tokio::test]
+    async fn cancelled_assignment_reopens_as_a_fresh_replayable_attempt() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let original = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.release_assignment(
+            &users[0],
+            &original.assignment_id,
+            &original.image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+
+        let reopened = repo
+            .reopen_annotation_assignment(
+                &users[0],
+                &original.assignment_id,
+                &original.image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap();
+        let retry = repo
+            .reopen_annotation_assignment(
+                &users[0],
+                &original.assignment_id,
+                &original.image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(reopened.assignment_id, original.assignment_id);
+        assert_eq!(retry.assignment_id, reopened.assignment_id);
+        let state = repo.rebuild_image_state(&original.image_id).await.unwrap();
+        assert_eq!(state.task_states[&task_id].status, TaskStatus::InProgress);
+        assert_eq!(
+            assignment_status(&state, &original),
+            AssignmentStatus::Cancelled
+        );
+        assert_eq!(
+            assignment_status(&state, &reopened),
+            AssignmentStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn submitted_assignment_reopens_to_its_previous_annotation_state() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let original = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.complete_assignment(
+            &users[0],
+            &original.assignment_id,
+            &original.image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+
+        let reopened = repo
+            .reopen_annotation_assignment(
+                &users[0],
+                &original.assignment_id,
+                &original.image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap();
+
+        let state = repo.rebuild_image_state(&original.image_id).await.unwrap();
+        assert_eq!(state.task_states[&task_id].status, TaskStatus::InProgress);
+        assert_eq!(
+            assignment_status(&state, &original),
+            AssignmentStatus::Completed
+        );
+        assert_eq!(
+            assignment_status(&state, &reopened),
+            AssignmentStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_preserves_needs_correction_and_rejects_downstream_review_work() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker", "reviewer"]).await;
+        let mut metadata = repo.load_dataset_config().await.unwrap();
+        metadata.role_assignments[1]
+            .roles
+            .insert(DatasetRole::Reviewer);
+        repo.save_dataset(&metadata).await.unwrap();
+        let image_id = ImageId::from("img_0");
+        repo.append_payload(
+            &image_id,
+            &Actor {
+                user_id: users[0].clone(),
+                role: DatasetRole::Annotator,
+            },
+            EventPayload::TaskStateChanged {
+                task_state: TaskState {
+                    task_id: task_id.clone(),
+                    status: TaskStatus::NeedsCorrection,
+                    outcome: None,
+                    assigned_to: None,
+                    completed_by: None,
+                    completed_at: None,
+                    updated_at: now(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let correction = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.complete_assignment(
+            &users[0],
+            &correction.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+        let reopened = repo
+            .reopen_annotation_assignment(
+                &users[0],
+                &correction.assignment_id,
+                &image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.load_image_state(&image_id).await.unwrap().task_states[&task_id].status,
+            TaskStatus::NeedsCorrection
+        );
+
+        repo.complete_assignment(
+            &users[0],
+            &reopened.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+        repo.assign_next_image(&users[1], &task_id, AssignmentKind::Review)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = repo
+            .reopen_annotation_assignment(
+                &users[0],
+                &reopened.assignment_id,
+                &image_id,
+                &task_id,
+                AssignmentKind::Annotation,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StorageError::AssignmentConflict(_)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_reopen_retries_share_one_renewed_successor() {
+        let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
+        let original = repo
+            .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.release_assignment(
+            &users[0],
+            &original.assignment_id,
+            &original.image_id,
+            &task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap();
+        let left_repo = repo.clone();
+        let right_repo = repo.clone();
+        let left_assignment = original.clone();
+        let right_assignment = original.clone();
+        let left_task = task_id.clone();
+        let right_task = task_id.clone();
+        let left_user = users[0].clone();
+        let right_user = users[0].clone();
+
+        let (left, right) = tokio::join!(
+            async move {
+                left_repo
+                    .reopen_annotation_assignment(
+                        &left_user,
+                        &left_assignment.assignment_id,
+                        &left_assignment.image_id,
+                        &left_task,
+                        AssignmentKind::Annotation,
+                    )
+                    .await
+                    .unwrap()
+            },
+            async move {
+                right_repo
+                    .reopen_annotation_assignment(
+                        &right_user,
+                        &right_assignment.assignment_id,
+                        &right_assignment.image_id,
+                        &right_task,
+                        AssignmentKind::Annotation,
+                    )
+                    .await
+                    .unwrap()
+            }
+        );
+
+        assert_eq!(left.assignment_id, right.assignment_id);
+        assert!(left.expires_at.is_some());
+        assert!(right.expires_at.is_some());
+        let state = repo.rebuild_image_state(&original.image_id).await.unwrap();
+        assert_eq!(
+            state
+                .assignments
+                .iter()
+                .filter(|assignment| assignment.status == AssignmentStatus::Active)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

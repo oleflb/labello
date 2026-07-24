@@ -117,6 +117,17 @@ pub trait ImageApi {
             ))
         })
     }
+    fn reopen_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Assignment> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "assignment reopen is not implemented by this client".to_string(),
+            ))
+        })
+    }
     fn get_image_state<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

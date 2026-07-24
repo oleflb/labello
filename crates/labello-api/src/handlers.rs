@@ -155,6 +155,10 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::complete_assignment),
         )
         .route(
+            "/datasets/{dataset_id}/assignments/reopen",
+            post(workflow::reopen_assignment),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}",
             get(workflow::get_image_state),
         )

@@ -117,6 +117,7 @@ pub(crate) enum Drawer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingTransition {
     NextAssignment,
+    PreviousAssignment(Assignment),
     Workflow(TaskId),
     View(AppView),
 }
@@ -198,6 +199,12 @@ pub(crate) enum UiMessage {
         operation_id: u64,
         assignment: Option<Assignment>,
         result: Box<Result<Option<LoadedImage>, String>>,
+    },
+    PreviousAssignmentLoaded {
+        request: RequestIdentity,
+        operation_id: u64,
+        assignment: Option<Assignment>,
+        result: Box<Result<LoadedImage, String>>,
     },
     PrefetchLoaded {
         request: RequestIdentity,
@@ -385,6 +392,13 @@ pub(crate) enum UiCommand {
         prelabel_config_ids: Vec<PrelabelConfigId>,
         fetch_prelabels: bool,
     },
+    ReopenAssignment {
+        request: RequestIdentity,
+        operation_id: u64,
+        dataset_id: DatasetId,
+        assignment: Assignment,
+        prelabel_config_ids: Vec<PrelabelConfigId>,
+    },
     SaveAnnotations {
         request: RequestIdentity,
         operation_id: u64,
@@ -452,6 +466,7 @@ impl UiCommand {
             | Self::PrefetchAssignment { request, .. }
             | Self::ReleaseReservation { request, .. }
             | Self::ReloadAssignment { request, .. }
+            | Self::ReopenAssignment { request, .. }
             | Self::SaveAnnotations { request, .. }
             | Self::ReleaseAssignment { request, .. }
             | Self::Review { request, .. }
@@ -479,6 +494,7 @@ impl UiMessage {
             | Self::SnapshotCreated { request, .. }
             | Self::SnapshotDownloaded { request, .. }
             | Self::ImageLoaded { request, .. }
+            | Self::PreviousAssignmentLoaded { request, .. }
             | Self::PrefetchLoaded { request, .. }
             | Self::ReservationReleased { request, .. }
             | Self::SaveFinished { request, .. }
@@ -730,6 +746,7 @@ pub struct WorkState {
     pub(crate) selected_task_id: Option<TaskId>,
     pub(crate) tool: Tool,
     pub(crate) assignment: Option<Assignment>,
+    pub(crate) previous_annotation_assignment: Option<Assignment>,
     pub(crate) current: Option<QueuedImage>,
     pub(crate) current_state: Option<ImageState>,
     pub(crate) current_texture: Option<TextureHandle>,
@@ -894,6 +911,7 @@ impl LabelloApp {
             selected_task_id: Some(TaskId::from("bounding_box:person")),
             tool: Tool::BoundingBox,
             assignment: None,
+            previous_annotation_assignment: None,
             current,
             current_state: None,
             current_texture: None,
@@ -1185,8 +1203,14 @@ impl LabelloApp {
                     self.advance_current_image();
                 }
             }
+            PendingTransition::PreviousAssignment(assignment) => {
+                self.previous_annotation_assignment = Some(assignment.clone());
+                self.clear_current_image();
+                self.request_reopen_assignment(assignment);
+            }
             PendingTransition::Workflow(task_id) => {
                 if self.select_workflow(&task_id) {
+                    self.clear_previous_annotation_assignment();
                     self.begin_workspace_epoch();
                     self.clear_current_image();
                     self.request_next_image();
@@ -1196,6 +1220,7 @@ impl LabelloApp {
                 self.show_tutorial = false;
                 self.drawer = None;
                 self.begin_workspace_epoch();
+                self.clear_previous_annotation_assignment();
                 if view == AppView::Admin {
                     self.clear_current_image();
                     self.request_admin_dataset();
@@ -1218,6 +1243,7 @@ impl LabelloApp {
     fn transition_is_current(&self, transition: &PendingTransition) -> bool {
         match transition {
             PendingTransition::NextAssignment => false,
+            PendingTransition::PreviousAssignment(_) => false,
             PendingTransition::Workflow(task_id) => self.selected_task_id.as_ref() == Some(task_id),
             PendingTransition::View(view) => self.view == *view,
         }
@@ -1282,6 +1308,39 @@ impl LabelloApp {
         }
         self.pending_transition = Some(PendingTransition::NextAssignment);
         self.request_release();
+    }
+
+    pub(crate) fn return_to_previous_assignment(&mut self) {
+        if self.view != AppView::Annotate
+            || self.loading.saving
+            || self.loading.image
+            || self.pending_transition.is_some()
+            || self.runtime.api.is_none()
+        {
+            return;
+        }
+        let Some(previous) = self.previous_annotation_assignment.clone() else {
+            return;
+        };
+        if previous.status == labello_domain::AssignmentStatus::Active
+            && previous
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= labello_domain::now())
+        {
+            self.clear_previous_annotation_assignment();
+            self.runtime.error = Some(
+                "The previous assignment lease expired and can no longer be returned to."
+                    .to_string(),
+            );
+            return;
+        }
+        if self.assignment.is_some()
+            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+        {
+            self.pending_transition = Some(PendingTransition::PreviousAssignment(previous));
+            return;
+        }
+        self.request_reopen_assignment(previous);
     }
 
     fn submission_issue(&self) -> Option<String> {
@@ -2023,10 +2082,18 @@ impl LabelloApp {
             && !self.loading.image
             && self.pending_transition.is_none()
             && !self.canvas.is_dragging();
+        let previous_ready = self.view == AppView::Annotate
+            && self.previous_annotation_assignment.is_some()
+            && self.runtime.api.is_some()
+            && !self.loading.saving
+            && !self.loading.image
+            && self.pending_transition.is_none()
+            && !self.canvas.is_dragging();
         match action {
             UserAction::NextImage if self.view == AppView::Annotate && ready => {
                 self.submit_and_advance()
             }
+            UserAction::PreviousImage if previous_ready => self.return_to_previous_assignment(),
             UserAction::UndoEdit if self.view == AppView::Annotate && ready => self.undo(),
             UserAction::RedoEdit if self.view == AppView::Annotate && ready => self.redo(),
             UserAction::SaveAnnotations if self.view == AppView::Annotate && ready => {
@@ -2129,8 +2196,7 @@ impl LabelloApp {
                     self.request_review(labello_domain::ReviewDecision::Rejected);
                 }
             }
-            UserAction::PreviousImage
-            | UserAction::SelectBoundingBoxTool
+            UserAction::SelectBoundingBoxTool
             | UserAction::SelectKeypointTool
             | UserAction::ToggleOfflineMode => {}
             _ => {}

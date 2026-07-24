@@ -166,6 +166,41 @@ pub(crate) async fn complete_assignment(
     Ok(Json(assignment))
 }
 
+pub(crate) async fn reopen_assignment(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+    Json(request): Json<AssignmentActionRequest>,
+) -> ApiResult<Json<labello_domain::Assignment>> {
+    request.assignment_id.validate_path_segment()?;
+    request.image_id.validate_path_segment()?;
+    request.task_id.validate_path_segment()?;
+    if request.kind != AssignmentKind::Annotation {
+        return Err(ApiError::BadRequest(
+            "only annotation assignments can be reopened".to_string(),
+        ));
+    }
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = repo
+        .reopen_annotation_assignment(
+            &actor.user_id,
+            &request.assignment_id,
+            &request.image_id,
+            &request.task_id,
+            request.kind,
+        )
+        .await?;
+    tracing::debug!(
+        event = "assignment.reopened",
+        dataset_id = %dataset_id,
+        user_id = %actor.user_id,
+        assignment_id = %assignment.assignment_id,
+        "assignment reopened"
+    );
+    Ok(Json(assignment))
+}
+
 pub(crate) async fn get_image_state(
     State(state): State<ApiState>,
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,

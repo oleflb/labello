@@ -231,7 +231,23 @@ impl LabelloApp {
             && !self.loading.image
             && self.pending_transition.is_none();
         if self.view == AppView::Annotate {
-            if ui
+            let show_previous = self.previous_annotation_assignment.is_some()
+                && !matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry);
+            if show_previous {
+                if ui
+                    .add_enabled(
+                        self.runtime.api.is_some()
+                            && !self.loading.saving
+                            && !self.loading.image
+                            && self.pending_transition.is_none(),
+                        egui::Button::new("Previous"),
+                    )
+                    .on_hover_text("Return to the last skipped or submitted assignment.")
+                    .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::PreviousImage);
+                }
+            } else if ui
                 .add_enabled(
                     ready && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry),
                     egui::Button::new("Save"),
@@ -266,6 +282,23 @@ impl LabelloApp {
         }
         if self.view == AppView::Annotate {
             ui.menu_button("More actions", |ui| {
+                if self.previous_annotation_assignment.is_some()
+                    && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+                    && ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new("Previous assignment").shortcut_text(
+                                self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::PreviousImage,
+                                ),
+                            ),
+                        )
+                        .clicked()
+                {
+                    self.trigger_user_action(labello_domain::UserAction::PreviousImage);
+                    ui.close();
+                }
                 if ui
                     .add_enabled(
                         ready && !self.undo_stack.is_empty(),
@@ -319,6 +352,25 @@ impl LabelloApp {
                 },
                 |ui| {
                     if self.view == AppView::Annotate {
+                        if ui
+                            .add_enabled(
+                                self.previous_annotation_assignment.is_some()
+                                    && self.runtime.api.is_some()
+                                    && !self.loading.saving
+                                    && !self.loading.image
+                                    && self.pending_transition.is_none(),
+                                egui::Button::new("Previous assignment").shortcut_text(
+                                    self.shortcut_text(
+                                        ui.ctx(),
+                                        labello_domain::UserAction::PreviousImage,
+                                    ),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.trigger_user_action(labello_domain::UserAction::PreviousImage);
+                            ui.close();
+                        }
                         if ui
                             .add_enabled(
                                 ready && !self.undo_stack.is_empty(),
@@ -1507,8 +1559,10 @@ impl LabelloApp {
             .map(|workflow| workflow.label())
             .unwrap_or_else(|| "No workflow".to_string());
         let destination = self.transition_label(&pending);
-        let discards_edits = pending == PendingTransition::NextAssignment
-            && self.view == AppView::Annotate
+        let discards_edits = matches!(
+            pending,
+            PendingTransition::NextAssignment | PendingTransition::PreviousAssignment(_)
+        ) && self.view == AppView::Annotate
             && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry);
         if pending == PendingTransition::NextAssignment && !discards_edits {
             return;
@@ -1611,6 +1665,7 @@ impl LabelloApp {
     fn transition_label(&self, transition: &PendingTransition) -> String {
         match transition {
             PendingTransition::NextAssignment => "Next assignment".to_string(),
+            PendingTransition::PreviousAssignment(_) => "Previous assignment".to_string(),
             PendingTransition::Workflow(task_id) => self
                 .workflow_choices()
                 .into_iter()
@@ -2103,7 +2158,7 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
         UserAction::ZoomIn => "Zoom in",
         UserAction::ZoomOut => "Zoom out",
         UserAction::FitImage => "Fit image",
-        UserAction::PreviousImage => "Previous image",
+        UserAction::PreviousImage => "Previous assignment",
         UserAction::SaveAnnotations => "Save annotations",
         UserAction::DeleteAnnotation => "Delete annotation",
         UserAction::SelectBoundingBoxTool => "Bounding-box tool",
@@ -2122,7 +2177,8 @@ fn action_category(action: labello_domain::UserAction) -> &'static str {
         | UserAction::UndoEdit
         | UserAction::RedoEdit
         | UserAction::SaveAnnotations
-        | UserAction::SkipAssignment => "Assignment",
+        | UserAction::SkipAssignment
+        | UserAction::PreviousImage => "Assignment",
         UserAction::SelectPreviousWorkflow
         | UserAction::SelectNextWorkflow
         | UserAction::SelectPreviousObject
@@ -2144,8 +2200,7 @@ fn action_category(action: labello_domain::UserAction) -> &'static str {
         | UserAction::OpenSettings
         | UserAction::RetryImageLoad => "Workspace",
         UserAction::AcceptReviewObject | UserAction::RejectReviewObject => "Review",
-        UserAction::PreviousImage
-        | UserAction::SelectBoundingBoxTool
+        UserAction::SelectBoundingBoxTool
         | UserAction::SelectKeypointTool
         | UserAction::ToggleOfflineMode => "Legacy",
     }
@@ -2181,8 +2236,8 @@ fn action_description(action: labello_domain::UserAction) -> &'static str {
         UserAction::FitImage => "Fit and center the image.",
         UserAction::AcceptReviewObject => "Approve the current review object.",
         UserAction::RejectReviewObject => "Reject the current review object.",
-        UserAction::PreviousImage
-        | UserAction::SelectBoundingBoxTool
+        UserAction::PreviousImage => "Return to the last skipped or submitted assignment.",
+        UserAction::SelectBoundingBoxTool
         | UserAction::SelectKeypointTool
         | UserAction::ToggleOfflineMode => "No longer used.",
     }

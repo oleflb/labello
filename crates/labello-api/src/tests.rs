@@ -1576,6 +1576,79 @@ async fn assignment_lifecycle_is_exact_owned_and_resumable() {
 }
 
 #[tokio::test]
+async fn cancelled_and_submitted_annotation_assignments_can_be_reopened_exactly() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "first.png", &png_bytes(2, 2)).await;
+
+    let original = claim_assignment(&app, "admin", "annotation").await;
+    assert_eq!(
+        post_assignment_action(&app, "admin", "release", &original)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_assignment_action(&app, "other_annotator", "reopen", &original)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let reopened = post_assignment_action(&app, "admin", "reopen", &original).await;
+    assert_eq!(reopened.status(), StatusCode::OK);
+    let reopened: serde_json::Value =
+        serde_json::from_slice(&to_bytes(reopened.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(reopened["imageId"], original["imageId"]);
+    assert_eq!(reopened["status"], "active");
+    assert_ne!(reopened["assignmentId"], original["assignmentId"]);
+
+    let retry = post_assignment_action(&app, "admin", "reopen", &original).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: serde_json::Value =
+        serde_json::from_slice(&to_bytes(retry.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(retry["assignmentId"], reopened["assignmentId"]);
+
+    assert_eq!(
+        post_assignment_action(&app, "admin", "complete", &reopened)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let resubmitted = post_assignment_action(&app, "admin", "reopen", &reopened).await;
+    assert_eq!(resubmitted.status(), StatusCode::OK);
+    let resubmitted: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resubmitted.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(resubmitted["imageId"], original["imageId"]);
+    assert_ne!(resubmitted["assignmentId"], reopened["assignmentId"]);
+
+    let invalid_kind = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/datasets/ds/assignments/reopen")
+                .header("x-test-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "assignmentId": original["assignmentId"],
+                        "imageId": original["imageId"],
+                        "taskId": original["taskId"],
+                        "kind": "review"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_kind.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn annotation_batch_validates_atomically_and_returns_resulting_state() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

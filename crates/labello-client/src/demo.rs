@@ -224,6 +224,18 @@ impl ImageApi for DemoLabelloApi {
         })
     }
 
+    fn reopen_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Assignment> {
+        Box::pin(async move {
+            Err(ClientError::Demo(
+                "the demo backend does not create assignments".to_string(),
+            ))
+        })
+    }
+
     fn get_image_state<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,
