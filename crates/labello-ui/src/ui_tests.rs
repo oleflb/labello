@@ -2963,13 +2963,53 @@ fn stats_geometry_keeps_header_actions_and_equal_cards_in_view() {
                 (cards[0].width() - cards[1].width()).abs() <= 2.0,
                 "metric cards are not equal at {width}x{height}: {cards:?}",
             );
-        } else {
+        }
+        if LayoutMode::for_width(width) == LayoutMode::Compact {
             assert!(harness.query_by_label("Person boxes").is_some());
-            assert!(
+            let rows = [
+                "Pending: 1  Unreviewed: 1",
+                "Approved: 1  Rejected: 0",
+                "Finalized: 1  Done: 1",
+            ]
+            .map(|label| {
                 harness
-                    .query_by_label_contains("Completed: 1  Pending: 1")
-                    .is_some()
+                    .query_by_label_contains(label)
+                    .unwrap_or_else(|| panic!("missing compact task statistics row {label}"))
+                    .rect()
+                    .top()
+            });
+            assert!(
+                rows.windows(2).all(|pair| pair[0] < pair[1]),
+                "compact task statistics do not follow workflow order: {rows:?}"
             );
+        } else {
+            assert!(harness.query_by_label("Done").is_some());
+            assert!(harness.query_by_label("Completed tasks").is_some());
+            if LayoutMode::for_width(width) == LayoutMode::Wide {
+                let header_y = harness.get_by_label("Done").rect().center().y;
+                let columns = [
+                    "Pending",
+                    "Unreviewed",
+                    "Reviewed",
+                    "Approved",
+                    "Rejected",
+                    "Corrected",
+                    "Finalized",
+                    "Done",
+                ]
+                .map(|label| {
+                    harness
+                        .query_all_by_label(label)
+                        .find(|node| (node.rect().center().y - header_y).abs() <= 1.0)
+                        .unwrap_or_else(|| panic!("missing task statistics column {label}"))
+                        .rect()
+                        .left()
+                });
+                assert!(
+                    columns.windows(2).all(|pair| pair[0] < pair[1]),
+                    "task statistics columns do not follow workflow order: {columns:?}"
+                );
+            }
         }
         assert_visible_controls_clamped(&harness, width, height);
     }
@@ -3730,21 +3770,24 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 }
 
 #[test]
-fn stats_initial_failure_hides_zero_metrics_but_refresh_failure_keeps_data() {
+fn stats_remote_states_never_replace_real_data_with_placeholders() {
     let mut app = LabelloApp {
         view: AppView::Stats,
         ..Default::default()
     };
-    app.datasets.stats_error = Some("statistics unavailable".to_string());
+    app.loading.stats = true;
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1000.0, 780.0))
         .build_eframe(move |_| app);
 
-    assert!(
-        harness
-            .query_by_label("Statistics refresh failed: statistics unavailable")
-            .is_some()
-    );
+    assert!(harness.query_by_label("Loading statistics...").is_some());
+    assert!(harness.query_by_label("Metric Images").is_none());
+
+    harness.state_mut().loading.stats = false;
+    harness.state_mut().datasets.stats_error = Some("statistics unavailable".to_string());
+    harness.step();
+    assert!(harness.query_by_label("Statistics unavailable").is_some());
+    assert!(harness.query_by_label("Retry statistics").is_some());
     assert!(harness.query_by_label("Metric Images").is_none());
 
     harness.state_mut().datasets.stats = stats(12);
@@ -3753,9 +3796,62 @@ fn stats_initial_failure_hides_zero_metrics_but_refresh_failure_keeps_data() {
     assert!(harness.query_by_label("Metric Images").is_some());
     assert!(
         harness
-            .query_by_label("Statistics refresh failed: statistics unavailable")
+            .query_by_label("Statistics may be stale. Last refresh failed: statistics unavailable")
             .is_some()
     );
+
+    harness.state_mut().datasets.stats_error = None;
+    harness.state_mut().loading.stats = true;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing statistics").is_some());
+    assert!(harness.query_by_label("Metric Images").is_some());
+
+    harness.state_mut().loading.stats = false;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing statistics").is_none());
+    assert!(harness.query_by_label("Metric Images").is_some());
+}
+
+#[test]
+fn throughput_chart_exposes_each_daily_value_to_accessibility() {
+    let mut app = LabelloApp {
+        view: AppView::Stats,
+        ..Default::default()
+    };
+    app.datasets.stats = stats(12);
+    app.datasets.stats.throughput = vec![
+        labello_domain::ThroughputPoint {
+            day: "2026-07-22".to_string(),
+            annotations: 12_345,
+            reviews: 1,
+        },
+        labello_domain::ThroughputPoint {
+            day: "2026-07-23".to_string(),
+            annotations: 5,
+            reviews: 2,
+        },
+    ];
+    app.datasets.last_stats_completion = Some(Instant::now());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 1600.0))
+        .build_eframe(move |_| app);
+
+    for width in [1440.0, 600.0, 320.0] {
+        harness.set_size(egui::vec2(width, 1600.0));
+        harness.step();
+        assert!(harness.query_by_label("Daily throughput chart").is_some());
+        for label in [
+            "2026-07-22: 12345 annotations, 1 review",
+            "2026-07-23: 5 annotations, 2 reviews",
+        ] {
+            assert!(
+                harness
+                    .query_by_role_and_label(egui::accesskit::Role::Label, label)
+                    .is_some(),
+                "missing accessible throughput value at width {width}: {label}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -843,7 +843,7 @@ impl LabelloApp {
                 return;
             }
             AppView::Stats => {
-                centered_scroll(ui, 1100.0, |ui| self.stats_view(ui));
+                centered_scroll(ui, 1100.0, |ui| self.stats_view(ui, layout));
                 return;
             }
             AppView::Annotate | AppView::Review | AppView::Adjudicate => {}

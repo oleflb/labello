@@ -1113,48 +1113,77 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui) {
-        let initial_loading = self.loading.stats && self.datasets.last_stats_completion.is_none();
+    pub(crate) fn stats_view(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        let has_data = self.datasets.last_stats_completion.is_some();
+        let initial_loading = self.loading.stats && !has_data;
         ui.horizontal_wrapped(|ui| {
-            ui.heading("Live Statistics");
-            if self.loading.stats {
-                ui.spinner();
-            }
-            if theme::quiet_button(ui, !self.loading.stats, egui::Button::new("Refresh now"))
-                .on_hover_text("Refresh statistics immediately. They also refresh automatically.")
-                .clicked()
+            ui.label(
+                RichText::new("Live Statistics")
+                    .size(theme::PAGE_TITLE_SIZE)
+                    .strong(),
+            );
+            if has_data
+                && theme::quiet_button(ui, !self.loading.stats, egui::Button::new("Refresh now"))
+                    .on_hover_text(
+                        "Refresh statistics immediately. They also refresh automatically.",
+                    )
+                    .clicked()
             {
                 self.request_stats();
+            }
+        });
+        if initial_loading {
+            theme::card_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Loading statistics...").strong());
+                });
+                ui.label(
+                    RichText::new("Fetching the first dataset summary.").color(theme::TEXT_MUTED),
+                );
+            });
+            return;
+        }
+        if !has_data {
+            let (title, explanation, action) = if let Some(error) = &self.datasets.stats_error {
+                (
+                    "Statistics unavailable",
+                    format!("The first statistics request failed: {error}"),
+                    "Retry statistics",
+                )
+            } else {
+                (
+                    "Statistics have not loaded",
+                    "Load the current dataset summary and activity history.".to_string(),
+                    "Load statistics",
+                )
+            };
+            if theme::empty_state(ui, title, &explanation, Some(egui::Button::new(action))) {
+                self.request_stats();
+            }
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if self.loading.stats {
+                ui.label(RichText::new("Refreshing statistics").color(theme::TEXT_MUTED));
+            }
+            if let Some(completed) = self.datasets.last_stats_completion {
+                let seconds = completed.elapsed().as_secs();
+                ui.small(match seconds {
+                    0 => "Updated just now".to_string(),
+                    1 => "Updated 1 second ago".to_string(),
+                    _ => format!("Updated {seconds} seconds ago"),
+                });
             }
         });
         if let Some(error) = &self.datasets.stats_error {
             theme::inline_message(
                 ui,
-                theme::Intent::Error,
-                format!("Statistics refresh failed: {error}"),
+                theme::Intent::Warning,
+                format!("Statistics may be stale. Last refresh failed: {error}"),
             );
         }
-        if initial_loading {
-            theme::card_frame().show(ui, |ui| {
-                ui.label("Loading statistics...");
-            });
-            return;
-        }
-        if self.datasets.last_stats_completion.is_none() {
-            if self.datasets.stats_error.is_none() {
-                theme::card_frame().show(ui, |ui| {
-                    ui.label("Statistics have not loaded.");
-                });
-            }
-            return;
-        }
-        if let Some(completed) = self.datasets.last_stats_completion {
-            ui.small(format!(
-                "Updated {} second(s) ago",
-                completed.elapsed().as_secs()
-            ));
-        }
-        let compact = ui.available_width() < 600.0;
+        let compact = layout == LayoutMode::Compact;
         let task_names = self
             .tasks
             .iter()
@@ -1175,12 +1204,16 @@ impl LabelloApp {
             ("Approved", self.datasets.stats.approved_tasks),
             ("Rejected", self.datasets.stats.rejected_tasks),
             (
-                "Reviewer corrected",
+                if compact {
+                    "Corrected"
+                } else {
+                    "Reviewer corrected"
+                },
                 self.datasets.stats.reviewer_corrected_tasks,
             ),
             ("Finalized", self.datasets.stats.finalized_tasks),
         ];
-        let minimum_card_width = 180.0;
+        let minimum_card_width = if compact { 124.0 } else { 160.0 };
         let column_count = (((ui.available_width() + 10.0) / (minimum_card_width + 10.0)).floor()
             as usize)
             .clamp(1, 4);
@@ -1193,6 +1226,7 @@ impl LabelloApp {
         }
         ui.add_space(12.0);
         theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.heading("Per Task");
             let rows = &self.datasets.stats.per_task;
             if rows.is_empty() {
@@ -1204,7 +1238,8 @@ impl LabelloApp {
                 );
             } else if compact {
                 for (task_id, stats) in rows {
-                    theme::card_frame().show(ui, |ui| {
+                    theme::inset_frame().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(
                             RichText::new(
                                 task_names
@@ -1215,16 +1250,16 @@ impl LabelloApp {
                             .strong(),
                         );
                         ui.label(format!(
-                            "Completed: {}  Pending: {}  Finalized: {}",
-                            stats.completed, stats.pending, stats.finalized
+                            "Pending: {}  Unreviewed: {}  Reviewed: {}",
+                            stats.pending, stats.unreviewed, stats.reviewed
                         ));
                         ui.label(format!(
-                            "Reviewed: {}  Unreviewed: {}  Approved: {}",
-                            stats.reviewed, stats.unreviewed, stats.approved
+                            "Approved: {}  Rejected: {}  Reviewer corrected: {}",
+                            stats.approved, stats.rejected, stats.reviewer_corrected
                         ));
                         ui.label(format!(
-                            "Rejected: {}  Reviewer corrected: {}",
-                            stats.rejected, stats.reviewer_corrected
+                            "Finalized: {}  Done: {}",
+                            stats.finalized, stats.completed
                         ));
                     });
                 }
@@ -1232,42 +1267,12 @@ impl LabelloApp {
                 egui::ScrollArea::horizontal()
                     .id_salt("stats_tasks_horizontal")
                     .show(ui, |ui| {
-                        ui.set_min_width(980.0);
-                        stats_task_row(
-                            ui,
-                            "Task",
-                            "Done",
-                            "Pending",
-                            "Reviewed",
-                            "Unreviewed",
-                            "Approved",
-                            "Rejected",
-                            "Corrected",
-                            "Finalized",
-                            true,
-                        );
-                        for (task_id, stats) in rows {
-                            stats_task_row(
-                                ui,
-                                task_names
-                                    .get(task_id)
-                                    .map(String::as_str)
-                                    .unwrap_or(task_id.as_str()),
-                                &stats.completed.to_string(),
-                                &stats.pending.to_string(),
-                                &stats.reviewed.to_string(),
-                                &stats.unreviewed.to_string(),
-                                &stats.approved.to_string(),
-                                &stats.rejected.to_string(),
-                                &stats.reviewer_corrected.to_string(),
-                                &stats.finalized.to_string(),
-                                false,
-                            );
-                        }
+                        stats_task_grid(ui, rows, &task_names);
                     });
             }
         });
         theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.heading("Per Class");
             let rows = &self.datasets.stats.per_class;
             if rows.is_empty() {
@@ -1279,7 +1284,8 @@ impl LabelloApp {
                 );
             } else if compact {
                 for (class_id, stats) in rows {
-                    theme::card_frame().show(ui, |ui| {
+                    theme::inset_frame().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(
                             RichText::new(
                                 class_names
@@ -1299,38 +1305,22 @@ impl LabelloApp {
                 egui::ScrollArea::horizontal()
                     .id_salt("stats_classes_horizontal")
                     .show(ui, |ui| {
-                        ui.set_min_width(520.0);
-                        stats_class_row(ui, "Class", "Annotations", "Completed tasks", true);
-                        for (class_id, stats) in rows {
-                            stats_class_row(
-                                ui,
-                                class_names
-                                    .get(class_id)
-                                    .map(String::as_str)
-                                    .unwrap_or(class_id.as_str()),
-                                &stats.annotations.to_string(),
-                                &stats.completed_tasks.to_string(),
-                                false,
-                            );
-                        }
+                        stats_class_grid(ui, rows, &class_names);
                     });
             }
         });
         theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.heading("Throughput");
             if self.datasets.stats.throughput.is_empty() {
                 theme::empty_state(
                     ui,
-                    "No completed activity",
-                    "Throughput appears after annotations or reviews are completed.",
+                    "No recorded activity",
+                    "Throughput appears after annotations are created or reviews are recorded.",
                     None,
                 );
-            }
-            for point in self.datasets.stats.throughput.iter().rev().take(14).rev() {
-                ui.label(format!(
-                    "{}: {} annotations, {} reviews",
-                    point.day, point.annotations, point.reviews
-                ));
+            } else {
+                stats_throughput_chart(ui, &self.datasets.stats.throughput);
             }
         });
     }
@@ -3234,51 +3224,238 @@ fn show_issues(ui: &mut egui::Ui, issues: &[String]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stats_task_row(
+fn stats_task_grid(
     ui: &mut egui::Ui,
-    task: &str,
-    completed: &str,
-    pending: &str,
-    reviewed: &str,
-    unreviewed: &str,
-    approved: &str,
-    rejected: &str,
-    corrected: &str,
-    finalized: &str,
-    header: bool,
+    rows: &BTreeMap<TaskId, labello_domain::TaskStats>,
+    task_names: &BTreeMap<TaskId, String>,
 ) {
-    ui.horizontal(|ui| {
-        stats_cell(ui, task, 180.0, header);
-        for value in [
-            completed, pending, reviewed, unreviewed, approved, rejected, corrected, finalized,
-        ] {
-            stats_cell(ui, value, 84.0, header);
-        }
-    });
+    egui::Grid::new("stats-task-grid")
+        .num_columns(9)
+        .striped(true)
+        .spacing([theme::SPACE_3, theme::SPACE_1])
+        .show(ui, |ui| {
+            stats_name_cell(ui, "Task", 180.0, true);
+            for heading in [
+                "Pending",
+                "Unreviewed",
+                "Reviewed",
+                "Approved",
+                "Rejected",
+                "Corrected",
+                "Finalized",
+                "Done",
+            ] {
+                stats_number_cell(ui, heading, 84.0, true);
+            }
+            ui.end_row();
+
+            for (task_id, stats) in rows {
+                stats_name_cell(
+                    ui,
+                    task_names
+                        .get(task_id)
+                        .map(String::as_str)
+                        .unwrap_or(task_id.as_str()),
+                    180.0,
+                    false,
+                );
+                for value in [
+                    stats.pending,
+                    stats.unreviewed,
+                    stats.reviewed,
+                    stats.approved,
+                    stats.rejected,
+                    stats.reviewer_corrected,
+                    stats.finalized,
+                    stats.completed,
+                ] {
+                    stats_number_cell(ui, value, 84.0, false);
+                }
+                ui.end_row();
+            }
+        });
 }
 
-fn stats_class_row(
+fn stats_class_grid(
     ui: &mut egui::Ui,
-    class: &str,
-    annotations: &str,
-    completed: &str,
-    header: bool,
+    rows: &BTreeMap<ClassId, labello_domain::ClassStats>,
+    class_names: &BTreeMap<ClassId, String>,
 ) {
-    ui.horizontal(|ui| {
-        stats_cell(ui, class, 220.0, header);
-        stats_cell(ui, annotations, 130.0, header);
-        stats_cell(ui, completed, 140.0, header);
-    });
+    egui::Grid::new("stats-class-grid")
+        .num_columns(3)
+        .striped(true)
+        .spacing([theme::SPACE_3, theme::SPACE_1])
+        .show(ui, |ui| {
+            stats_name_cell(ui, "Class", 220.0, true);
+            stats_number_cell(ui, "Annotations", 130.0, true);
+            stats_number_cell(ui, "Completed tasks", 140.0, true);
+            ui.end_row();
+
+            for (class_id, stats) in rows {
+                stats_name_cell(
+                    ui,
+                    class_names
+                        .get(class_id)
+                        .map(String::as_str)
+                        .unwrap_or(class_id.as_str()),
+                    220.0,
+                    false,
+                );
+                stats_number_cell(ui, stats.annotations, 130.0, false);
+                stats_number_cell(ui, stats.completed_tasks, 140.0, false);
+                ui.end_row();
+            }
+        });
 }
 
-fn stats_cell(ui: &mut egui::Ui, value: &str, width: f32, header: bool) {
+fn stats_name_cell(ui: &mut egui::Ui, value: &str, width: f32, header: bool) {
     let text = if header {
-        RichText::new(value).strong().color(theme::MUTED)
+        RichText::new(value).strong().color(theme::TEXT_MUTED)
     } else {
-        RichText::new(value).color(theme::TEXT)
+        RichText::new(value).strong().color(theme::TEXT)
     };
-    ui.add_sized([width, 32.0], egui::Label::new(text).truncate());
+    ui.add_sized(
+        [width, 44.0],
+        egui::Label::new(text).truncate().halign(egui::Align::Min),
+    );
+}
+
+fn stats_number_cell(ui: &mut egui::Ui, value: impl ToString, width: f32, header: bool) {
+    let text = if header {
+        RichText::new(value.to_string())
+            .strong()
+            .color(theme::TEXT_MUTED)
+    } else {
+        RichText::new(value.to_string())
+            .monospace()
+            .color(theme::TEXT)
+    };
+    ui.add_sized(
+        [width, 44.0],
+        egui::Label::new(text).truncate().halign(egui::Align::Max),
+    );
+}
+
+fn stats_throughput_chart(ui: &mut egui::Ui, points: &[labello_domain::ThroughputPoint]) {
+    let points = points.iter().rev().take(14).rev().collect::<Vec<_>>();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Annotations").strong().color(theme::ACCENT));
+        ui.label(RichText::new("Reviews").strong().color(theme::INFO));
+        ui.label(
+            RichText::new("Daily annotation and review activity")
+                .size(theme::SUPPORTING_SIZE)
+                .color(theme::TEXT_MUTED),
+        );
+    });
+    let available_width = ui.available_width();
+    egui::ScrollArea::horizontal()
+        .id_salt("stats-throughput-chart-scroll")
+        .show(ui, |ui| {
+            let width = available_width.max(42.0 + points.len() as f32 * 48.0);
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, 184.0), egui::Sense::hover());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Daily throughput chart")
+            });
+
+            let maximum = points
+                .iter()
+                .flat_map(|point| [point.annotations, point.reviews])
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            let axis_width = stats_axis_width(maximum);
+            let plot = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + axis_width, rect.top() + 8.0),
+                egui::pos2(rect.right() - 8.0, rect.bottom() - 26.0),
+            );
+            let painter = ui.painter_at(rect);
+            let font = egui::FontId::new(theme::SUPPORTING_SIZE, egui::FontFamily::Monospace);
+            let tick_fractions: &[f32] = if maximum == 1 {
+                &[0.0, 1.0]
+            } else {
+                &[0.0, 0.5, 1.0]
+            };
+            for &fraction in tick_fractions {
+                let y = plot.bottom() - plot.height() * fraction;
+                painter.line_segment(
+                    [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                    egui::Stroke::new(1.0, theme::BORDER),
+                );
+                painter.text(
+                    egui::pos2(plot.left() - 6.0, y),
+                    egui::Align2::RIGHT_CENTER,
+                    (maximum as f32 * fraction).round() as usize,
+                    font.clone(),
+                    theme::TEXT_MUTED,
+                );
+            }
+
+            let group_width = plot.width() / points.len() as f32;
+            let bar_width = (group_width * 0.26).clamp(4.0, 18.0);
+            for (index, point) in points.iter().enumerate() {
+                let left = plot.left() + index as f32 * group_width;
+                let center = left + group_width * 0.5;
+                for (value, x, color) in [
+                    (point.annotations, center - bar_width - 1.0, theme::ACCENT),
+                    (point.reviews, center + 1.0, theme::INFO),
+                ] {
+                    if value > 0 {
+                        let height = plot.height() * value as f32 / maximum as f32;
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(x, plot.bottom() - height),
+                                egui::pos2(x + bar_width, plot.bottom()),
+                            ),
+                            egui::CornerRadius::same(2),
+                            color,
+                        );
+                    }
+                }
+                painter.text(
+                    egui::pos2(center, plot.bottom() + 6.0),
+                    egui::Align2::CENTER_TOP,
+                    point.day.get(5..).unwrap_or(&point.day),
+                    font.clone(),
+                    theme::TEXT_MUTED,
+                );
+
+                let detail = format!(
+                    "{}: {} {}, {} {}",
+                    point.day,
+                    point.annotations,
+                    if point.annotations == 1 {
+                        "annotation"
+                    } else {
+                        "annotations"
+                    },
+                    point.reviews,
+                    if point.reviews == 1 {
+                        "review"
+                    } else {
+                        "reviews"
+                    }
+                );
+                let hit = egui::Rect::from_min_max(
+                    egui::pos2(left, plot.top()),
+                    egui::pos2(left + group_width, rect.bottom()),
+                );
+                let response = ui
+                    .interact(
+                        hit,
+                        ui.id().with(("throughput-point", index)),
+                        egui::Sense::hover(),
+                    )
+                    .on_hover_text(detail.clone());
+                response.widget_info(move || {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, detail.clone())
+                });
+            }
+        });
+}
+
+fn stats_axis_width(maximum: usize) -> f32 {
+    (maximum.to_string().len() as f32 * 8.0 + 12.0).max(34.0)
 }
 
 #[cfg(test)]
@@ -3292,6 +3469,12 @@ mod tests {
         assert!(skeleton_issues(&skeleton, "Skeleton").is_empty());
         assert_eq!(skeleton.keypoints.len(), 1);
         assert!(skeleton.keypoints[0].required);
+    }
+
+    #[test]
+    fn statistics_axis_gutter_scales_with_large_values() {
+        assert_eq!(stats_axis_width(1), 34.0);
+        assert!(stats_axis_width(12_345) >= 52.0);
     }
 
     #[test]
