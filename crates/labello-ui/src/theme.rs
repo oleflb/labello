@@ -11,6 +11,7 @@ pub const APP_BG: Color32 = Color32::from_rgb(9, 14, 24);
 pub const PANEL: Color32 = Color32::from_rgb(15, 23, 42);
 pub const SURFACE: Color32 = Color32::from_rgb(21, 32, 52);
 pub const SURFACE_ELEVATED: Color32 = Color32::from_rgb(25, 36, 58);
+pub const BUTTON_BG: Color32 = Color32::from_rgb(29, 43, 68);
 pub const INPUT_BG: Color32 = Color32::from_rgb(12, 19, 32);
 pub const BORDER: Color32 = Color32::from_rgb(30, 41, 59);
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(51, 65, 85);
@@ -167,8 +168,7 @@ fn app_style() -> Style {
         expansion: 0.0,
     };
     style.visuals.widgets.noninteractive = widget(PANEL, PANEL, Stroke::new(1.0, BORDER), TEXT);
-    style.visuals.widgets.inactive =
-        widget(INPUT_BG, SURFACE_ELEVATED, Stroke::new(1.0, BORDER), TEXT);
+    style.visuals.widgets.inactive = widget(INPUT_BG, BUTTON_BG, Stroke::new(1.0, BORDER), TEXT);
     style.visuals.widgets.hovered = widget(
         Color32::from_rgb(32, 48, 76),
         Color32::from_rgb(32, 48, 76),
@@ -326,8 +326,8 @@ fn semantic_button(
     let (inactive, hovered, active, foreground, border) = match kind {
         ButtonKind::Primary => (ACCENT, ACCENT_HOVER, ACCENT_PRESSED, APP_BG, ACCENT_PRESSED),
         ButtonKind::Quiet => (
-            Color32::TRANSPARENT,
-            SURFACE,
+            BUTTON_BG,
+            Color32::from_rgb(35, 51, 80),
             SURFACE_ELEVATED,
             TEXT,
             BORDER,
@@ -592,6 +592,7 @@ mod tests {
             Stroke::new(1.5, ACCENT)
         );
         assert_eq!(style.visuals.text_edit_bg_color(), INPUT_BG);
+        assert_eq!(style.visuals.widgets.inactive.weak_bg_fill, BUTTON_BG);
         assert_eq!(style.visuals.disabled_alpha, 0.55);
         assert_eq!(style.spacing.interact_size, Vec2::splat(44.0));
     }
