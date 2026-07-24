@@ -798,6 +798,7 @@ impl crate::app::LabelloApp {
         self.runtime.persistence.preference_encoded = None;
         self.runtime.persistence.preference_desired_encoded = None;
         self.runtime.persistence.preference_retry.reset();
+        self.runtime.persistence.restoration_attempted = false;
         self.runtime.persistence.expected_assignment = None;
         self.runtime.persistence.recovery = None;
         self.runtime.persistence.last_work_draft = None;
@@ -814,6 +815,9 @@ impl crate::app::LabelloApp {
             return;
         }
         self.runtime.persistence.restoration_attempted = true;
+        if self.loading.dataset || self.datasets.requested_view.is_some() {
+            return;
+        }
         let Some(preference) = self.runtime.persistence.preference.clone() else {
             return;
         };

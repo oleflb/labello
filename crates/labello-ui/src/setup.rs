@@ -21,22 +21,22 @@ impl LabelloApp {
                     "Sign in, then open a dataset available to your account.",
                 )
             };
-            ui.heading(RichText::new(title).size(28.0));
-            ui.label(RichText::new(subtitle).color(theme::MUTED));
+            ui.heading(RichText::new(title).size(theme::PAGE_TITLE_SIZE));
+            ui.label(RichText::new(subtitle).color(theme::TEXT_MUTED));
         });
-        ui.add_space(18.0);
+        ui.add_space(theme::SPACE_4);
 
         if signed_in {
             self.datasets_section(ui);
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_5);
             egui::CollapsingHeader::new("Advanced connection settings")
                 .show(ui, |ui| self.connection_section(ui));
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_3);
             egui::CollapsingHeader::new("Create a dataset")
                 .show(ui, |ui| self.create_dataset_section(ui));
         } else {
             self.connection_section(ui);
-            ui.add_space(12.0);
+            ui.add_space(theme::SPACE_4);
             self.datasets_section(ui);
         }
     }
@@ -103,116 +103,197 @@ impl LabelloApp {
     }
 
     fn datasets_section(&mut self, ui: &mut egui::Ui) {
-        theme::card_frame().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.heading("Datasets");
-                if self.loading.datasets || self.loading.dataset {
-                    ui.spinner();
-                }
-                if self.loading.dataset {
-                    ui.small("Opening dataset...");
-                }
-                if self.auth.account.is_some()
-                    && theme::quiet_button(ui, true, egui::Button::new("Refresh"))
-                        .on_hover_text("Reload the accessible dataset list.")
-                        .clicked()
-                {
-                    self.request_dataset_list();
-                }
+        let signed_in = self.auth.account.is_some();
+        let has_datasets = !self.datasets.summaries.is_empty();
+        let summaries_error = self.datasets.summaries_error.clone();
+        let datasets = self.datasets.summaries.clone();
+        let recommended = if signed_in {
+            self.recommended_dataset()
+        } else {
+            None
+        };
+
+        if let Some(dataset) = recommended.as_ref() {
+            self.recommended_dataset_card(ui, dataset);
+            ui.add_space(theme::SPACE_5);
+        }
+
+        ui.horizontal(|ui| {
+            ui.heading(if signed_in && has_datasets {
+                "All datasets"
+            } else {
+                "Datasets"
             });
-            let signed_in = self.auth.account.is_some();
-            let has_datasets = !self.datasets.summaries.is_empty();
-            let summaries_error = self.datasets.summaries_error.clone();
-            if !signed_in {
-                theme::empty_state(
-                    ui,
-                    "Sign in to view datasets",
-                    "Available datasets will appear here after you sign in.",
-                    None,
-                );
-            } else if self.loading.datasets && !has_datasets {
-                ui.label(RichText::new("Loading datasets...").color(theme::TEXT_MUTED));
-            } else if let Some(error) = summaries_error.as_ref()
-                && !has_datasets
-            {
-                theme::inline_message(
-                    ui,
-                    theme::Intent::Error,
-                    format!("Could not load datasets: {error}"),
-                );
-                if theme::quiet_button(ui, true, egui::Button::new("Retry")).clicked() {
-                    self.request_dataset_list();
-                }
-            } else if !has_datasets {
-                theme::empty_state(
-                    ui,
-                    "No accessible datasets yet.",
-                    "Ask a data admin for access, or create a dataset if you are a bootstrap administrator.",
-                    None,
-                );
-            }
-            if let Some(error) = summaries_error
-                && has_datasets
-            {
-                ui.horizontal_wrapped(|ui| {
-                    theme::inline_message(
+            if signed_in {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::quiet_button(
                         ui,
-                        theme::Intent::Warning,
-                        format!("Showing saved results. Refresh failed: {error}"),
-                    );
-                    if theme::quiet_button(ui, true, egui::Button::new("Retry")).clicked() {
+                        !self.loading.datasets && !self.loading.dataset,
+                        egui::Button::new("Refresh"),
+                    )
+                    .on_hover_text("Reload the accessible dataset list.")
+                    .clicked()
+                    {
                         self.request_dataset_list();
                     }
                 });
             }
-            let datasets = self.datasets.summaries.clone();
-            if let Some(dataset) = self.recommended_dataset() {
-                let width = 280.0_f32.min(ui.available_width());
-                if theme::primary_button_sized(
+        });
+        if self.loading.dataset || (self.loading.datasets && has_datasets) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small(if self.loading.dataset {
+                    "Opening dataset..."
+                } else {
+                    "Refreshing..."
+                });
+            });
+        }
+
+        if !signed_in {
+            theme::empty_state(
+                ui,
+                "Sign in to view datasets",
+                "Available datasets will appear here after you sign in.",
+                None,
+            );
+        } else if self.loading.datasets && !has_datasets {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Loading datasets...").color(theme::TEXT_MUTED));
+            });
+        } else if let Some(error) = summaries_error.as_ref()
+            && !has_datasets
+        {
+            theme::inline_message(
+                ui,
+                theme::Intent::Error,
+                format!("Could not load datasets: {error}"),
+            );
+            if theme::quiet_button(
+                ui,
+                !self.loading.datasets && !self.loading.dataset,
+                egui::Button::new("Retry"),
+            )
+            .clicked()
+            {
+                self.request_dataset_list();
+            }
+        } else if !has_datasets {
+            theme::empty_state(
+                ui,
+                "No accessible datasets yet.",
+                "Ask a data admin for access, or create a dataset if you are a bootstrap administrator.",
+                None,
+            );
+        }
+
+        if let Some(error) = summaries_error
+            && has_datasets
+        {
+            ui.horizontal_wrapped(|ui| {
+                theme::inline_message(
                     ui,
-                    egui::vec2(width, 44.0),
-                    egui::Button::new(format!("Continue with {}", dataset.name)).truncate(),
+                    theme::Intent::Warning,
+                    format!("Showing saved results. Refresh failed: {error}"),
+                );
+                if theme::quiet_button(
+                    ui,
+                    !self.loading.datasets && !self.loading.dataset,
+                    egui::Button::new("Retry"),
                 )
-                .on_hover_text("Open this dataset and its recommended work queue.")
                 .clicked()
                 {
-                    let view = recommended_view(&dataset.roles);
-                    self.open_dataset(dataset.dataset_id, view);
+                    self.request_dataset_list();
                 }
-            }
-            for dataset in datasets {
-                theme::card_frame().show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new(&dataset.name).strong());
-                    ui.small(format!("{} images", dataset.total_images));
-                    ui.horizontal_wrapped(|ui| {
-                        for role in &dataset.roles {
-                            role_badge(ui, role);
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        for (role, view, label) in [
-                            (DatasetRole::Annotator, AppView::Annotate, "Annotate"),
-                            (DatasetRole::Reviewer, AppView::Review, "Review"),
-                            (DatasetRole::Adjudicator, AppView::Adjudicate, "Adjudicate"),
-                        ] {
-                            if dataset.roles.contains(&role) && ui.button(label).clicked() {
-                                self.open_dataset(dataset.dataset_id.clone(), view);
-                            }
-                        }
-                        if dataset.roles.contains(&DatasetRole::DataAdmin)
-                            && ui.button("Admin").clicked()
-                        {
-                            self.open_dataset(dataset.dataset_id.clone(), AppView::Admin);
-                        }
-                        if !dataset.roles.is_empty() && ui.button("Stats").clicked() {
-                            self.open_dataset(dataset.dataset_id.clone(), AppView::Stats);
-                        }
-                    });
+            });
+        }
+
+        for dataset in datasets {
+            let recommended_destination = recommended
+                .as_ref()
+                .filter(|item| item.dataset_id == dataset.dataset_id)
+                .map(|item| recommended_view(&item.roles));
+            let card_label = format!("Dataset card {}", dataset.name);
+            let response = theme::card_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(&dataset.name).strong());
+                ui.small(format!("{} images", dataset.total_images));
+                ui.horizontal_wrapped(|ui| {
+                    for role in &dataset.roles {
+                        role_badge(ui, role);
+                    }
                 });
-                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (role, view, label) in [
+                        (DatasetRole::Annotator, AppView::Annotate, "Annotate"),
+                        (DatasetRole::Reviewer, AppView::Review, "Review"),
+                        (DatasetRole::Adjudicator, AppView::Adjudicate, "Adjudicate"),
+                    ] {
+                        if dataset.roles.contains(&role)
+                            && recommended_destination != Some(view)
+                            && dataset_action(ui, !self.loading.dataset, label, &dataset.name)
+                        {
+                            self.open_dataset(dataset.dataset_id.clone(), view);
+                        }
+                    }
+                    if dataset.roles.contains(&DatasetRole::DataAdmin)
+                        && recommended_destination != Some(AppView::Admin)
+                        && dataset_action(ui, !self.loading.dataset, "Admin", &dataset.name)
+                    {
+                        self.open_dataset(dataset.dataset_id.clone(), AppView::Admin);
+                    }
+                    if !dataset.roles.is_empty()
+                        && recommended_destination != Some(AppView::Stats)
+                        && dataset_action(ui, !self.loading.dataset, "Stats", &dataset.name)
+                    {
+                        self.open_dataset(dataset.dataset_id.clone(), AppView::Stats);
+                    }
+                });
+            });
+            response.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Other, true, card_label.clone())
+            });
+            ui.add_space(theme::SPACE_2);
+        }
+    }
+
+    fn recommended_dataset_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        dataset: &labello_client::DatasetSummary,
+    ) {
+        ui.heading("Recommended");
+        let label = format!("Recommended dataset {}", dataset.name);
+        let description = if recommended_view(&dataset.roles) == AppView::Stats {
+            "View statistics for this dataset."
+        } else {
+            "Open the suggested work queue for this dataset."
+        };
+        let response = theme::selected_card_frame(true).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                RichText::new(&dataset.name)
+                    .size(theme::SECTION_HEADING_SIZE)
+                    .strong(),
+            );
+            ui.label(RichText::new(description).color(theme::TEXT_MUTED));
+            let width = 320.0_f32.min(ui.available_width());
+            if theme::primary_button(
+                ui,
+                !self.loading.dataset,
+                egui::Button::new(format!("Continue with {}", dataset.name))
+                    .min_size(egui::vec2(width, 44.0))
+                    .truncate(),
+            )
+            .on_hover_text(description)
+            .clicked()
+            {
+                self.open_dataset(dataset.dataset_id.clone(), recommended_view(&dataset.roles));
             }
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label.clone())
         });
     }
 
@@ -419,9 +500,14 @@ impl LabelloApp {
                 self.datasets
                     .summaries
                     .iter()
-                    .find(|item| item.dataset_id == id)
+                    .find(|item| item.dataset_id == id && !item.roles.is_empty())
             })
-            .or_else(|| self.datasets.summaries.first())
+            .or_else(|| {
+                self.datasets
+                    .summaries
+                    .iter()
+                    .find(|item| !item.roles.is_empty())
+            })
             .cloned()
     }
 }
@@ -446,4 +532,13 @@ fn role_badge(ui: &mut egui::Ui, role: &DatasetRole) {
         DatasetRole::DataAdmin => "Data admin",
     };
     theme::badge(ui, label, theme::Intent::Info);
+}
+
+fn dataset_action(ui: &mut egui::Ui, enabled: bool, label: &str, dataset_name: &str) -> bool {
+    let accessible_label = format!("{label} {dataset_name}");
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessible_label.clone())
+    });
+    response.clicked()
 }

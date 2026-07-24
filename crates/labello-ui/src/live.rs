@@ -137,7 +137,6 @@ impl LabelloApp {
                         Ok(datasets) => {
                             self.datasets.summaries = datasets;
                             self.datasets.summaries_error = None;
-                            self.runtime.error = None;
                             self.reopen_previous_workspace();
                         }
                         Err(error) => {
@@ -162,6 +161,7 @@ impl LabelloApp {
                         self.setup.create_dataset_name = metadata.name.clone();
                         self.upsert_dataset_summary(&metadata);
                         self.runtime.error = None;
+                        self.datasets.requested_view = Some(AppView::Admin);
                         self.request_load_dataset();
                         self.request_dataset_list();
                     }
@@ -1206,6 +1206,8 @@ impl LabelloApp {
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.workspace_epoch = self.workspace_epoch.wrapping_add(1);
         self.invalidate_async_ownership();
+        self.datasets.requested_view = None;
+        self.runtime.persistence.restoration_attempted = false;
     }
 
     pub(crate) fn begin_workspace_epoch(&mut self) {
@@ -1218,7 +1220,15 @@ impl LabelloApp {
             return;
         }
         self.loading.datasets = true;
-        self.datasets.summaries_error = None;
+        if self
+            .datasets
+            .summaries_error
+            .take()
+            .as_ref()
+            .is_some_and(|error| self.runtime.error.as_ref() == Some(error))
+        {
+            self.runtime.error = None;
+        }
         let request = self.request_identity(None);
         self.queue_command(UiCommand::DatasetList { request });
     }
@@ -1251,6 +1261,7 @@ impl LabelloApp {
         if self.loading.dataset || self.runtime.api.is_none() {
             return;
         }
+        self.runtime.persistence.restoration_attempted = true;
         self.begin_workspace_epoch();
         self.loading.dataset = true;
         let request = self.request_identity(Some(self.config.dataset_id.clone()));
@@ -1528,13 +1539,17 @@ impl LabelloApp {
             self.view = AppView::Setup;
             return;
         }
-        if self.ensure_valid_task_selection() {
-            self.runtime.error = None;
-        } else {
+        if matches!(
+            requested,
+            AppView::Annotate | AppView::Review | AppView::Adjudicate
+        ) && !self.ensure_valid_task_selection()
+        {
             self.runtime.error = Some(
                 "No enabled one-class workflow is configured. Ask a data admin to enable one."
                     .to_string(),
             );
+        } else {
+            self.runtime.error = None;
         }
         if requested == AppView::Admin {
             self.request_admin_dataset();

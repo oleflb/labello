@@ -391,7 +391,7 @@ pub fn bounded_badge(ui: &mut Ui, text: &str, intent: Intent, width: f32) -> Res
 
 fn badge_inner(ui: &mut Ui, text: &str, intent: Intent, width: Option<f32>) -> Response {
     let color = intent.color();
-    Frame::new()
+    let frame = Frame::new()
         .fill(Color32::from_rgba_unmultiplied(
             color.r(),
             color.g(),
@@ -400,18 +400,26 @@ fn badge_inner(ui: &mut Ui, text: &str, intent: Intent, width: Option<f32>) -> R
         ))
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.55)))
         .corner_radius(CornerRadius::same(BADGE_RADIUS))
-        .inner_margin(Margin::symmetric(9, SPACE_1 as i8))
-        .show(ui, |ui| {
-            if let Some(width) = width {
+        .inner_margin(Margin::symmetric(9, SPACE_1 as i8));
+    let response = if let Some(width) = width {
+        frame
+            .show(ui, |ui| {
                 ui.add_sized(
                     [width, 24.0],
                     egui::Label::new(RichText::new(text).color(color).strong()).truncate(),
                 )
-            } else {
-                ui.label(RichText::new(text).color(color).strong())
-            }
-        })
-        .inner
+            })
+            .inner
+    } else {
+        ui.add(
+            egui::AtomLayout::new(RichText::new(text).color(color).strong())
+                .frame(frame)
+                .wrap_mode(egui::TextWrapMode::Extend),
+        )
+    };
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text.to_owned()));
+    response
 }
 
 pub fn metric(ui: &mut Ui, label: &str, value: impl Into<String>) {
@@ -588,5 +596,23 @@ mod tests {
         assert!(field.rect().height() >= 44.0);
         assert_eq!(bounded.rect().width(), 180.0);
         assert!(harness.query_by_label("Create item").is_some());
+    }
+
+    #[test]
+    fn badges_wrap_as_whole_items() {
+        let harness = Harness::builder()
+            .with_size(Vec2::new(150.0, 120.0))
+            .build_ui(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    badge(ui, "Annotator", Intent::Info);
+                    badge(ui, "Adjudicator", Intent::Info);
+                });
+            });
+
+        let annotator = harness.get_by_label("Annotator").rect();
+        let adjudicator = harness.get_by_label("Adjudicator").rect();
+        assert!(adjudicator.top() >= annotator.bottom());
+        assert!(annotator.height() <= 32.0);
+        assert!(adjudicator.height() <= 32.0);
     }
 }

@@ -43,6 +43,7 @@ use crate::app::{
     RequestIdentity, SaveStatus, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
+use crate::persistence::{StoredCanvasTransform, StoredView, WorkspacePreference};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -98,8 +99,18 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
     assert!(harness.query_by_label("Choose where to work").is_some());
     assert_eq!(api.counts().me, 1);
     assert_eq!(api.counts().auth_options, 1);
-    assert!(harness.query_all_by_label("Annotate").next().is_some());
-    assert!(harness.query_all_by_label("Admin").next().is_some());
+    assert!(
+        harness
+            .query_all_by_label("Continue with Demo Dataset")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label("Admin Demo Dataset")
+            .next()
+            .is_some()
+    );
 
     harness.set_size(egui::vec2(1500.0, 1200.0));
     harness.step();
@@ -108,15 +119,22 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
     harness.state_mut().setup.create_dataset_name = "New dataset".to_string();
     harness.step();
     click(&mut harness, "Create dataset");
+    step_until(&mut harness, 20, |app| app.loading.admin);
+    assert!(harness.state().runtime.error.is_none());
     step_until(&mut harness, 20, |app| {
-        !app.loading.dataset && api.counts().create_dataset == 1
+        app.view == AppView::Admin && !app.loading.admin
     });
     assert_eq!(api.counts().create_dataset, 1);
-    drop(harness);
-    let admin_api = Rc::new(SpyApi::new());
-    let harness = loaded_admin_harness(admin_api.clone());
-    assert_eq!(admin_api.counts().get_admin_dataset, 1);
+    assert_eq!(api.counts().get_admin_dataset, 1);
     assert!(harness.query_by_label("Dataset Admin").is_some());
+    assert!(
+        harness
+            .state()
+            .datasets
+            .admin_config
+            .as_ref()
+            .is_some_and(|metadata| metadata.tasks.is_empty())
+    );
 }
 
 #[test]
@@ -537,7 +555,7 @@ fn image_load_failure_shows_retry_and_loads_image() {
     api.fail_next_preview();
     let mut harness = live_harness(api.clone());
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Annotate");
+    click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 20, |app| {
         !app.loading.image
             && app
@@ -622,7 +640,7 @@ fn missing_workflow_is_actionable() {
     api.clear_workflows();
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Annotate");
+    click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 20, |app| {
         app.runtime
             .error
@@ -647,7 +665,7 @@ fn no_available_assignment_is_a_normal_empty_state() {
     api.set_no_assignment(true);
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Annotate");
+    click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| {
         !app.loading.dataset && !app.loading.image
     });
@@ -1467,10 +1485,14 @@ fn api_login_logout_dataset_and_view_boundaries_rotate_epochs() {
     let mut app = base_live_app(Rc::new(SpyApi::new()));
     let initial_auth = app.auth_epoch;
     let initial_workspace = app.workspace_epoch;
+    app.datasets.requested_view = Some(AppView::Admin);
+    app.runtime.persistence.restoration_attempted = true;
 
     app.rebuild_http_api();
     assert!(app.auth_epoch > initial_auth);
     assert!(app.workspace_epoch > initial_workspace);
+    assert!(app.datasets.requested_view.is_none());
+    assert!(!app.runtime.persistence.restoration_attempted);
 
     let rebuilt_auth = app.auth_epoch;
     app.request_session();
@@ -1521,6 +1543,7 @@ fn dataset_creation_completion_accepts_its_new_dataset_identity() {
     app.process_messages(&egui::Context::default());
 
     assert_eq!(app.config.dataset_id, DatasetId::from("new-dataset"));
+    assert_eq!(app.datasets.requested_view, Some(AppView::Admin));
     assert!(app.loading.dataset);
     let load = app.runtime.commands.front().unwrap();
     assert_eq!(
@@ -1530,11 +1553,101 @@ fn dataset_creation_completion_accepts_its_new_dataset_identity() {
 }
 
 #[test]
+fn explicit_dataset_transition_suppresses_workspace_restoration() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    app.config.dataset_id = DatasetId::from("new-dataset");
+    app.datasets.requested_view = Some(AppView::Admin);
+    app.runtime.persistence.preference = Some(WorkspacePreference {
+        version: 1,
+        dataset_id: DatasetId::from("demo"),
+        view: StoredView::Annotate,
+        task_id: None,
+        assignment_id: None,
+        assignment_image_id: None,
+        assignment_kind: None,
+        drawer: None,
+        show_settings: false,
+        show_tutorial: false,
+        selected_annotation: None,
+        canvas: StoredCanvasTransform {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        },
+    });
+    app.request_load_dataset();
+    assert!(app.runtime.persistence.restoration_attempted);
+    app.loading.dataset = false;
+    app.datasets.requested_view = None;
+    let workspace_epoch = app.workspace_epoch;
+
+    app.reopen_previous_workspace();
+
+    assert_eq!(app.config.dataset_id, DatasetId::from("new-dataset"));
+    assert!(app.datasets.requested_view.is_none());
+    assert_eq!(app.workspace_epoch, workspace_epoch);
+}
+
+#[test]
+fn dataset_list_success_only_clears_its_own_error() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    app.runtime.error = Some("dataset load failed".to_string());
+    app.request_dataset_list();
+    let UiCommand::DatasetList { request } = app.runtime.commands.pop_back().unwrap() else {
+        panic!("expected dataset list command");
+    };
+    app.runtime
+        .tx
+        .send(UiMessage::DatasetList {
+            request,
+            result: Ok(Vec::new()),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert_eq!(app.runtime.error.as_deref(), Some("dataset load failed"));
+
+    app.datasets.summaries_error = Some("list failed".to_string());
+    app.runtime.error = Some("list failed".to_string());
+    app.request_dataset_list();
+    assert!(app.datasets.summaries_error.is_none());
+    assert!(app.runtime.error.is_none());
+    let UiCommand::DatasetList { request } = app.runtime.commands.pop_back().unwrap() else {
+        panic!("expected dataset list command");
+    };
+    app.runtime
+        .tx
+        .send(UiMessage::DatasetList {
+            request,
+            result: Ok(Vec::new()),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert!(app.runtime.error.is_none());
+}
+
+#[test]
 fn setup_recommends_a_single_continue_work_action() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
 
+    let recommended = harness
+        .get_by_label("Recommended dataset Demo Dataset")
+        .rect();
+    let all_datasets = harness.get_by_label("All datasets").rect();
+    let dataset = harness.get_by_label("Dataset card Demo Dataset").rect();
+    assert!(recommended.bottom() < all_datasets.top());
+    assert!(all_datasets.bottom() < dataset.top());
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate Demo Dataset",)
+            .next()
+            .is_none()
+    );
     assert_eq!(
         harness
             .query_all_by_role_and_label(
@@ -1547,6 +1660,47 @@ fn setup_recommends_a_single_continue_work_action() {
     click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
+}
+
+#[test]
+fn setup_does_not_recommend_a_dataset_without_an_available_destination() {
+    let api = Rc::new(SpyApi::new());
+    api.set_summary_roles(Vec::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert!(harness.query_by_label("Recommended").is_none());
+    assert!(
+        harness
+            .query_by_label("Continue with Demo Dataset")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_label("Dataset card Demo Dataset")
+            .is_some()
+    );
+}
+
+#[test]
+fn setup_describes_a_data_admin_recommendation_as_statistics() {
+    let api = Rc::new(SpyApi::new());
+    api.set_summary_roles(vec![DatasetRole::DataAdmin]);
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert!(
+        harness
+            .query_by_label("View statistics for this dataset.")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Open the suggested work queue for this dataset.")
+            .is_none()
+    );
+    assert!(harness.query_by_label("Stats Demo Dataset").is_none());
+    assert!(harness.query_by_label("Admin Demo Dataset").is_some());
 }
 
 #[test]
@@ -1686,7 +1840,15 @@ fn dataset_states_distinguish_loading_and_stale_refresh_failure() {
             .query_by_label("Continue with Demo Dataset")
             .is_some()
     );
-    assert!(harness.query_by_label("Retry").is_some());
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.state_mut().loading.dataset = true;
+    harness.step();
+    let refresh = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Refresh");
+    let retry = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Retry");
+    let opening = harness.get_by_label("Opening dataset...").rect();
+    assert!(opening.top() >= refresh.rect().bottom());
+    assert!(refresh.accesskit_node().is_disabled());
+    assert!(retry.accesskit_node().is_disabled());
 }
 
 #[test]
@@ -2275,6 +2437,24 @@ fn setup_geometry_stays_clamped_at_supported_viewports() {
         320.0,
     );
     assert_visible_controls_clamped(&harness, 1440.0, 320.0);
+
+    for width in [320.0, 600.0] {
+        harness.set_size(egui::vec2(width, 320.0));
+        harness.step();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Continue with Demo Dataset")
+            .scroll_to_me();
+        for _ in 0..4 {
+            harness.step();
+        }
+        assert_control_inside(
+            &harness,
+            "Continue with Demo Dataset",
+            egui::accesskit::Role::Button,
+            width,
+            320.0,
+        );
+    }
 }
 
 #[test]
@@ -3408,7 +3588,7 @@ fn live_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
 fn loaded_work_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Annotate");
+    click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| app.current.is_some());
     harness
 }
@@ -3416,7 +3596,7 @@ fn loaded_work_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
 fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Review");
+    click(&mut harness, "Review Demo Dataset");
     step_until(&mut harness, 12, |app| {
         app.view == AppView::Review && app.current.is_some()
     });
@@ -3426,7 +3606,7 @@ fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
 fn loaded_adjudication_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Adjudicate");
+    click(&mut harness, "Adjudicate Demo Dataset");
     step_until(&mut harness, 12, |app| {
         app.view == AppView::Adjudicate && app.current.is_some()
     });
@@ -3436,7 +3616,7 @@ fn loaded_adjudication_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> 
 fn loaded_admin_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Admin");
+    click(&mut harness, "Admin Demo Dataset");
     step_until(&mut harness, 8, |app| {
         app.view == AppView::Admin && app.datasets.admin_config.is_some() && !app.loading.admin
     });
@@ -3979,9 +4159,23 @@ impl DatasetApi for SpyApi {
     ) -> ApiFuture<'a, DatasetMetadata> {
         let mut state = self.state.borrow_mut();
         state.counts.create_dataset += 1;
-        state.metadata.dataset_id = request.dataset_id;
-        state.metadata.name = request.name;
-        ready(Ok(state.metadata.clone()))
+        let timestamp = now();
+        let mut metadata = DatasetMetadata::new(request.dataset_id, request.name, timestamp);
+        metadata.role_assignments = vec![DatasetRoleAssignment {
+            dataset_id: metadata.dataset_id.clone(),
+            user_id: request.admin_user_id,
+            roles: BTreeSet::from([
+                DatasetRole::DataAdmin,
+                DatasetRole::Annotator,
+                DatasetRole::Reviewer,
+                DatasetRole::Adjudicator,
+            ]),
+            assigned_at: timestamp,
+            assigned_by: None,
+        }];
+        state.metadata = metadata.clone();
+        state.states.clear();
+        ready(Ok(metadata))
     }
 
     fn get_dataset<'a>(&'a self, _dataset_id: &'a DatasetId) -> ApiFuture<'a, DatasetMetadata> {
