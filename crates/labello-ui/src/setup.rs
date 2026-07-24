@@ -31,9 +31,11 @@ impl LabelloApp {
             ui.add_space(theme::SPACE_5);
             egui::CollapsingHeader::new("Advanced connection settings")
                 .show(ui, |ui| self.connection_section(ui));
-            ui.add_space(theme::SPACE_3);
-            egui::CollapsingHeader::new("Create a dataset")
-                .show(ui, |ui| self.create_dataset_section(ui));
+            if self.auth.can_create_datasets {
+                ui.add_space(theme::SPACE_3);
+                egui::CollapsingHeader::new("Create a dataset")
+                    .show(ui, |ui| self.create_dataset_section(ui));
+            }
         } else {
             self.connection_section(ui);
             ui.add_space(theme::SPACE_4);
@@ -197,12 +199,12 @@ impl LabelloApp {
                 self.request_dataset_list();
             }
         } else if !has_datasets {
-            theme::empty_state(
-                ui,
-                "No accessible datasets yet.",
-                "Ask a data admin for access, or create a dataset if you are a bootstrap administrator.",
-                None,
-            );
+            let description = if self.auth.can_create_datasets {
+                "Create a dataset below or ask a data admin for access."
+            } else {
+                "Ask a data admin for access."
+            };
+            theme::empty_state(ui, "No accessible datasets yet.", description, None);
         }
 
         if let Some(error) = summaries_error

@@ -10,7 +10,7 @@ use axum::{
 };
 use labello_client::{
     AuthOptions, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
-    IngestJobStatus, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    IngestJobStatus, SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
     Actor, AnnotationSource, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment,
@@ -268,7 +268,10 @@ async fn local_admin_login(
             HeaderValue::from_str(&cookie)
                 .map_err(|error| ApiError::Internal(error.to_string()))?,
         )],
-        Json(account),
+        Json(SessionInfo {
+            can_create_datasets: state.is_bootstrap_admin(&account.user_id),
+            account,
+        }),
     ))
 }
 
@@ -290,10 +293,7 @@ fn require_configured_origin(state: &ApiState, headers: &HeaderMap) -> ApiResult
     Ok(())
 }
 
-async fn me(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<labello_domain::UserAccount>> {
+async fn me(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Json<SessionInfo>> {
     let account = current_account(&state, &headers)?;
     tracing::info!(
         event = "auth.completed",
@@ -301,7 +301,10 @@ async fn me(
         user_id = %account.user_id,
         "authentication completed"
     );
-    Ok(Json(account))
+    Ok(Json(SessionInfo {
+        can_create_datasets: state.is_bootstrap_admin(&account.user_id),
+        account,
+    }))
 }
 
 async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {

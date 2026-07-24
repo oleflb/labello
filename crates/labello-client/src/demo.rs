@@ -13,7 +13,8 @@ use crate::{
     CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageFile,
     ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest,
     OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    ReviewApi, SessionInfo, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    UserApi,
 };
 
 #[derive(Clone, Default)]
@@ -518,7 +519,7 @@ impl AuthApi for DemoLabelloApi {
         })
     }
 
-    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, SessionInfo> {
         Box::pin(async move {
             Err(ClientError::Api {
                 status: 401,
@@ -548,10 +549,18 @@ impl AuthApi for DemoLabelloApi {
         })
     }
 
-    fn me<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
-        self.github_callback(OAuthCallbackRequest {
-            code: String::new(),
-            state: String::new(),
+    fn me<'a>(&'a self) -> crate::ApiFuture<'a, SessionInfo> {
+        Box::pin(async move {
+            let account = self
+                .github_callback(OAuthCallbackRequest {
+                    code: String::new(),
+                    state: String::new(),
+                })
+                .await?;
+            Ok(SessionInfo {
+                account,
+                can_create_datasets: true,
+            })
         })
     }
 

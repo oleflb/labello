@@ -81,18 +81,21 @@ impl LabelloApp {
                     self.loading.session = false;
                     self.auth.checked = true;
                     match result {
-                        Ok(account) => {
+                        Ok(session) => {
+                            let account = session.account;
                             self.config.user_id = account.user_id.clone();
                             self.work.keybindings = labello_domain::KeybindingSet::defaults_for(
                                 account.user_id.clone(),
                             );
                             self.auth.account = Some(account);
+                            self.auth.can_create_datasets = session.can_create_datasets;
                             self.runtime.error = None;
                             self.initialize_browser_workspace();
                             self.request_dataset_list();
                         }
                         Err(error) => {
                             self.auth.account = None;
+                            self.auth.can_create_datasets = false;
                             self.datasets.summaries.clear();
                             self.datasets.summaries_error = None;
                             if show_error {
@@ -922,6 +925,7 @@ impl LabelloApp {
 
     fn clear_authenticated_state(&mut self) {
         self.auth.account = None;
+        self.auth.can_create_datasets = false;
         self.datasets.summaries.clear();
         self.datasets.summaries_error = None;
         self.datasets.metadata = None;

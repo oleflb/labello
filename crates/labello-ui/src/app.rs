@@ -10,7 +10,7 @@ use std::{future::Future, pin::Pin};
 use eframe::egui::{self, TextureHandle};
 use labello_client::{
     AuthOptions, CorrectionRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
-    LabelloApi, SnapshotFile,
+    LabelloApi, SessionInfo, SnapshotFile,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
@@ -143,7 +143,7 @@ pub(crate) enum UiMessage {
     },
     SessionLoaded {
         request: RequestIdentity,
-        result: Result<UserAccount, String>,
+        result: Result<SessionInfo, String>,
     },
     LogoutFinished {
         request: RequestIdentity,
@@ -677,6 +677,7 @@ pub(crate) struct SetupState {
 
 pub(crate) struct AuthState {
     pub account: Option<UserAccount>,
+    pub can_create_datasets: bool,
     pub options: AuthOptions,
     pub options_checked: bool,
     pub checked: bool,
@@ -935,6 +936,7 @@ impl LabelloApp {
             setup,
             auth: AuthState {
                 account: None,
+                can_create_datasets: false,
                 options: AuthOptions {
                     github_oauth: false,
                     local_admin_login: false,

@@ -284,6 +284,7 @@ fn seed_dataset(app: &mut LabelloApp) {
         assigned_by: Some(account.user_id.clone()),
     }];
     app.auth.account = Some(account.clone());
+    app.auth.can_create_datasets = true;
     app.auth.checked = true;
     app.datasets.summaries = vec![DatasetSummary {
         dataset_id: app.config.dataset_id.clone(),

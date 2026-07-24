@@ -21,8 +21,8 @@ use labello_client::{
     CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi,
     ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
     KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
-    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SetDatasetRolesRequest, SnapshotFile,
-    StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SessionInfo, SetDatasetRolesRequest,
+    SnapshotFile, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
@@ -135,6 +135,21 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
             .as_ref()
             .is_some_and(|metadata| metadata.tasks.is_empty())
     );
+}
+
+#[test]
+fn setup_only_offers_dataset_creation_to_permitted_accounts() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
+
+    harness.state_mut().auth.can_create_datasets = false;
+    harness.step();
+    assert!(harness.query_by_label("Create a dataset").is_none());
+
+    harness.state_mut().auth.can_create_datasets = true;
+    harness.step();
+    assert!(harness.query_by_label("Create a dataset").is_some());
 }
 
 #[test]
@@ -484,7 +499,10 @@ fn replacement_session_request_ignores_the_stale_result() {
         .tx
         .send(UiMessage::SessionLoaded {
             request: stale_request,
-            result: Ok(account.clone()),
+            result: Ok(SessionInfo {
+                account: account.clone(),
+                can_create_datasets: true,
+            }),
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
@@ -499,7 +517,10 @@ fn replacement_session_request_ignores_the_stale_result() {
         .tx
         .send(UiMessage::SessionLoaded {
             request: active_request,
-            result: Ok(account.clone()),
+            result: Ok(SessionInfo {
+                account: account.clone(),
+                can_create_datasets: true,
+            }),
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
@@ -5710,10 +5731,13 @@ impl AuthApi for SpyApi {
         }))
     }
 
-    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, SessionInfo> {
         let mut state = self.state.borrow_mut();
         state.counts.local_admin_login += 1;
-        ready(Ok(state.users[0].account.clone()))
+        ready(Ok(SessionInfo {
+            account: state.users[0].account.clone(),
+            can_create_datasets: true,
+        }))
     }
 
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String> {
@@ -5732,7 +5756,7 @@ impl AuthApi for SpyApi {
         }))
     }
 
-    fn me<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+    fn me<'a>(&'a self) -> ApiFuture<'a, SessionInfo> {
         let mut state = self.state.borrow_mut();
         state.counts.me += 1;
         if state.fail_me {
@@ -5741,7 +5765,10 @@ impl AuthApi for SpyApi {
                 message: "login required".to_string(),
             }))
         } else {
-            ready(Ok(state.users[0].account.clone()))
+            ready(Ok(SessionInfo {
+                account: state.users[0].account.clone(),
+                can_create_datasets: true,
+            }))
         }
     }
 

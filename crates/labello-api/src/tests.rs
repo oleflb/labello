@@ -182,6 +182,7 @@ async fn local_admin_login_creates_session_and_requires_configured_browser_origi
             .with_browser_origins(vec!["https://app.example.com".to_string()])
             .unwrap()
             .with_session_cookie_secure(false)
+            .with_bootstrap_admins([labello_domain::UserId::from("bootstrap_admin")])
             .with_local_admin_login(Some(labello_domain::UserId::from("bootstrap_admin"))),
     );
 
@@ -221,11 +222,12 @@ async fn local_admin_login_creates_session_and_requires_configured_browser_origi
     assert!(cookie.contains("SameSite=Lax"));
     assert!(!cookie.contains("; Secure"));
     let body = to_bytes(login.into_body(), usize::MAX).await.unwrap();
-    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(account["userId"], "bootstrap_admin");
-    assert_eq!(account["displayName"], "bootstrap_admin");
-    assert!(account["githubUserId"].is_null());
-    assert!(account["githubLogin"].is_null());
+    let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(session["account"]["userId"], "bootstrap_admin");
+    assert_eq!(session["account"]["displayName"], "bootstrap_admin");
+    assert!(session["account"]["githubUserId"].is_null());
+    assert!(session["account"]["githubLogin"].is_null());
+    assert_eq!(session["canCreateDatasets"], true);
 
     let me = app
         .clone()
@@ -240,8 +242,9 @@ async fn local_admin_login_creates_session_and_requires_configured_browser_origi
         .unwrap();
     assert_eq!(me.status(), StatusCode::OK);
     let body = to_bytes(me.into_body(), usize::MAX).await.unwrap();
-    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(account["userId"], "bootstrap_admin");
+    let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(session["account"]["userId"], "bootstrap_admin");
+    assert_eq!(session["canCreateDatasets"], true);
 
     let native_login = app
         .oneshot(
@@ -1774,8 +1777,9 @@ async fn session_survives_state_recreation_and_logout_invalidates_it() {
         .unwrap();
     assert_eq!(me.status(), StatusCode::OK);
     let body = to_bytes(me.into_body(), usize::MAX).await.unwrap();
-    let account: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(account["userId"], "session_user");
+    let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(session["account"]["userId"], "session_user");
+    assert_eq!(session["canCreateDatasets"], false);
 
     let logout = app
         .clone()

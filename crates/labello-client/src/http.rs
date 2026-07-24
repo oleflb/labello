@@ -22,7 +22,8 @@ use crate::{
     CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageExplorerQuery,
     ImageFile, ImagePreview, IngestJob, IngestReport, KeybindingApi, OAuthCallbackRequest,
     OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    ReviewApi, SessionInfo, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest,
+    UserApi,
 };
 
 #[derive(Clone)]
@@ -827,7 +828,7 @@ impl AuthApi for HttpLabelloApi {
         })
     }
 
-    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+    fn local_admin_login<'a>(&'a self) -> crate::ApiFuture<'a, SessionInfo> {
         Box::pin(async move {
             Self::json(
                 self.request(Method::POST, "/auth/local-admin")?
@@ -869,7 +870,7 @@ impl AuthApi for HttpLabelloApi {
         })
     }
 
-    fn me<'a>(&'a self) -> crate::ApiFuture<'a, UserAccount> {
+    fn me<'a>(&'a self) -> crate::ApiFuture<'a, SessionInfo> {
         Box::pin(async move { Self::json(self.request(Method::GET, "/me")?.send().await?).await })
     }
 
@@ -941,7 +942,11 @@ mod tests {
             created_at: labello_domain::now(),
             updated_at: labello_domain::now(),
         };
-        let account_json = serde_json::to_string(&account).unwrap();
+        let session = SessionInfo {
+            account: account.clone(),
+            can_create_datasets: true,
+        };
+        let session_json = serde_json::to_string(&session).unwrap();
         let server = std::thread::spawn(move || {
             let responses = [
                 (
@@ -949,10 +954,10 @@ mod tests {
                     "",
                 ),
                 (
-                    account_json.clone(),
+                    session_json.clone(),
                     "Set-Cookie: labello_session=test-session; Path=/; HttpOnly\r\n",
                 ),
-                (account_json, ""),
+                (session_json, ""),
             ];
             let mut requests = Vec::new();
             for (body, extra_headers) in responses {
@@ -985,8 +990,8 @@ mod tests {
                 local_admin_login: true,
             }
         );
-        assert_eq!(api.local_admin_login().await.unwrap(), account);
-        assert_eq!(api.me().await.unwrap(), account);
+        assert_eq!(api.local_admin_login().await.unwrap(), session);
+        assert_eq!(api.me().await.unwrap(), session);
 
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("GET /auth/options HTTP/1.1\r\n"));

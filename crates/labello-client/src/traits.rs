@@ -12,7 +12,7 @@ use crate::{
     AuthOptions, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest,
     DatasetSummary, DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob,
     IngestReport, OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest,
-    PrelabelSuggestionRequest, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    PrelabelSuggestionRequest, SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -303,7 +303,7 @@ pub trait AuthApi {
             })
         })
     }
-    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+    fn local_admin_login<'a>(&'a self) -> ApiFuture<'a, SessionInfo> {
         Box::pin(async {
             Err(ClientError::Api {
                 status: 401,
@@ -313,7 +313,7 @@ pub trait AuthApi {
     }
     fn github_login_url<'a>(&'a self, request: OAuthLoginRequest) -> ApiFuture<'a, String>;
     fn github_callback<'a>(&'a self, request: OAuthCallbackRequest) -> ApiFuture<'a, UserAccount>;
-    fn me<'a>(&'a self) -> ApiFuture<'a, UserAccount> {
+    fn me<'a>(&'a self) -> ApiFuture<'a, SessionInfo> {
         Box::pin(async {
             Err(ClientError::Demo(
                 "current session lookup is not implemented by this client".to_string(),

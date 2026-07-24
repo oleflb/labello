@@ -15,6 +15,13 @@ pub struct AuthOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub account: UserAccount,
+    pub can_create_datasets: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateDatasetRequest {
     pub dataset_id: DatasetId,
     pub name: String,
