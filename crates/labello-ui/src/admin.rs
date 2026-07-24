@@ -334,8 +334,13 @@ impl LabelloApp {
                     theme::card_frame().show(ui, |ui| {
                         ui.set_max_width(640.0_f32.min(ui.available_width()));
                         ui.heading("Dataset details");
-                        theme::labeled_text_field(ui, "Dataset name", &mut config.name, 44.0)
-                            .on_hover_text("Human-readable name stored in labello.dataset.toml.");
+                        theme::labeled_text_field(
+                            ui,
+                            "Dataset name",
+                            &mut config.name,
+                            theme::COMPACT_TEXT_FIELD_HEIGHT,
+                        )
+                        .on_hover_text("Human-readable name stored in labello.dataset.toml.");
                         show_issues(ui, &dataset_name_issues(&config.name));
                     });
                 },
@@ -585,8 +590,11 @@ impl LabelloApp {
             );
             let search_label = ui.label("Search people");
             ui.add_sized(
-                [ui.available_width().min(480.0), 44.0],
-                egui::TextEdit::singleline(&mut self.admin_tools.people_search)
+                [
+                    ui.available_width().min(480.0),
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                ],
+                theme::singleline_text_edit(&mut self.admin_tools.people_search)
                     .hint_text("Name, login, or user ID"),
             )
             .labelled_by(search_label.id);
@@ -757,8 +765,8 @@ impl LabelloApp {
             let search_label = ui.label("Search images");
             let search = ui
                 .add_sized(
-                    [ui.available_width(), 44.0],
-                    egui::TextEdit::singleline(&mut self.admin_tools.image_search)
+                    [ui.available_width(), theme::COMPACT_TEXT_FIELD_HEIGHT],
+                    theme::singleline_text_edit(&mut self.admin_tools.image_search)
                         .hint_text("File name or path"),
                 )
                 .labelled_by(search_label.id);
@@ -1979,7 +1987,7 @@ fn edit_string_list(
             let field_label = ui.label(label);
             ui.add_sized(
                 [ui.available_width().min(360.0), 44.0],
-                egui::TextEdit::singleline(value),
+                theme::singleline_text_edit(value),
             )
             .labelled_by(field_label.id)
             .on_hover_text("Dataset-relative path under the dataset root.");
@@ -2070,9 +2078,12 @@ fn edit_class_card(
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     let field_label = ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut label.name).desired_width(unit))
-                        .labelled_by(field_label.id)
-                        .on_hover_text("Display name shown to annotators.");
+                    ui.add_sized(
+                        [unit, theme::COMPACT_TEXT_FIELD_HEIGHT],
+                        theme::singleline_text_edit(&mut label.name),
+                    )
+                    .labelled_by(field_label.id)
+                    .on_hover_text("Display name shown to annotators.");
                 },
             );
             ui.allocate_ui_with_layout(
@@ -2081,7 +2092,10 @@ fn edit_class_card(
                 |ui| {
                     let field_label = ui.label("ID");
                     id_changed = ui
-                        .add(egui::TextEdit::singleline(&mut class_id).desired_width(unit))
+                        .add_sized(
+                            [unit, theme::COMPACT_TEXT_FIELD_HEIGHT],
+                            theme::singleline_text_edit(&mut class_id),
+                        )
                         .labelled_by(field_label.id)
                         .on_hover_text("Stable class id used by annotations and linked workflows.")
                         .changed();
@@ -2092,9 +2106,12 @@ fn edit_class_card(
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     let field_label = ui.label("Color");
-                    ui.add(egui::TextEdit::singleline(&mut label.color).desired_width(unit))
-                        .labelled_by(field_label.id)
-                        .on_hover_text("Class color as a hex value, for example #5eead4.");
+                    ui.add_sized(
+                        [unit, theme::COMPACT_TEXT_FIELD_HEIGHT],
+                        theme::singleline_text_edit(&mut label.color),
+                    )
+                    .labelled_by(field_label.id)
+                    .on_hover_text("Class color as a hex value, for example #5eead4.");
                 },
             );
             ui.allocate_ui_with_layout(
@@ -2102,27 +2119,50 @@ fn edit_class_card(
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     let field_label = ui.label("Description");
-                    description_changed = ui
-                        .add(egui::TextEdit::singleline(&mut description).desired_width(3.0 * unit))
-                        .labelled_by(field_label.id)
-                        .on_hover_text("Optional guidance about what belongs in this class.")
-                        .changed();
+                    description_changed = theme::resizable_multiline_text_edit(
+                        ui,
+                        ui.make_persistent_id(("class-description", index)),
+                        &mut description,
+                        2,
+                        None,
+                    )
+                    .labelled_by(field_label.id)
+                    .on_hover_text("Optional guidance about what belongs in this class.")
+                    .changed();
                 },
             );
         });
         (id_changed, description_changed)
     } else {
-        theme::labeled_text_field(ui, "Name", &mut label.name, 44.0)
-            .on_hover_text("Display name shown to annotators.");
-        let id_changed = theme::labeled_text_field(ui, "ID", &mut class_id, 44.0)
-            .on_hover_text("Stable class id used by annotations and linked workflows.")
-            .changed();
-        theme::labeled_text_field(ui, "Color", &mut label.color, 44.0)
-            .on_hover_text("Class color as a hex value, for example #5eead4.");
-        let description_changed =
-            theme::labeled_text_field(ui, "Description", &mut description, 44.0)
-                .on_hover_text("Optional guidance about what belongs in this class.")
+        theme::labeled_text_field(
+            ui,
+            "Name",
+            &mut label.name,
+            theme::COMPACT_TEXT_FIELD_HEIGHT,
+        )
+        .on_hover_text("Display name shown to annotators.");
+        let id_changed =
+            theme::labeled_text_field(ui, "ID", &mut class_id, theme::COMPACT_TEXT_FIELD_HEIGHT)
+                .on_hover_text("Stable class id used by annotations and linked workflows.")
                 .changed();
+        theme::labeled_text_field(
+            ui,
+            "Color",
+            &mut label.color,
+            theme::COMPACT_TEXT_FIELD_HEIGHT,
+        )
+        .on_hover_text("Class color as a hex value, for example #5eead4.");
+        let field_label = ui.label("Description");
+        let description_changed = theme::resizable_multiline_text_edit(
+            ui,
+            ui.make_persistent_id(("class-description", index)),
+            &mut description,
+            2,
+            None,
+        )
+        .labelled_by(field_label.id)
+        .on_hover_text("Optional guidance about what belongs in this class.")
+        .changed();
         (id_changed, description_changed)
     };
 
@@ -2249,13 +2289,18 @@ fn edit_workflow_basics(
 ) -> bool {
     ui.label(RichText::new("Workflow").color(theme::BLUE).strong());
     let mut task_id = task.task_id.to_string();
-    if theme::labeled_text_field(ui, "Task ID", &mut task_id, 44.0)
-        .on_hover_text("Stable task id used by assignments and event logs.")
-        .changed()
+    if theme::labeled_text_field(
+        ui,
+        "Task ID",
+        &mut task_id,
+        theme::COMPACT_TEXT_FIELD_HEIGHT,
+    )
+    .on_hover_text("Stable task id used by assignments and event logs.")
+    .changed()
     {
         task.task_id = TaskId::from(task_id);
     }
-    theme::labeled_text_field(ui, "Name", &mut task.name, 44.0)
+    theme::labeled_text_field(ui, "Name", &mut task.name, theme::COMPACT_TEXT_FIELD_HEIGHT)
         .on_hover_text("Task name shown in the work panel.");
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut task.enabled, "Enabled");
@@ -2344,14 +2389,22 @@ fn edit_workflow_instructions(ui: &mut egui::Ui, task: &mut TaskDefinition) {
             .color(theme::BLUE)
             .strong(),
     );
-    theme::labeled_text_field(ui, "Title", &mut task.instructions.title, 44.0)
-        .on_hover_text("Tutorial/instruction title.");
-    ui.label("Tutorial instructions");
-    ui.add(
-        egui::TextEdit::multiline(&mut task.instructions.example_text)
-            .desired_width(ui.available_width())
-            .desired_rows(3),
+    theme::labeled_text_field(
+        ui,
+        "Title",
+        &mut task.instructions.title,
+        theme::COMPACT_TEXT_FIELD_HEIGHT,
     )
+    .on_hover_text("Tutorial/instruction title.");
+    let instructions_label = ui.label("Tutorial instructions");
+    theme::resizable_multiline_text_edit(
+        ui,
+        ui.make_persistent_id("tutorial-instructions"),
+        &mut task.instructions.example_text,
+        3,
+        None,
+    )
+    .labelled_by(instructions_label.id)
     .on_hover_text("Instructions annotators see in the tutorial panel.");
     ui.label("Tutorial example images");
     edit_string_list(
@@ -2405,8 +2458,11 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
                 let previous_name = keypoint.name.clone();
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Name");
-                    ui.text_edit_singleline(&mut keypoint.name)
-                        .on_hover_text("Unique keypoint name used by skeleton edges.");
+                    ui.add_sized(
+                        [ui.available_width().min(280.0), 44.0],
+                        theme::singleline_text_edit(&mut keypoint.name),
+                    )
+                    .on_hover_text("Unique keypoint name used by skeleton edges.");
                     ui.checkbox(&mut keypoint.required, "Required");
                     if destructive_button(
                         ui,
@@ -2657,7 +2713,10 @@ fn edit_prelabels(
                 ui.label("Prelabel ID");
                 let mut config_id = config.config_id.to_string();
                 if ui
-                    .text_edit_singleline(&mut config_id)
+                    .add_sized(
+                        [ui.available_width().min(280.0), 44.0],
+                        theme::singleline_text_edit(&mut config_id),
+                    )
                     .on_hover_text("Stable prelabel config id referenced by tasks.")
                     .changed()
                 {
@@ -2673,8 +2732,11 @@ fn edit_prelabels(
                     }
                 }
                 ui.label("Name");
-                ui.text_edit_singleline(&mut config.name)
-                    .on_hover_text("Display name for this prelabel source.");
+                ui.add_sized(
+                    [ui.available_width().min(280.0), 44.0],
+                    theme::singleline_text_edit(&mut config.name),
+                )
+                .on_hover_text("Display name for this prelabel source.");
                 ui.checkbox(
                     &mut config.available_to_annotators,
                     "Available to annotators",
@@ -2689,16 +2751,34 @@ fn edit_prelabels(
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Model ID");
-                ui.text_edit_singleline(&mut config.model.model_id)
-                    .on_hover_text("Stable model id.");
+                ui.add_sized(
+                    [
+                        ui.available_width().min(280.0),
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    ],
+                    theme::singleline_text_edit(&mut config.model.model_id),
+                )
+                .on_hover_text("Stable model id.");
                 ui.label("Model name");
-                ui.text_edit_singleline(&mut config.model.display_name)
-                    .on_hover_text("Model display name.");
+                ui.add_sized(
+                    [
+                        ui.available_width().min(280.0),
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    ],
+                    theme::singleline_text_edit(&mut config.model.display_name),
+                )
+                .on_hover_text("Model display name.");
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Location");
-                ui.text_edit_singleline(&mut config.model.location)
-                    .on_hover_text("Server/browser model location, depending on execution mode.");
+                ui.add_sized(
+                    [
+                        ui.available_width().min(560.0),
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    ],
+                    theme::singleline_text_edit(&mut config.model.location),
+                )
+                .on_hover_text("Server/browser model location, depending on execution mode.");
             });
             ui.add(
                 egui::Slider::new(

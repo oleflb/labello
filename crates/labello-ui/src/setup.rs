@@ -319,13 +319,18 @@ impl LabelloApp {
     fn create_dataset_section(&mut self, ui: &mut egui::Ui) {
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            theme::labeled_text_field(ui, "Dataset ID", &mut self.setup.create_dataset_id, 44.0)
-                .on_hover_text("Stable identifier used for this dataset.");
+            theme::labeled_text_field(
+                ui,
+                "Dataset ID",
+                &mut self.setup.create_dataset_id,
+                theme::COMPACT_TEXT_FIELD_HEIGHT,
+            )
+            .on_hover_text("Stable identifier used for this dataset.");
             theme::labeled_text_field(
                 ui,
                 "Dataset name",
                 &mut self.setup.create_dataset_name,
-                44.0,
+                theme::COMPACT_TEXT_FIELD_HEIGHT,
             )
             .on_hover_text("Human-readable dataset name.");
             let dataset_id = DatasetId::from(self.setup.create_dataset_id.trim());

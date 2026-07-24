@@ -44,6 +44,7 @@ use crate::app::{
 };
 use crate::canvas::BoundingBoxEdit;
 use crate::persistence::{StoredCanvasTransform, StoredView, WorkspacePreference};
+use crate::theme;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -350,7 +351,7 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Color")
         .collect::<Vec<_>>();
     let class_description_fields = harness
-        .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Description")
+        .query_all_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Description")
         .collect::<Vec<_>>();
     assert_eq!(class_name_fields.len(), 2);
     for index in 0..class_name_fields.len() {
@@ -362,6 +363,7 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
             class_id_fields[index].rect()
         );
         assert!((class_color_fields[index].rect().width() - unit).abs() <= 2.0);
+        assert!(class_name_fields[index].rect().height() >= 27.0);
         assert!(class_description_fields[index].rect().width() >= 2.9 * unit);
         assert!(
             class_description_fields[index].rect().right() - class_name_fields[index].rect().left()
@@ -948,25 +950,20 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     );
     harness.state_mut().admin_tools.section = AdminSection::People;
     harness.step();
-    assert!(
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search people")
-            .rect()
-            .height()
-            >= 43.0
-    );
+    let people_search = harness
+        .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search people")
+        .rect();
+    assert!((people_search.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
     harness.state_mut().admin_tools.section = AdminSection::Images;
     harness.step();
-    for label in ["Root path", "Search images"] {
-        assert!(
-            harness
-                .get_by_role_and_label(egui::accesskit::Role::TextInput, label)
-                .rect()
-                .height()
-                >= 43.0,
-            "{label} is not touch-friendly"
-        );
-    }
+    let root_path = harness
+        .get_by_role_and_label(egui::accesskit::Role::TextInput, "Root path")
+        .rect();
+    assert!(root_path.height() >= 43.0);
+    let image_search = harness
+        .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search images")
+        .rect();
+    assert!((image_search.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
 }
 
@@ -2228,6 +2225,15 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
     assert!(api_url.rect().height() <= 25.0);
     assert!(harness.query_by_label("Development user ID").is_none());
     assert!(harness.query_by_label("Dev token").is_none());
+    harness.set_size(egui::vec2(900.0, 1200.0));
+    harness.step();
+    click(&mut harness, "Create a dataset");
+    for label in ["Dataset ID", "Dataset name"] {
+        let field = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, label)
+            .rect();
+        assert!((field.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
+    }
 
     harness.set_size(egui::vec2(390.0, 844.0));
     harness.step();

@@ -19,8 +19,7 @@ Only after that continue with the next issue.
 - [x] Reorder the per-task columns in the stats view from left to right to match the workflow timeline: Annotate, Review, Approve.
 - [x] Hide **Create a dataset** in Setup from users who do not have permission to create datasets.
   - Not quite if this is actually still an issue.
-- [ ] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.
-- [ ] Almost all text boxes are not fit to the size of the font of the actual text in the text box.
+- [x] Almost all text boxes are not fit to the size of the font of the actual text in the text box.
   - One example that looks good already is the API URL box in Setup.
   - Also boxes where large amounts of text need to be fit into like descriptions should be resizable text boxes.
   - All single line text boxes should be vertically centered. The height of the text box should only be adjusted to fit the text if the height does not need to match another element in its proximity. E.g. the text boxes in Admin sections actually look good as high as they are, since they match the height of some buttons next to them. 
@@ -31,3 +30,5 @@ Only after that continue with the next issue.
   - In People, the role checkboxes are offset and do not fit. Also the Person column should be centered vertically.
   - All background cards in the sections should be full width. 
 - [ ] The normal non-highlighted button does not look enough like a button. Make it just slightly more different from the background and other text.
+- [ ] A section in the admin panel with a scroll bar takes up slightly more horizontal space, causing the entire admin view to shift slightly left when entering a view with a scroll bar. A similar issue is apparent with the pan button in annotate. When the Pan button is activated, it is slightly larger and shifts the entire bar a bit to the right.
+- [ ] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.

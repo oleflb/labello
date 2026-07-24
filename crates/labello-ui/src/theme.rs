@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use egui::{
-    Button, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId,
-    Frame, Id, Margin, Modal, Response, RichText, Shadow, Stroke, Style, TextEdit, TextStyle, Ui,
-    Vec2, Visuals,
+    Align, Button, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily,
+    FontId, Frame, Id, Margin, Modal, Response, RichText, Shadow, Stroke, Style, TextEdit,
+    TextStyle, Ui, Vec2, Visuals,
     style::{ScrollAnimation, ScrollStyle, WidgetVisuals},
 };
 
@@ -50,6 +50,7 @@ pub const BODY_SIZE: f32 = 15.0;
 pub const SUPPORTING_SIZE: f32 = 12.0;
 pub const METRIC_SIZE: f32 = 30.0;
 pub const MONOSPACE_SIZE: f32 = 13.0;
+pub const COMPACT_TEXT_FIELD_HEIGHT: f32 = 28.0;
 
 // Compatibility aliases while screens move to semantic names in later phases.
 pub const BG: Color32 = APP_BG;
@@ -471,7 +472,7 @@ pub fn labeled_text_field(
             let label = ui.label(label);
             ui.add_sized(
                 [ui.available_width(), field_height],
-                TextEdit::singleline(value),
+                singleline_text_edit(value),
             )
             .labelled_by(label.id)
         })
@@ -481,12 +482,42 @@ pub fn labeled_text_field(
             let label = ui.add_sized([140.0, 44.0], egui::Label::new(label));
             ui.add_sized(
                 [ui.available_width(), field_height],
-                TextEdit::singleline(value),
+                singleline_text_edit(value),
             )
             .labelled_by(label.id)
         })
         .inner
     }
+}
+
+pub fn singleline_text_edit(value: &mut String) -> TextEdit<'_> {
+    TextEdit::singleline(value).vertical_align(Align::Center)
+}
+
+pub fn resizable_multiline_text_edit(
+    ui: &mut Ui,
+    id: Id,
+    value: &mut String,
+    desired_rows: usize,
+    hint_text: Option<&str>,
+) -> Response {
+    let row_height = ui.text_style_height(&TextStyle::Body);
+    let default_height = row_height * desired_rows as f32 + 8.0;
+    let width = ui.available_width();
+    egui::Resize::default()
+        .id(id)
+        .default_size(egui::vec2(width, default_height))
+        .min_size(egui::vec2(width, default_height))
+        .max_size(egui::vec2(width, 400.0))
+        .resizable([false, true])
+        .with_stroke(false)
+        .show(ui, |ui| {
+            let mut edit = TextEdit::multiline(value).desired_width(f32::INFINITY);
+            if let Some(hint_text) = hint_text {
+                edit = edit.hint_text(hint_text);
+            }
+            ui.add_sized(ui.available_size(), edit)
+        })
 }
 
 pub fn inline_message(ui: &mut Ui, intent: Intent, message: impl Into<String>) -> Response {
@@ -567,6 +598,7 @@ mod tests {
     #[test]
     fn components_keep_accessible_labels_states_and_touch_targets() {
         let mut value = String::new();
+        let mut compact_value = String::new();
         let harness = Harness::builder()
             .with_size(Vec2::new(320.0, 400.0))
             .build_ui(move |ui| {
@@ -581,6 +613,12 @@ mod tests {
                 quiet_button(ui, true, Button::new("Quiet action"));
                 danger_button(ui, true, Button::new("Danger action"));
                 labeled_text_field(ui, "Field label", &mut value, 44.0);
+                let compact_label = ui.label("Compact field");
+                ui.add_sized(
+                    [ui.available_width(), COMPACT_TEXT_FIELD_HEIGHT],
+                    singleline_text_edit(&mut compact_value),
+                )
+                .labelled_by(compact_label.id);
                 empty_state(
                     ui,
                     "Nothing here",
@@ -595,9 +633,12 @@ mod tests {
         let field = harness.get_by_role_and_label(egui::accesskit::Role::TextInput, "Field label");
         let bounded =
             harness.get_by_role_and_label(egui::accesskit::Role::Button, "Bounded primary action");
+        let compact =
+            harness.get_by_role_and_label(egui::accesskit::Role::TextInput, "Compact field");
         assert!(primary.accesskit_node().is_disabled());
         assert!(!danger.accesskit_node().is_disabled());
         assert!(field.rect().height() >= 44.0);
+        assert!((compact.rect().height() - COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
         assert_eq!(bounded.rect().width(), 180.0);
         assert!(harness.query_by_label("Create item").is_some());
     }

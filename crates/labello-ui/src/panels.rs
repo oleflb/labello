@@ -749,13 +749,16 @@ impl LabelloApp {
         ui.label(RichText::new("Reason").strong().color(theme::TEXT_MUTED));
         if let Some(draft) = self.correction_draft.as_mut() {
             let label = ui.label("Reason (optional)");
-            ui.add_enabled(
-                ready,
-                egui::TextEdit::multiline(&mut draft.reason)
-                    .desired_rows(2)
-                    .hint_text("What was corrected?"),
-            )
-            .labelled_by(label.id);
+            ui.add_enabled_ui(ready, |ui| {
+                theme::resizable_multiline_text_edit(
+                    ui,
+                    ui.make_persistent_id("correction-reason"),
+                    &mut draft.reason,
+                    2,
+                    Some("What was corrected?"),
+                )
+                .labelled_by(label.id);
+            });
         }
 
         let (can_undo, geometry_changed) = self
@@ -1678,10 +1681,10 @@ impl LabelloApp {
                 }
                 ui.add_space(6.0);
                 let search_label = ui.label("Search actions");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.shortcut_settings.search)
-                        .hint_text("Search by action or category")
-                        .desired_width(f32::INFINITY),
+                ui.add_sized(
+                    [ui.available_width(), theme::COMPACT_TEXT_FIELD_HEIGHT],
+                    theme::singleline_text_edit(&mut self.shortcut_settings.search)
+                        .hint_text("Search by action or category"),
                 )
                 .labelled_by(search_label.id);
                 ui.add_space(8.0);
