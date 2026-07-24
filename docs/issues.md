@@ -33,3 +33,4 @@ Only after that continue with the next issue.
 - [x] A section in the admin panel with a scroll bar takes up slightly more horizontal space, causing the entire admin view to shift slightly left when entering a view with a scroll bar. A similar issue is apparent with the pan button in annotate. When the Pan button is activated, it is slightly larger and shifts the entire bar a bit to the right.
 - [x] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.
 - [x] Selecting a role in Admin > People briefly flashes red lines across the interface.
+- [x] Remove the lower Admin unsaved-changes bar, replace its staged-change header text with a compact accessible indicator, move icon-only save and discard actions into the Admin header, and use the global save action for both configuration and People permission changes.

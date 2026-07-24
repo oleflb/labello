@@ -41,39 +41,62 @@ impl LabelloApp {
     pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
         let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
+        let changes_dirty = config_dirty || permissions_dirty;
+        let admin_busy = self.loading.admin || self.loading.roles_user.is_some();
         let load_error = self.admin_tools.load_error.clone();
-        let status_text = if self.loading.admin {
-            if self.datasets.admin_config.is_some() {
-                "Refreshing admin config"
+        let issues = self
+            .staged_admin_config()
+            .as_ref()
+            .map(|config| config_issues(config, &self.config.user_id))
+            .unwrap_or_default();
+        let mut status_text = if admin_busy {
+            if self.loading.roles_user.is_some() {
+                "Saving Admin changes".to_string()
+            } else if self.datasets.admin_config.is_some() {
+                "Saving or refreshing Admin changes".to_string()
             } else {
-                "Loading admin config"
+                "Loading Admin configuration".to_string()
             }
         } else if load_error.is_some() {
             if self.datasets.admin_config.is_some() {
-                "Admin refresh failed"
+                "Admin refresh failed".to_string()
             } else {
-                "Admin config unavailable"
+                "Admin configuration unavailable".to_string()
             }
+        } else if config_dirty && permissions_dirty {
+            "Admin changes staged".to_string()
         } else if config_dirty {
-            "Configuration changes staged"
+            "Configuration changes staged".to_string()
         } else if permissions_dirty {
-            "Permission changes staged"
+            "Permission changes staged".to_string()
         } else {
-            "Admin config saved"
+            "Admin changes saved".to_string()
         };
-        let status_color =
-            if self.loading.admin || load_error.is_some() || config_dirty || permissions_dirty {
-                theme::WARNING
-            } else {
-                theme::SUCCESS
-            };
+        if changes_dirty && !issues.is_empty() {
+            status_text.push_str(&format!("; {} validation error(s)", issues.len()));
+        }
+        let status_color = if load_error.is_some() {
+            theme::DANGER
+        } else if admin_busy {
+            theme::INFO
+        } else if changes_dirty {
+            theme::WARNING
+        } else {
+            theme::SUCCESS
+        };
         let can_reload = !self.loading.admin
             && self.loading.roles_user.is_none()
             && !self.loading.uploading
             && !self.loading.ingesting
-            && !config_dirty
-            && !permissions_dirty;
+            && !changes_dirty;
+        let idle = !self.loading.admin
+            && self.loading.roles_user.is_none()
+            && !self.loading.uploading
+            && !self.loading.ingesting;
+        let can_save = changes_dirty && issues.is_empty() && idle;
         let mut reload = false;
+        let mut save = false;
+        let mut discard = false;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             let title = |ui: &mut egui::Ui| {
@@ -87,12 +110,47 @@ impl LabelloApp {
                     );
                 });
             };
-            let mut status = |ui: &mut egui::Ui| {
-                if self.loading.admin {
-                    ui.spinner();
-                }
-                ui.label(RichText::new(status_text).color(status_color).strong());
-                if self.datasets.admin_config.is_some()
+            let mut actions = |ui: &mut egui::Ui| {
+                admin_status_indicator(ui, &status_text, status_color, admin_busy);
+                if changes_dirty {
+                    let save_response = theme::primary_button(
+                        ui,
+                        can_save,
+                        egui::Button::new(RichText::new("✓").size(18.0))
+                            .min_size(egui::vec2(44.0, 44.0)),
+                    )
+                    .on_hover_text(if can_save {
+                        "Save all staged configuration and permission changes."
+                    } else if !issues.is_empty() {
+                        "Fix validation errors before saving."
+                    } else {
+                        "Wait for the active Admin operation to finish."
+                    });
+                    save_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            can_save,
+                            "Save Admin changes",
+                        )
+                    });
+                    save = save_response.clicked();
+
+                    let discard_response = theme::danger_button(
+                        ui,
+                        idle,
+                        egui::Button::new(RichText::new("×").size(20.0))
+                            .min_size(egui::vec2(44.0, 44.0)),
+                    )
+                    .on_hover_text("Discard all staged configuration and permission changes.");
+                    discard_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            idle,
+                            "Discard staged changes",
+                        )
+                    });
+                    discard = discard_response.clicked();
+                } else if self.datasets.admin_config.is_some()
                     && theme::quiet_button(
                         ui,
                         can_reload,
@@ -108,23 +166,29 @@ impl LabelloApp {
                     reload = true;
                 }
             };
-            if layout == LayoutMode::Compact {
+            if layout != LayoutMode::Wide {
                 ui.vertical(|ui| {
                     title(ui);
-                    ui.horizontal_wrapped(status);
+                    ui.horizontal_wrapped(actions);
                 });
             } else {
                 ui.horizontal(|ui| {
                     title(ui);
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| status(ui),
+                        |ui| actions(ui),
                     );
                 });
             }
         });
         if reload {
             self.request_admin_dataset();
+        }
+        if save {
+            self.request_admin_changes_save();
+        }
+        if discard {
+            self.admin_tools.confirm_discard = true;
         }
         ui.add_space(theme::SPACE_2);
         if let Some(error) = load_error {
@@ -312,7 +376,10 @@ impl LabelloApp {
         };
         if theme::primary_button(
             ui,
-            !self.loading.admin && !self.loading.uploading && !self.loading.ingesting,
+            !self.loading.admin
+                && self.loading.roles_user.is_none()
+                && !self.loading.uploading
+                && !self.loading.ingesting,
             egui::Button::new(action_label),
         )
         .clicked()
@@ -341,7 +408,10 @@ impl LabelloApp {
 
         if let Some(config) = self.datasets.admin_config.as_mut() {
             ui.add_enabled_ui(
-                !self.loading.admin && !self.loading.uploading && !self.loading.ingesting,
+                !self.loading.admin
+                    && self.loading.roles_user.is_none()
+                    && !self.loading.uploading
+                    && !self.loading.ingesting,
                 |ui| {
                     theme::card_frame().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -363,8 +433,7 @@ impl LabelloApp {
         }
 
         let issues = self
-            .datasets
-            .admin_config
+            .staged_admin_config()
             .as_ref()
             .map(|config| config_issues(config, &self.config.user_id))
             .unwrap_or_default();
@@ -518,74 +587,6 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn admin_status_bar(&mut self, ui: &mut egui::Ui) {
-        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
-        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
-        let issues = self
-            .datasets
-            .admin_config
-            .as_ref()
-            .map(|config| config_issues(config, &self.config.user_id))
-            .unwrap_or_default();
-        let idle = !self.loading.admin && self.loading.roles_user.is_none();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(if config_dirty {
-                    "Unsaved admin changes"
-                } else {
-                    "Unsaved permission changes"
-                })
-                .color(theme::AMBER)
-                .strong(),
-            );
-            if config_dirty
-                && theme::primary_button(
-                    ui,
-                    issues.is_empty() && idle,
-                    egui::Button::new("Save Admin Config"),
-                )
-                .on_disabled_hover_text("Fix validation errors before saving.")
-                .clicked()
-            {
-                self.request_admin_save();
-            }
-            if (config_dirty || permissions_dirty)
-                && theme::danger_button(ui, idle, egui::Button::new("Discard staged changes"))
-                    .clicked()
-            {
-                self.admin_tools.confirm_discard = true;
-            }
-            if !issues.is_empty() {
-                ui.label(
-                    RichText::new(format!("{} validation error(s)", issues.len()))
-                        .color(theme::DANGER),
-                );
-            }
-            if permissions_dirty {
-                ui.label("Save changed permissions in the People section.");
-            }
-        });
-    }
-
-    pub(crate) fn admin_status_height(&self, layout: LayoutMode) -> f32 {
-        if layout == LayoutMode::Wide {
-            return 68.0;
-        }
-        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
-        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
-        let has_issues = self
-            .datasets
-            .admin_config
-            .as_ref()
-            .is_some_and(|config| !config_issues(config, &self.config.user_id).is_empty());
-        (if layout == LayoutMode::Compact && config_dirty {
-            164.0
-        } else {
-            68.0
-        }) + if has_issues { 24.0 } else { 0.0 }
-            + if permissions_dirty { 44.0 } else { 0.0 }
-    }
-
     fn people_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         ui.heading("People");
         theme::card_frame().show(ui, |ui| {
@@ -616,8 +617,10 @@ impl LabelloApp {
             }
             let search = self.admin_tools.people_search.trim().to_lowercase();
             let current_user = self.config.user_id.clone();
-            let admin_loading =
-                self.loading.admin || self.loading.uploading || self.loading.ingesting;
+            let admin_loading = self.loading.admin
+                || self.loading.roles_user.is_some()
+                || self.loading.uploading
+                || self.loading.ingesting;
             let baseline = self.datasets.users_baseline.clone();
             let admin_count = self
                 .datasets
@@ -626,15 +629,14 @@ impl LabelloApp {
                 .filter(|user| user.roles.contains(&DatasetRole::DataAdmin))
                 .count();
             let saving = self.loading.roles_user.clone();
-            let mut save_user = None;
             let mut visible_users = 0;
             if layout == LayoutMode::Wide {
                 egui::Grid::new("admin-people-grid")
-                    .num_columns(4)
+                    .num_columns(3)
                     .striped(true)
                     .spacing([theme::SPACE_4, theme::SPACE_2])
                     .show(ui, |ui| {
-                        for heading in ["Person", "Roles", "Status", "Action"] {
+                        for heading in ["Person", "Roles", "Status"] {
                             ui.label(RichText::new(heading).strong().color(theme::TEXT_MUTED));
                         }
                         ui.end_row();
@@ -666,14 +668,13 @@ impl LabelloApp {
                                         &current_user,
                                         admin_count,
                                         admin_loading,
-                                        saving.as_ref(),
                                     );
                                 },
                             );
                             let dirty = user_permissions_dirty(user, &baseline);
                             let this_saving = saving.as_ref() == Some(&user.account.user_id);
                             ui.allocate_ui_with_layout(
-                                egui::vec2(50.0, 76.0),
+                                egui::vec2(80.0, 76.0),
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     ui.label(
@@ -694,24 +695,6 @@ impl LabelloApp {
                                     );
                                 },
                             );
-                            let save = ui
-                                .allocate_ui_with_layout(
-                                    egui::vec2(148.0, 76.0),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        save_permissions_button(
-                                            ui,
-                                            user,
-                                            dirty,
-                                            admin_loading,
-                                            saving.as_ref(),
-                                        )
-                                    },
-                                )
-                                .inner;
-                            if save {
-                                save_user = Some(user.account.user_id.clone());
-                            }
                             ui.end_row();
                         }
                     });
@@ -730,19 +713,13 @@ impl LabelloApp {
                         user_identity(ui, user);
                         ui.add_space(theme::SPACE_1);
                         ui.horizontal_wrapped(|ui| {
-                            edit_user_roles(
-                                ui,
-                                user,
-                                &current_user,
-                                admin_count,
-                                admin_loading,
-                                saving.as_ref(),
-                            );
+                            edit_user_roles(ui, user, &current_user, admin_count, admin_loading);
                         });
                         let dirty = user_permissions_dirty(user, &baseline);
                         ui.horizontal_wrapped(|ui| {
+                            let this_saving = saving.as_ref() == Some(&user.account.user_id);
                             ui.label(
-                                RichText::new(if saving.as_ref() == Some(&user.account.user_id) {
+                                RichText::new(if this_saving {
                                     "Saving"
                                 } else if dirty {
                                     "Changes staged"
@@ -755,15 +732,6 @@ impl LabelloApp {
                                     theme::TEXT_MUTED
                                 }),
                             );
-                            if save_permissions_button(
-                                ui,
-                                user,
-                                dirty,
-                                admin_loading,
-                                saving.as_ref(),
-                            ) {
-                                save_user = Some(user.account.user_id.clone());
-                            }
                         });
                     });
                     card.response.widget_info(|| {
@@ -787,15 +755,13 @@ impl LabelloApp {
                     None,
                 );
             }
-            if let Some(user_id) = save_user {
-                self.request_role_save(user_id);
-            }
         });
     }
 
     fn images_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let controls_enabled = !self.loading.images
             && !self.loading.admin
+            && self.loading.roles_user.is_none()
             && !self.loading.uploading
             && !self.loading.ingesting;
         theme::card_frame().show(ui, |ui| {
@@ -1374,6 +1340,20 @@ impl LabelloApp {
     }
 }
 
+fn admin_status_indicator(ui: &mut egui::Ui, status: &str, color: egui::Color32, loading: bool) {
+    let response = if loading {
+        ui.spinner()
+    } else {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 44.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 5.0, color);
+        response
+    }
+    .on_hover_text(status);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, status.to_string())
+    });
+}
+
 fn user_identity(ui: &mut egui::Ui, user: &DatasetUser) {
     ui.label(RichText::new(&user.account.display_name).strong());
     if let Some(login) = &user.account.github_login {
@@ -1404,7 +1384,6 @@ fn edit_user_roles(
     current_user: &UserId,
     admin_count: usize,
     admin_loading: bool,
-    saving: Option<&UserId>,
 ) {
     for (role, label) in [
         (DatasetRole::Annotator, "Annotator"),
@@ -1414,7 +1393,6 @@ fn edit_user_roles(
     ] {
         let is_admin_role = role == DatasetRole::DataAdmin;
         let role_enabled = !admin_loading
-            && saving.is_none()
             && !(is_admin_role
                 && user.roles.contains(&role)
                 && (&user.account.user_id == current_user || admin_count == 1));
@@ -1454,37 +1432,6 @@ fn user_permissions_dirty(user: &DatasetUser, baseline: &[DatasetUser]) -> bool 
         .iter()
         .find(|existing| existing.account.user_id == user.account.user_id)
         .is_none_or(|existing| existing.roles != user.roles)
-}
-
-fn save_permissions_button(
-    ui: &mut egui::Ui,
-    user: &DatasetUser,
-    dirty: bool,
-    admin_loading: bool,
-    saving: Option<&UserId>,
-) -> bool {
-    let this_saving = saving == Some(&user.account.user_id);
-    let enabled = dirty && saving.is_none() && !admin_loading;
-    let response = theme::primary_button(
-        ui,
-        enabled,
-        egui::Button::new(if this_saving {
-            "Saving..."
-        } else {
-            "Save permissions"
-        }),
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Button,
-            enabled,
-            format!(
-                "Save permissions for {} ({})",
-                user.account.display_name, user.account.user_id
-            ),
-        )
-    });
-    response.clicked()
 }
 
 fn task_statuses() -> [TaskStatus; 6] {

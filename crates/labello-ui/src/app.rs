@@ -15,10 +15,10 @@ use labello_client::{
 use labello_domain::{
     AdjudicationRecord, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType,
     Assignment, AssignmentId, AssignmentKind, BoundingBox, ClassId, DatasetId, DatasetMetadata,
-    DatasetRole, DatasetSnapshot, DatasetStats, ImageExplorerPage, ImageId, ImageRecord,
-    ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass, NormalizedPoint,
-    PrelabelConfigId, PrelabelSuggestion, ReviewRecord, SkeletonGeometry, TaskDefinition, TaskId,
-    TaskStatus, TutorialContent, UserAccount, UserId,
+    DatasetRole, DatasetRoleAssignment, DatasetSnapshot, DatasetStats, ImageExplorerPage, ImageId,
+    ImageRecord, ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass,
+    NormalizedPoint, PrelabelConfigId, PrelabelSuggestion, ReviewRecord, SkeletonGeometry,
+    TaskDefinition, TaskId, TaskStatus, TutorialContent, UserAccount, UserId,
 };
 use web_time::{Duration, Instant};
 
@@ -654,6 +654,7 @@ pub(crate) struct AdminToolsState {
     pub snapshots_error: Option<String>,
     pub snapshot_action_error: Option<String>,
     pub confirm_discard: bool,
+    pub pending_role_saves: VecDeque<UserId>,
 }
 
 impl Default for AdminToolsState {
@@ -680,6 +681,7 @@ impl Default for AdminToolsState {
             snapshots_error: None,
             snapshot_action_error: None,
             confirm_discard: false,
+            pending_role_saves: VecDeque::new(),
         }
     }
 }
@@ -1143,6 +1145,43 @@ impl LabelloApp {
     pub(crate) fn admin_changes_dirty(&self) -> bool {
         self.datasets.admin_config != self.datasets.admin_baseline
             || self.datasets.users != self.datasets.users_baseline
+    }
+
+    pub(crate) fn staged_admin_config(&self) -> Option<DatasetMetadata> {
+        let mut metadata = self.datasets.admin_config.clone()?;
+        let assigned_at = labello_domain::now();
+        for user in &self.datasets.users {
+            let roles = user.roles.iter().cloned().collect::<BTreeSet<_>>();
+            if roles.is_empty() {
+                metadata
+                    .role_assignments
+                    .retain(|assignment| assignment.user_id != user.account.user_id);
+                continue;
+            }
+            let existing = metadata
+                .role_assignments
+                .iter_mut()
+                .find(|assignment| assignment.user_id == user.account.user_id);
+            if let Some(existing) = existing {
+                if existing.roles != roles {
+                    existing.roles = roles;
+                    existing.assigned_at = assigned_at;
+                    existing.assigned_by = Some(self.config.user_id.clone());
+                }
+            } else {
+                metadata.role_assignments.push(DatasetRoleAssignment {
+                    dataset_id: metadata.dataset_id.clone(),
+                    user_id: user.account.user_id.clone(),
+                    roles,
+                    assigned_at,
+                    assigned_by: Some(self.config.user_id.clone()),
+                });
+            }
+        }
+        metadata
+            .role_assignments
+            .sort_by(|left, right| left.user_id.cmp(&right.user_id));
+        Some(metadata)
     }
 
     pub(crate) fn short_viewport(size: egui::Vec2) -> bool {
@@ -2368,24 +2407,6 @@ impl eframe::App for LabelloApp {
                         self.compact_workspace_actions(ui);
                     } else {
                         ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
-                    }
-                });
-        } else if self.view == AppView::Admin {
-            let changes_dirty = self.admin_changes_dirty();
-            egui::Panel::bottom("admin_save_status")
-                .exact_size(if changes_dirty {
-                    self.admin_status_height(layout)
-                } else {
-                    0.0
-                })
-                .frame(if changes_dirty {
-                    theme::top_bar_frame()
-                } else {
-                    egui::Frame::NONE
-                })
-                .show(ui, |ui| {
-                    if changes_dirty {
-                        self.admin_status_bar(ui);
                     }
                 });
         }

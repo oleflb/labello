@@ -212,11 +212,12 @@ impl LabelloApp {
                         self.datasets.admin_baseline = Some(metadata.clone());
                         self.datasets.admin_config = Some(metadata);
                         self.clear_admin_draft();
-                        self.runtime.notice = Some("Admin config saved".to_string());
                         self.runtime.error = None;
+                        self.request_next_admin_role_save();
                     }
                     Err(error) => {
                         self.loading.admin = false;
+                        self.admin_tools.pending_role_saves.clear();
                         self.runtime.error = Some(error);
                     }
                 },
@@ -227,13 +228,13 @@ impl LabelloApp {
                             replace_dataset_user(&mut self.datasets.users, user.clone());
                             replace_dataset_user(&mut self.datasets.users_baseline, user.clone());
                             self.sync_role_assignment(&user);
-                            self.runtime.notice = Some(format!(
-                                "Permissions saved for {}",
-                                user.account.display_name
-                            ));
                             self.runtime.error = None;
+                            self.request_next_admin_role_save();
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.admin_tools.pending_role_saves.clear();
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::ImagesLoaded { result, .. } => {
@@ -1316,6 +1317,7 @@ impl LabelloApp {
         self.loading.dataset = false;
         self.loading.admin = false;
         self.loading.roles_user = None;
+        self.admin_tools.pending_role_saves.clear();
         self.loading.image = false;
         self.loading.saving = false;
         self.loading.ingesting = false;
@@ -1501,21 +1503,72 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn request_admin_save(&mut self) {
-        let Some(metadata) = self.datasets.admin_config.clone() else {
-            return;
-        };
+    pub(crate) fn request_admin_changes_save(&mut self) {
         if self.loading.admin || self.loading.roles_user.is_some() {
             return;
         }
-        self.loading.admin = true;
-        let request = self.request_identity(Some(self.config.dataset_id.clone()));
-        self.queue_command(UiCommand::SaveAdmin { request, metadata });
+        let baseline = &self.datasets.users_baseline;
+        let mut dirty_users = self
+            .datasets
+            .users
+            .iter()
+            .filter(|user| {
+                baseline
+                    .iter()
+                    .find(|saved| saved.account.user_id == user.account.user_id)
+                    .is_none_or(|saved| saved.roles != user.roles)
+            })
+            .map(|user| {
+                (
+                    user.account.user_id.clone(),
+                    user.roles.contains(&labello_domain::DatasetRole::DataAdmin),
+                )
+            })
+            .collect::<Vec<_>>();
+        dirty_users.sort_by_key(|(_, remains_admin)| !*remains_admin);
+        self.admin_tools.pending_role_saves = dirty_users
+            .into_iter()
+            .map(|(user_id, _)| user_id)
+            .collect();
+
+        if self.datasets.admin_config != self.datasets.admin_baseline {
+            if !self.request_admin_save() {
+                self.admin_tools.pending_role_saves.clear();
+            }
+        } else {
+            self.request_next_admin_role_save();
+        }
     }
 
-    pub(crate) fn request_role_save(&mut self, user_id: labello_domain::UserId) {
-        if self.loading.admin || self.loading.roles_user.is_some() || self.runtime.api.is_none() {
+    pub(crate) fn request_admin_save(&mut self) -> bool {
+        let Some(metadata) = self.datasets.admin_config.clone() else {
+            return false;
+        };
+        if self.loading.admin || self.loading.roles_user.is_some() {
+            return false;
+        }
+        self.loading.admin = true;
+        let request = self.request_identity(Some(self.config.dataset_id.clone()));
+        self.queue_command(UiCommand::SaveAdmin { request, metadata })
+    }
+
+    fn request_next_admin_role_save(&mut self) {
+        let Some(user_id) = self.admin_tools.pending_role_saves.pop_front() else {
+            self.runtime.notice = Some("Admin changes saved".to_string());
             return;
+        };
+        if !self.request_role_save(user_id) {
+            self.admin_tools.pending_role_saves.clear();
+        }
+    }
+
+    fn request_role_save(&mut self, user_id: labello_domain::UserId) -> bool {
+        if self.loading.admin || self.loading.roles_user.is_some() {
+            return false;
+        }
+        if self.runtime.api.is_none() {
+            self.runtime.error = Some("API is not configured".to_string());
+            return false;
         }
         let Some(user) = self
             .datasets
@@ -1523,12 +1576,12 @@ impl LabelloApp {
             .iter()
             .find(|user| user.account.user_id == user_id)
         else {
-            return;
+            return false;
         };
         let removes_admin = !user.roles.contains(&labello_domain::DatasetRole::DataAdmin);
         if user_id == self.config.user_id && removes_admin {
             self.runtime.error = Some("You cannot remove your own data admin role.".to_string());
-            return;
+            return false;
         }
         let admin_count = self
             .datasets
@@ -1544,7 +1597,7 @@ impl LabelloApp {
             .is_some_and(|user| user.roles.contains(&labello_domain::DatasetRole::DataAdmin));
         if was_admin && removes_admin && admin_count == 0 {
             self.runtime.error = Some("At least one data admin must remain.".to_string());
-            return;
+            return false;
         }
         let roles = user.roles.clone();
         self.loading.roles_user = Some(user_id.clone());
@@ -1554,7 +1607,7 @@ impl LabelloApp {
             dataset_id: self.config.dataset_id.clone(),
             user_id,
             roles,
-        });
+        })
     }
 
     fn sync_role_assignment(&mut self, user: &labello_client::DatasetUser) {

@@ -203,7 +203,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     }));
 
     let before_save = api.counts();
-    click_accesskit_button(&mut harness, "Save Admin Config");
+    click_accesskit_button(&mut harness, "Save Admin changes");
     step_until(&mut harness, 8, |_| api.counts().update_dataset_config == 1);
     assert_eq!(api.counts().update_dataset_config, 1);
     assert_eq!(api.counts().list_datasets, before_save.list_datasets);
@@ -611,7 +611,7 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
                 "Save permissions for Reviewer Person (reviewer)"
             )
             .next()
-            .is_some()
+            .is_none()
     );
     let reviewer_role_id = harness
         .get_by_role_and_label(
@@ -629,6 +629,15 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
         .find(|user| user.account.user_id == UserId::from("reviewer"))
         .unwrap();
     reviewer.roles.push(DatasetRole::Reviewer);
+    harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("admin"))
+        .unwrap()
+        .roles
+        .retain(|role| role != &DatasetRole::Annotator);
     harness.step();
     let staged_reviewer_role_id = harness
         .get_by_role_and_label(
@@ -641,7 +650,7 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     assert_eq!(staged_reviewer_role_id, reviewer_role_id);
     assert!(
         harness
-            .query_by_label("Unsaved permission changes")
+            .query_by_label("Permission changes staged")
             .is_some()
     );
     harness.state_mut().open_view(AppView::Stats);
@@ -678,12 +687,158 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
             .as_deref()
             .is_some_and(|error| error.contains("before signing out"))
     );
+    click_accesskit_button(&mut harness, "Save Admin changes");
+    step_until(&mut harness, 8, |app| {
+        !app.loading.admin
+            && app.loading.roles_user.is_none()
+            && app.admin_tools.pending_role_saves.is_empty()
+    });
+    assert!(
+        harness
+            .query_all_by_label("Admin changes saved")
+            .next()
+            .is_some()
+    );
+    assert_eq!(api.counts().update_dataset_config, 0);
+    assert_eq!(api.counts().set_dataset_roles, 2);
+    assert!(
+        harness
+            .state()
+            .datasets
+            .users
+            .iter()
+            .find(|user| user.account.user_id == UserId::from("reviewer"))
+            .unwrap()
+            .roles
+            .contains(&DatasetRole::Reviewer)
+    );
+    assert_eq!(
+        harness.state().datasets.users,
+        harness.state().datasets.users_baseline
+    );
+    assert!(
+        harness
+            .state()
+            .datasets
+            .admin_config
+            .as_ref()
+            .unwrap()
+            .role_assignments
+            .iter()
+            .any(|assignment| {
+                assignment.user_id == UserId::from("reviewer")
+                    && assignment.roles.contains(&DatasetRole::Reviewer)
+            })
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::CheckBox,
+                "Data admin role for Admin User (admin)"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(!harness.state().admin_changes_dirty());
+
+    let admin = harness
+        .state()
+        .datasets
+        .users
+        .iter()
+        .find(|user| user.account.user_id == UserId::from("admin"))
+        .unwrap();
+    assert!(admin.roles.contains(&DatasetRole::DataAdmin));
+    assert!(!admin.roles.contains(&DatasetRole::Annotator));
+}
+
+#[test]
+fn failed_global_admin_save_preserves_config_and_permission_edits() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
     harness
         .state_mut()
-        .request_role_save(UserId::from("reviewer"));
-    step_until(&mut harness, 8, |app| app.loading.roles_user.is_none());
-    assert!(harness.query_by_label("Admin config saved").is_some());
+        .datasets
+        .admin_config
+        .as_mut()
+        .unwrap()
+        .name = "Staged dataset name".to_string();
+    harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap()
+        .roles
+        .push(DatasetRole::Reviewer);
+    api.fail_next_admin_save();
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Save Admin changes");
+    step_until(&mut harness, 8, |app| !app.loading.admin);
+
+    assert_eq!(api.counts().update_dataset_config, 1);
+    assert!(harness.state().loading.roles_user.is_none());
+    assert!(harness.state().admin_tools.pending_role_saves.is_empty());
+    assert!(harness.state().admin_changes_dirty());
+    assert_eq!(
+        harness.state().datasets.admin_config.as_ref().unwrap().name,
+        "Staged dataset name"
+    );
+    assert!(
+        harness
+            .state()
+            .datasets
+            .users
+            .iter()
+            .find(|user| user.account.user_id == UserId::from("reviewer"))
+            .unwrap()
+            .roles
+            .contains(&DatasetRole::Reviewer)
+    );
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("admin save failed"))
+    );
+}
+
+#[test]
+fn global_admin_save_sequences_configuration_and_permissions() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    harness
+        .state_mut()
+        .datasets
+        .admin_config
+        .as_mut()
+        .unwrap()
+        .name = "Unified Admin save".to_string();
+    harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap()
+        .roles
+        .push(DatasetRole::Reviewer);
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Save Admin changes");
+    step_until(&mut harness, 12, |app| {
+        !app.loading.admin
+            && app.loading.roles_user.is_none()
+            && app.admin_tools.pending_role_saves.is_empty()
+    });
+
+    assert_eq!(api.counts().update_dataset_config, 1);
     assert_eq!(api.counts().set_dataset_roles, 1);
+    assert_eq!(api.metadata().name, "Unified Admin save");
     assert!(
         api.dataset_users()
             .iter()
@@ -692,24 +847,70 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
             .roles
             .contains(&DatasetRole::Reviewer)
     );
+    assert!(!harness.state().admin_changes_dirty());
+}
 
-    let admin = harness
+#[test]
+fn failed_permission_sequence_keeps_remaining_edits_staged() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    harness
         .state_mut()
         .datasets
         .users
         .iter_mut()
         .find(|user| user.account.user_id == UserId::from("admin"))
+        .unwrap()
+        .roles
+        .retain(|role| role != &DatasetRole::Annotator);
+    harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap()
+        .roles
+        .push(DatasetRole::Reviewer);
+    api.fail_role_save_at(2);
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Save Admin changes");
+    step_until(&mut harness, 12, |app| {
+        app.loading.roles_user.is_none() && app.admin_tools.pending_role_saves.is_empty()
+    });
+
+    assert_eq!(api.counts().set_dataset_roles, 2);
+    let users = &harness.state().datasets.users;
+    let baseline = &harness.state().datasets.users_baseline;
+    let admin = users
+        .iter()
+        .find(|user| user.account.user_id == UserId::from("admin"))
         .unwrap();
-    admin.roles.retain(|role| role != &DatasetRole::DataAdmin);
-    harness.state_mut().request_role_save(UserId::from("admin"));
-    assert_eq!(api.counts().set_dataset_roles, 1);
+    let saved_admin = baseline
+        .iter()
+        .find(|user| user.account.user_id == UserId::from("admin"))
+        .unwrap();
+    assert!(!admin.roles.contains(&DatasetRole::Annotator));
+    assert_eq!(admin.roles, saved_admin.roles);
+    let reviewer = users
+        .iter()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap();
+    let saved_reviewer = baseline
+        .iter()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap();
+    assert!(reviewer.roles.contains(&DatasetRole::Reviewer));
+    assert!(!saved_reviewer.roles.contains(&DatasetRole::Reviewer));
+    assert!(harness.state().admin_changes_dirty());
     assert!(
         harness
             .state()
             .runtime
             .error
             .as_deref()
-            .is_some_and(|error| error.contains("own data admin"))
+            .is_some_and(|error| error.contains("role save failed"))
     );
 }
 
@@ -885,7 +1086,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         );
     }
     let title = harness.get_by_label("Dataset Admin").rect();
-    let status = harness.get_by_label("Admin config saved").rect();
+    let status = harness.get_by_label("Admin changes saved").rect();
     let reload = harness
         .get_by_role_and_label(egui::accesskit::Role::Button, "Reload")
         .rect();
@@ -955,7 +1156,11 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
 
     harness.state_mut().loading.admin = true;
     harness.step();
-    assert!(harness.query_by_label("Refreshing admin config").is_some());
+    assert!(
+        harness
+            .query_by_label("Saving or refreshing Admin changes")
+            .is_some()
+    );
     assert!(
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Reload")
@@ -1930,9 +2135,17 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     app.request_admin_save();
     assert!(!app.loading.admin);
 
+    app.datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap()
+        .roles
+        .push(DatasetRole::Reviewer);
     saturate_command_queue(&mut app);
-    app.request_role_save(UserId::from("reviewer"));
+    app.request_admin_changes_save();
     assert!(app.loading.roles_user.is_none());
+    assert!(app.admin_tools.pending_role_saves.is_empty());
 
     saturate_command_queue(&mut app);
     app.request_images();
@@ -3471,7 +3684,7 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
 }
 
 #[test]
-fn admin_geometry_keeps_save_and_discard_visible() {
+fn admin_geometry_keeps_compact_save_and_discard_in_the_header() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_admin_harness(api);
     harness
@@ -3486,7 +3699,10 @@ fn admin_geometry_keeps_save_and_discard_visible() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
         assert_label_inside(&harness, "Dataset Admin", width, height);
-        for label in ["Save Admin Config", "Discard staged changes"] {
+        let description = harness
+            .get_by_label("Manage access, inspect images, and configure labeling workflows.")
+            .rect();
+        for label in ["Save Admin changes", "Discard staged changes"] {
             assert_control_inside(
                 &harness,
                 label,
@@ -3494,8 +3710,28 @@ fn admin_geometry_keeps_save_and_discard_visible() {
                 width,
                 height,
             );
+            let action = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, label)
+                .rect();
+            assert!(
+                action.width() <= 45.0,
+                "{label} is not icon-sized: {action:?}"
+            );
+            assert!((action.width() - action.height()).abs() <= 1.0);
+            if LayoutMode::for_width(width) != LayoutMode::Wide {
+                assert!(
+                    !action.intersects(description),
+                    "{label} overlaps the Admin description at {width}x{height}: action={action:?}, description={description:?}"
+                );
+            }
         }
-        assert_label_inside(&harness, "1 validation error(s)", width, height);
+        assert_label_inside(
+            &harness,
+            "Configuration changes staged; 1 validation error(s)",
+            width,
+            height,
+        );
+        assert!(harness.query_by_label("Unsaved admin changes").is_none());
         assert_visible_controls_clamped(&harness, width, height);
     }
 }
@@ -4973,6 +5209,14 @@ impl SpyApi {
         self.state.borrow_mut().fail_next_batch = true;
     }
 
+    fn fail_next_admin_save(&self) {
+        self.state.borrow_mut().fail_next_admin_save = true;
+    }
+
+    fn fail_role_save_at(&self, call: usize) {
+        self.state.borrow_mut().fail_role_save_at = Some(call);
+    }
+
     fn last_correction(&self) -> Option<CorrectionRequest> {
         self.state.borrow().last_correction.clone()
     }
@@ -5047,6 +5291,8 @@ struct SpyState {
     snapshots: Vec<DatasetSnapshot>,
     fail_next_correction: bool,
     fail_next_batch: bool,
+    fail_next_admin_save: bool,
+    fail_role_save_at: Option<usize>,
     last_correction: Option<CorrectionRequest>,
 }
 
@@ -5158,6 +5404,8 @@ impl SpyState {
             snapshots: Vec::new(),
             fail_next_correction: false,
             fail_next_batch: false,
+            fail_next_admin_save: false,
+            fail_role_save_at: None,
             last_correction: None,
         }
     }
@@ -5237,6 +5485,9 @@ impl DatasetApi for SpyApi {
     ) -> ApiFuture<'a, DatasetMetadata> {
         let mut state = self.state.borrow_mut();
         state.counts.update_dataset_config += 1;
+        if std::mem::take(&mut state.fail_next_admin_save) {
+            return ready(Err(ClientError::Demo("admin save failed".to_string())));
+        }
         state.metadata.name = request.name;
         state.metadata.image_roots = request.image_roots;
         state.metadata.label_classes = request.label_classes;
@@ -6098,6 +6349,10 @@ impl UserApi for SpyApi {
     ) -> ApiFuture<'a, DatasetUser> {
         let mut state = self.state.borrow_mut();
         state.counts.set_dataset_roles += 1;
+        if state.fail_role_save_at == Some(state.counts.set_dataset_roles) {
+            state.fail_role_save_at = None;
+            return ready(Err(ClientError::Demo("role save failed".to_string())));
+        }
         let user = state
             .users
             .iter_mut()
