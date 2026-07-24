@@ -2059,12 +2059,18 @@ impl LabelloApp {
             {
                 self.retry_assignment_load()
             }
-            UserAction::TogglePanMode if self.view == AppView::Annotate => {
+            UserAction::TogglePanMode if self.work_view() && self.current.is_some() => {
                 self.canvas.toggle_pan_mode()
             }
-            UserAction::ZoomIn if self.view == AppView::Annotate => self.canvas.zoom_in(),
-            UserAction::ZoomOut if self.view == AppView::Annotate => self.canvas.zoom_out(),
-            UserAction::FitImage if self.view == AppView::Annotate => self.canvas.fit_view(),
+            UserAction::ZoomIn if self.work_view() && self.current.is_some() => {
+                self.canvas.zoom_in()
+            }
+            UserAction::ZoomOut if self.work_view() && self.current.is_some() => {
+                self.canvas.zoom_out()
+            }
+            UserAction::FitImage if self.work_view() && self.current.is_some() => {
+                self.canvas.fit_view()
+            }
             UserAction::AcceptReviewObject if self.view == AppView::Review => {
                 if self.correction_draft.is_none() {
                     self.request_review(labello_domain::ReviewDecision::Approved);
@@ -2117,6 +2123,9 @@ impl LabelloApp {
             .iter()
             .filter(|(action, _)| match action.context() {
                 labello_domain::ActionContext::WorkWorkspace => self.work_view(),
+                labello_domain::ActionContext::WorkImage => {
+                    self.work_view() && self.current.is_some()
+                }
                 labello_domain::ActionContext::AnnotateWorkspace => self.view == AppView::Annotate,
                 labello_domain::ActionContext::AnnotateImage => {
                     self.view == AppView::Annotate && self.current.is_some()
@@ -2226,9 +2235,9 @@ impl eframe::App for LabelloApp {
         if self.work_view() {
             egui::Panel::top("workspace_context")
                 .exact_size(
-                    if layout == LayoutMode::Compact
-                        && self.view == AppView::Annotate
-                        && self.current.is_some()
+                    if self.current.is_some()
+                        && (layout == LayoutMode::Compact
+                            || (layout == LayoutMode::Medium && self.view != AppView::Annotate))
                     {
                         100.0
                     } else {

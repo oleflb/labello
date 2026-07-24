@@ -2801,10 +2801,26 @@ fn review_correction_drawer_and_actions_stay_reachable() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
         assert_canvas_geometry(&harness, width, height);
+        for label in ["Object", "Reason", "Actions"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "missing correction section {label} at {width}x{height}"
+            );
+        }
+        assert!(
+            harness
+                .query_by_role_and_label(
+                    egui::accesskit::Role::MultilineTextInput,
+                    "Reason (optional)",
+                )
+                .is_some()
+        );
         let finalize =
             harness.get_by_role_and_label(egui::accesskit::Role::Button, "Correct & finalize");
         finalize.scroll_to_me();
-        harness.step();
+        for _ in 0..4 {
+            harness.step();
+        }
         assert_control_inside(
             &harness,
             "Correct & finalize",
@@ -2831,9 +2847,32 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
     );
     let mut harness = loaded_review_harness(api);
 
+    click(&mut harness, "Zoom in");
+    assert!(harness.state().canvas.current_zoom() > 1.0);
+    click(&mut harness, "Pan");
+    assert!(harness.state().canvas.pan_mode());
+    click(&mut harness, "Pan");
+    assert!(!harness.state().canvas.pan_mode());
+    click(&mut harness, "Fit");
+    assert_eq!(harness.state().canvas.current_zoom(), 1.0);
+    harness.key_press(egui::Key::Plus);
+    harness.step();
+    assert!(harness.state().canvas.current_zoom() > 1.0);
+    click(&mut harness, "Fit");
+
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
+        assert_label_inside(&harness, "Object 1 of 1", width, height);
+        for label in ["Pan", "Zoom out", "Zoom in", "Fit"] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
         let (approve, reject) = ("Approve object", "Reject object & finish");
         for label in [approve, reject] {
             assert_control_inside(
@@ -2857,6 +2896,11 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
             harness.state_mut().drawer = None;
         }
     }
+
+    harness.state_mut().review_index = 1;
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
+    assert_label_inside(&harness, "Final check", 320.0, 568.0);
 }
 
 #[test]
@@ -2874,9 +2918,23 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
     );
     let mut harness = loaded_adjudication_harness(api);
 
+    click(&mut harness, "Zoom in");
+    assert!(harness.state().canvas.current_zoom() > 1.0);
+    click(&mut harness, "Fit");
+    assert_eq!(harness.state().canvas.current_zoom(), 1.0);
+
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
+        for label in ["Pan", "Zoom out", "Zoom in", "Fit"] {
+            assert_control_inside(
+                &harness,
+                label,
+                egui::accesskit::Role::Button,
+                width,
+                height,
+            );
+        }
         let (accept, correct) = if LayoutMode::for_width(width) == LayoutMode::Compact {
             ("Accept all", "Send back")
         } else {
@@ -3610,6 +3668,9 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
     click(&mut harness, "Correct object");
     harness.state_mut().select_correction_keypoint(0);
     harness.step();
+    for label in ["Object", "Keypoints", "Reason", "Actions"] {
+        assert!(harness.query_by_label(label).is_some());
+    }
     click(&mut harness, "Hidden");
     harness
         .state_mut()
@@ -3671,7 +3732,13 @@ fn annotation_inspector_exposes_objects_and_visible_deletion() {
 
     assert!(
         harness
-            .query_by_label_contains("Object 1: Person, box at")
+            .query_by_label("Object 1 | Person | Selected")
+            .is_some()
+    );
+    click_accesskit_button(&mut harness, "Geometry details for Object 1");
+    assert!(
+        harness
+            .query_by_label_contains("Position: 10% from left")
             .is_some()
     );
     click(&mut harness, "Delete selected annotation");

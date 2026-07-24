@@ -46,6 +46,7 @@ pub enum UserAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionContext {
     WorkWorkspace,
+    WorkImage,
     AnnotateWorkspace,
     AnnotateImage,
     AnnotateNoImage,
@@ -95,6 +96,9 @@ impl UserAction {
             | Self::ToggleInspectorPanel
             | Self::OpenSettings
             | Self::SkipAssignment => ActionContext::WorkWorkspace,
+            Self::TogglePanMode | Self::ZoomIn | Self::ZoomOut | Self::FitImage => {
+                ActionContext::WorkImage
+            }
             Self::SelectPreviousWorkflow | Self::SelectNextWorkflow => {
                 ActionContext::AnnotateWorkspace
             }
@@ -111,11 +115,7 @@ impl UserAction {
             | Self::AcceptPrelabel
             | Self::DiscardPrelabel
             | Self::ToggleKeypointHidden
-            | Self::MarkKeypointAbsent
-            | Self::TogglePanMode
-            | Self::ZoomIn
-            | Self::ZoomOut
-            | Self::FitImage => ActionContext::AnnotateImage,
+            | Self::MarkKeypointAbsent => ActionContext::AnnotateImage,
             Self::AcceptReviewObject | Self::RejectReviewObject => ActionContext::Review,
             Self::PreviousImage
             | Self::SelectBoundingBoxTool
@@ -126,20 +126,31 @@ impl UserAction {
 
     pub fn can_conflict_with(self, other: Self) -> bool {
         use ActionContext::{
-            AnnotateImage, AnnotateNoImage, AnnotateWorkspace, Legacy, Review, WorkWorkspace,
+            AnnotateImage, AnnotateNoImage, AnnotateWorkspace, Legacy, Review, WorkImage,
+            WorkWorkspace,
         };
         matches!(
             (self.context(), other.context()),
             (
                 WorkWorkspace,
-                WorkWorkspace | AnnotateWorkspace | AnnotateImage | AnnotateNoImage | Review
+                WorkWorkspace
+                    | WorkImage
+                    | AnnotateWorkspace
+                    | AnnotateImage
+                    | AnnotateNoImage
+                    | Review
             ) | (
-                AnnotateWorkspace | AnnotateImage | AnnotateNoImage | Review,
+                WorkImage | AnnotateWorkspace | AnnotateImage | AnnotateNoImage | Review,
                 WorkWorkspace
             ) | (
-                AnnotateWorkspace,
-                AnnotateWorkspace | AnnotateImage | AnnotateNoImage
-            ) | (AnnotateImage | AnnotateNoImage, AnnotateWorkspace)
+                WorkImage,
+                WorkImage | AnnotateWorkspace | AnnotateImage | Review
+            ) | (AnnotateWorkspace | AnnotateImage | Review, WorkImage)
+                | (
+                    AnnotateWorkspace,
+                    AnnotateWorkspace | AnnotateImage | AnnotateNoImage
+                )
+                | (AnnotateImage | AnnotateNoImage, AnnotateWorkspace)
                 | (AnnotateImage, AnnotateImage)
                 | (AnnotateNoImage, AnnotateNoImage)
                 | (Review, Review)

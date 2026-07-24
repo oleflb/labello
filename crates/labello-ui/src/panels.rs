@@ -6,7 +6,7 @@ use crate::{
         AppView, Drawer, LabelloApp, LayoutMode, PendingTransition, SaveStatus, Tool,
         annotation_type_label,
     },
-    canvas::{CanvasAction, CanvasInteraction, show_canvas_configured},
+    canvas::{CanvasAction, CanvasInteraction, show_canvas_styled},
     theme,
 };
 
@@ -481,14 +481,14 @@ impl LabelloApp {
                 let class_name = self.class_name(&annotation.class_id);
                 let geometry = match &annotation.geometry {
                     AnnotationGeometry::BoundingBox(bbox) => format!(
-                        "box at {:.0}%, {:.0}%, size {:.0}% by {:.0}%",
+                        "Position: {:.0}% from left, {:.0}% from top\nSize: {:.0}% wide by {:.0}% high",
                         bbox.x * 100.0,
                         bbox.y * 100.0,
                         bbox.width * 100.0,
                         bbox.height * 100.0
                     ),
                     AnnotationGeometry::Skeleton(skeleton) => format!(
-                        "skeleton with {} of {} keypoints placed",
+                        "Keypoints placed: {} of {}",
                         skeleton
                             .keypoints
                             .iter()
@@ -499,7 +499,9 @@ impl LabelloApp {
                 };
                 (
                     annotation.annotation_id.clone(),
-                    format!("Object {}: {class_name}, {geometry}", index + 1),
+                    index + 1,
+                    class_name,
+                    geometry,
                 )
             })
             .collect::<Vec<_>>();
@@ -516,26 +518,49 @@ impl LabelloApp {
         if self.selected_annotation.is_some()
             && !objects
                 .iter()
-                .any(|(annotation_id, _)| Some(annotation_id) == self.selected_annotation.as_ref())
+                .any(|(annotation_id, ..)| Some(annotation_id) == self.selected_annotation.as_ref())
         {
             self.selected_annotation = None;
         }
 
         ui.separator();
         ui.label(RichText::new("Objects").strong());
-        for (annotation_id, label) in objects {
+        for (annotation_id, number, class_name, geometry) in objects {
             let selected = self.selected_annotation.as_ref() == Some(&annotation_id);
-            if ui
-                .selectable_label(selected, label)
-                .on_hover_text(format!(
-                    "Previous: {} · Next: {}",
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectPreviousObject,),
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject,)
-                ))
-                .clicked()
-            {
-                self.selected_annotation = Some(annotation_id);
-            }
+            theme::selected_card_frame(selected).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                let label = format!(
+                    "Object {number} | {class_name}{}",
+                    if selected { " | Selected" } else { "" }
+                );
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 44.0],
+                        egui::Button::selectable(selected, &label).truncate(),
+                    )
+                    .on_hover_text(format!(
+                        "{label}\nPrevious: {} | Next: {}",
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::SelectPreviousObject,
+                        ),
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject,)
+                    ))
+                    .clicked()
+                {
+                    self.selected_annotation = Some(annotation_id.clone());
+                }
+
+                egui::CollapsingHeader::new(format!("Geometry details for Object {number}"))
+                    .id_salt(annotation_id.as_str())
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&geometry)
+                                .monospace()
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
+            });
         }
         if self.selected_annotation.is_some()
             && theme::danger_button(
@@ -601,12 +626,7 @@ impl LabelloApp {
         }
     }
 
-    fn review_actions(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
-        let ready = self.assignment.is_some() && !self.loading.saving;
-        if self.correction_draft.is_some() {
-            self.correction_actions(ui, ready);
-            return;
-        }
+    fn review_phase(&self) -> (&'static str, String, &'static str) {
         let total = self
             .annotations
             .iter()
@@ -615,16 +635,29 @@ impl LabelloApp {
             })
             .count();
         if self.review_index < total {
-            theme::compact_metric(
-                ui,
+            (
                 "Object review",
                 format!("{} of {total}", self.review_index + 1),
-            );
-            ui.label("The active object is highlighted on the canvas.");
+                "The active object is highlighted on the canvas.",
+            )
         } else {
-            theme::compact_metric(ui, "Final check", "Full image");
-            ui.label("Check for missed objects before completing this review.");
+            (
+                "Final check",
+                "Full image".to_string(),
+                "Check for missed objects before completing this review.",
+            )
         }
+    }
+
+    fn review_actions(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
+        let ready = self.assignment.is_some() && !self.loading.saving;
+        if self.correction_draft.is_some() {
+            self.correction_actions(ui, ready);
+            return;
+        }
+        let (phase, value, explanation) = self.review_phase();
+        theme::compact_metric(ui, phase, value);
+        ui.label(explanation);
         if self.can_correct_review_object() {
             ui.add_space(8.0);
             if ui
@@ -660,33 +693,6 @@ impl LabelloApp {
         ui.heading("Correction mode");
         ui.label("Only the highlighted existing object can be edited.");
 
-        let (can_undo, geometry_changed) = self
-            .correction_draft
-            .as_ref()
-            .map(|draft| (!draft.geometry_history.is_empty(), draft.geometry_changed()))
-            .unwrap_or_default();
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(ready && can_undo, egui::Button::new("Undo correction"))
-                .clicked()
-            {
-                self.undo_correction();
-            }
-            if theme::danger_button(ui, ready, egui::Button::new("Discard correction")).clicked() {
-                self.discard_correction();
-            }
-            if theme::primary_button(
-                ui,
-                ready && geometry_changed,
-                egui::Button::new("Correct & finalize"),
-            )
-            .on_disabled_hover_text("Move, resize, or change a keypoint before finalizing.")
-            .clicked()
-            {
-                self.request_correction();
-            }
-        });
-
         let skeleton_keypoints = self.correction_draft.as_ref().and_then(|draft| {
             let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
                 return None;
@@ -700,7 +706,12 @@ impl LabelloApp {
                     .collect::<Vec<_>>(),
             )
         });
+        ui.add_space(theme::SPACE_2);
+        ui.label(RichText::new("Object").strong().color(theme::TEXT_MUTED));
         if let Some(keypoints) = skeleton_keypoints {
+            ui.label("Edit only the highlighted skeleton on the canvas.");
+            ui.add_space(theme::SPACE_2);
+            ui.label(RichText::new("Keypoints").strong().color(theme::TEXT_MUTED));
             ui.label("Select and drag an existing keypoint:");
             for (index, name, state) in keypoints {
                 let selected = self
@@ -722,15 +733,47 @@ impl LabelloApp {
             ui.label("Drag inside the box to move it, or drag a handle to resize it.");
         }
 
+        ui.add_space(theme::SPACE_2);
+        ui.label(RichText::new("Reason").strong().color(theme::TEXT_MUTED));
         if let Some(draft) = self.correction_draft.as_mut() {
-            ui.label("Reason (optional)");
+            let label = ui.label("Reason (optional)");
             ui.add_enabled(
                 ready,
                 egui::TextEdit::multiline(&mut draft.reason)
                     .desired_rows(2)
                     .hint_text("What was corrected?"),
-            );
+            )
+            .labelled_by(label.id);
         }
+
+        let (can_undo, geometry_changed) = self
+            .correction_draft
+            .as_ref()
+            .map(|draft| (!draft.geometry_history.is_empty(), draft.geometry_changed()))
+            .unwrap_or_default();
+        ui.add_space(theme::SPACE_2);
+        ui.label(RichText::new("Actions").strong().color(theme::TEXT_MUTED));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(ready && can_undo, egui::Button::new("Undo correction"))
+                .clicked()
+            {
+                self.undo_correction();
+            }
+            if theme::danger_button(ui, ready, egui::Button::new("Discard correction")).clicked() {
+                self.discard_correction();
+            }
+            if theme::primary_button(
+                ui,
+                ready && geometry_changed,
+                egui::Button::new("Correct & finalize"),
+            )
+            .on_disabled_hover_text("Move, resize, or change a keypoint before finalizing.")
+            .clicked()
+            {
+                self.request_correction();
+            }
+        });
     }
 
     fn correction_keypoint_state(&mut self, ui: &mut egui::Ui, ready: bool) {
@@ -896,7 +939,16 @@ impl LabelloApp {
             } else {
                 self.canvas.clear_review_focus();
             }
-            let action = show_canvas_configured(
+            let annotation_color = self
+                .selected_class_id()
+                .and_then(|class_id| {
+                    self.classes
+                        .iter()
+                        .find(|class| &class.class_id == class_id)
+                })
+                .and_then(|class| parse_class_color(&class.color))
+                .unwrap_or(theme::ANNOTATION);
+            let action = show_canvas_styled(
                 ui,
                 &mut self.canvas,
                 texture.as_ref(),
@@ -907,6 +959,7 @@ impl LabelloApp {
                 interaction,
                 &skeleton_edges,
                 &prelabels,
+                annotation_color,
             );
             if annotator_editable {
                 match action {
@@ -938,44 +991,73 @@ impl LabelloApp {
                 }
             }
         } else {
-            ui.vertical_centered(|ui| {
-                if self.loading.dataset {
-                    ui.spinner();
-                    ui.label("Opening dataset...");
-                } else if self.loading.image {
-                    ui.spinner();
-                    ui.label("Loading assignment...");
-                } else if let Some(error) = self.runtime.error.clone() {
-                    theme::inline_message(ui, theme::Intent::Warning, error);
-                    let shortcut =
-                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::RetryImageLoad);
-                    if theme::quiet_button(
-                        ui,
-                        true,
-                        egui::Button::new("Retry image load").shortcut_text(shortcut),
-                    )
-                    .clicked()
-                    {
-                        self.retry_assignment_load();
+            ui.add_space(((ui.available_height() - 160.0) * 0.5).max(0.0));
+            let width = ui.available_width().min(520.0);
+            let inset = ((ui.available_width() - width) * 0.5).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(inset);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    if self.loading.dataset {
+                        theme::inset_frame().show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Opening dataset").strong());
+                            });
+                            ui.label(
+                                RichText::new("Loading workflows and dataset metadata.")
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        });
+                    } else if self.loading.image {
+                        theme::inset_frame().show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Loading assignment image").strong());
+                            });
+                            ui.label(
+                                RichText::new("Decoding the image preview for the canvas.")
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        });
+                    } else if let Some(error) = self.runtime.error.clone() {
+                        let claimed = self.assignment.is_some();
+                        let (title, retry) = if claimed {
+                            ("Assignment image unavailable", "Retry image load")
+                        } else {
+                            ("Assignment unavailable", "Retry assignment")
+                        };
+                        let shortcut = self
+                            .shortcut_text(ui.ctx(), labello_domain::UserAction::RetryImageLoad);
+                        if theme::empty_state(
+                            ui,
+                            title,
+                            &error,
+                            Some(egui::Button::new(retry).shortcut_text(shortcut)),
+                        ) {
+                            self.retry_assignment_load();
+                        }
+                    } else {
+                        let title = match self.view {
+                            AppView::Annotate => "No annotation assignments",
+                            AppView::Review => "No review assignments",
+                            AppView::Adjudicate => "No adjudication assignments",
+                            _ => "No assignments",
+                        };
+                        let shortcut = self
+                            .shortcut_text(ui.ctx(), labello_domain::UserAction::RetryImageLoad);
+                        if theme::empty_state(
+                            ui,
+                            title,
+                            "No work is available right now. Retry to check again.",
+                            Some(egui::Button::new("Retry image load").shortcut_text(shortcut)),
+                        ) {
+                            self.retry_assignment_load();
+                        }
                     }
-                } else {
-                    let title = match self.view {
-                        AppView::Annotate => "No annotation assignments",
-                        AppView::Review => "No review assignments",
-                        AppView::Adjudicate => "No adjudication assignments",
-                        _ => "No assignments",
-                    };
-                    let shortcut =
-                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::RetryImageLoad);
-                    if theme::empty_state(
-                        ui,
-                        title,
-                        "No work is available right now. Retry to check again.",
-                        Some(egui::Button::new("Retry image load").shortcut_text(shortcut)),
-                    ) {
-                        self.retry_assignment_load();
-                    }
-                }
+                });
             });
         }
     }
@@ -1068,6 +1150,20 @@ impl LabelloApp {
         let view = self.view;
         let loading_image = self.loading.image;
         let has_assignment = self.assignment.is_some();
+        let review_phase = if view == AppView::Review && current.is_some() {
+            if self.correction_draft.is_some() {
+                Some("Correction mode".to_string())
+            } else {
+                let (phase, value, _) = self.review_phase();
+                Some(if phase == "Final check" {
+                    phase.to_string()
+                } else {
+                    format!("Object {value}")
+                })
+            }
+        } else {
+            None
+        };
         let add_summary = |ui: &mut egui::Ui, filename_width: f32| {
             ui.label(
                 RichText::new(view_label(view))
@@ -1100,24 +1196,28 @@ impl LabelloApp {
                 ui.spinner();
                 ui.label("Loading assignment...");
             } else if has_assignment {
-                ui.label(RichText::new("Assignment image unavailable").color(theme::WARNING));
+                ui.label(RichText::new("Preview unavailable").color(theme::WARNING));
             } else {
                 ui.label(RichText::new("No active assignment").color(theme::TEXT_MUTED));
             }
         };
-        let response = if layout == LayoutMode::Compact {
+        let stack_controls = layout == LayoutMode::Compact
+            || (layout == LayoutMode::Medium && view != AppView::Annotate && current.is_some());
+        let response = if stack_controls {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.horizontal(|ui| {
                     ui.set_min_height(44.0);
                     add_summary(ui, 50.0);
-                    if current.is_some()
-                        && let Some(workflow) = workflow.as_ref()
-                    {
-                        theme::bounded_badge(ui, workflow, theme::Intent::Accent, 90.0);
+                    if current.is_some() {
+                        if let Some(phase) = review_phase.as_ref() {
+                            theme::bounded_badge(ui, phase, theme::Intent::Info, 110.0);
+                        } else if let Some(workflow) = workflow.as_ref() {
+                            theme::bounded_badge(ui, workflow, theme::Intent::Accent, 90.0);
+                        }
                     }
                 });
-                if self.view == AppView::Annotate && current.is_some() {
+                if current.is_some() {
                     self.canvas_controls(ui);
                 }
             })
@@ -1145,7 +1245,19 @@ impl LabelloApp {
                         },
                     );
                 }
-                if self.view == AppView::Annotate && current.is_some() {
+                if let Some(phase) = review_phase.as_ref() {
+                    theme::bounded_badge(
+                        ui,
+                        phase,
+                        theme::Intent::Info,
+                        if layout == LayoutMode::Wide {
+                            120.0
+                        } else {
+                            100.0
+                        },
+                    );
+                }
+                if current.is_some() {
                     self.canvas_controls(ui);
                 }
                 if layout == LayoutMode::Wide {
@@ -1168,7 +1280,7 @@ impl LabelloApp {
             if ui
                 .add_enabled(self.canvas.can_pan(), pan)
                 .on_disabled_hover_text("Zoom in before enabling Pan mode.")
-                .on_hover_text(format!("Pan the image ({pan_shortcut})."))
+                .on_hover_text(format!("Pan ({pan_shortcut}). Space or middle-drag."))
                 .clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::TogglePanMode);
@@ -1179,7 +1291,7 @@ impl LabelloApp {
             let zoom_out = egui::Button::new("−").min_size(egui::vec2(44.0, 44.0));
             let zoom_out_response = ui
                 .add(zoom_out)
-                .on_hover_text(format!("Zoom out ({zoom_out_shortcut})."));
+                .on_hover_text(format!("Zoom out ({zoom_out_shortcut}). Scroll or pinch."));
             zoom_out_response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Zoom out")
             });
@@ -1196,7 +1308,7 @@ impl LabelloApp {
             let zoom_in = egui::Button::new("+").min_size(egui::vec2(44.0, 44.0));
             let zoom_in_response = ui
                 .add(zoom_in)
-                .on_hover_text(format!("Zoom in ({zoom_in_shortcut})."));
+                .on_hover_text(format!("Zoom in ({zoom_in_shortcut}). Scroll or pinch."));
             zoom_in_response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Zoom in")
             });
@@ -1208,7 +1320,7 @@ impl LabelloApp {
             let fit = egui::Button::new("Fit").min_size(egui::vec2(44.0, 44.0));
             if ui
                 .add(fit)
-                .on_hover_text(format!("Fit and center the image ({fit_shortcut})."))
+                .on_hover_text(format!("Fit ({fit_shortcut}). Or double-click canvas."))
                 .clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::FitImage);
@@ -1947,6 +2059,19 @@ fn format_chord(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> String
     ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
 }
 
+fn parse_class_color(value: &str) -> Option<egui::Color32> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(egui::Color32::from_rgb(
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    ))
+}
+
 fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Setup => "Setup",
@@ -1993,5 +2118,20 @@ fn keypoint_state_label(state: &KeypointState) -> &'static str {
         KeypointState::Visible => "visible",
         KeypointState::Hidden => "hidden",
         KeypointState::Absent => "absent",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn class_colors_parse_with_a_safe_fallback_boundary() {
+        assert_eq!(
+            parse_class_color("#5eead4"),
+            Some(egui::Color32::from_rgb(94, 234, 212))
+        );
+        assert_eq!(parse_class_color("5eead4"), None);
+        assert_eq!(parse_class_color("#invalid"), None);
     }
 }

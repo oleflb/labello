@@ -9,6 +9,8 @@ use labello_domain::{
     PrelabelSuggestion,
 };
 
+use crate::theme;
+
 const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 12.0;
 const ZOOM_STEP: f32 = 1.25;
@@ -388,6 +390,35 @@ pub fn show_canvas_configured(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
+    show_canvas_styled(
+        ui,
+        state,
+        texture,
+        annotations,
+        image_size,
+        bounding_box_tool,
+        selected_annotation,
+        interaction,
+        skeleton_edges,
+        prelabels,
+        theme::ANNOTATION,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn show_canvas_styled(
+    ui: &mut Ui,
+    state: &mut CanvasState,
+    texture: Option<&egui::TextureHandle>,
+    annotations: &[AnnotationVersion],
+    image_size: [u32; 2],
+    bounding_box_tool: bool,
+    selected_annotation: Option<&AnnotationId>,
+    interaction: CanvasInteraction,
+    skeleton_edges: &[(String, String)],
+    prelabels: &[PrelabelSuggestion],
+    annotation_color: Color32,
+) -> Option<CanvasAction<BoundingBoxEdit>> {
     let editable = interaction.editable;
     let available = ui.available_size().max(vec2(1.0, 1.0));
     let (viewport, _) = ui.allocate_exact_size(available, Sense::hover());
@@ -395,20 +426,11 @@ pub fn show_canvas_configured(
     if !editable {
         state.cancel_drag();
     }
-    let response = ui.interact(
+    let mut response = ui.interact(
         interaction_rect,
         ui.id().with("annotation_canvas"),
         Sense::click_and_drag(),
     );
-    let response = if state.pan_mode {
-        response.on_hover_cursor(if ui.input(|input| input.pointer.primary_down()) {
-            egui::CursorIcon::Grabbing
-        } else {
-            egui::CursorIcon::Grab
-        })
-    } else {
-        response
-    };
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Annotation canvas"));
     if !valid_rect(interaction_rect) {
         state.cancel_drag();
@@ -426,6 +448,7 @@ pub fn show_canvas_configured(
             None,
             skeleton_edges,
             prelabels,
+            annotation_color,
         );
         return None;
     }
@@ -442,6 +465,25 @@ pub fn show_canvas_configured(
         state,
     );
     let image_rect = transformed_image_rect(fitted_image, state.zoom, state.pan);
+    let (primary_down, middle_down) = ui.input(|input| {
+        (
+            input.pointer.primary_down(),
+            input.pointer.button_down(PointerButton::Middle),
+        )
+    });
+    if let Some(cursor) = canvas_hover_cursor(
+        response.hover_pos(),
+        image_rect,
+        state,
+        annotations,
+        selected_annotation,
+        interaction,
+        bounding_box_tool,
+        primary_down,
+        middle_down,
+    ) {
+        response = response.on_hover_cursor(cursor);
+    }
 
     let preview = if editable {
         state.draft_box.and_then(|bbox| match &state.drag {
@@ -485,6 +527,7 @@ pub fn show_canvas_configured(
         keypoint_preview,
         skeleton_edges,
         prelabels,
+        annotation_color,
     );
 
     let action = handle_annotation_pointer(
@@ -518,12 +561,13 @@ fn paint_canvas(
     keypoint_preview: Option<(&AnnotationId, usize, NormalizedPoint)>,
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
+    annotation_color: Color32,
 ) {
     let painter = ui.painter_at(viewport);
     painter.rect_filled(
         viewport,
         CornerRadius::same(VIEWPORT_CORNER_RADIUS),
-        Color32::from_rgb(18, 23, 34),
+        theme::INPUT_BG,
     );
     if let Some(texture) = texture {
         painter.image(
@@ -532,24 +576,36 @@ fn paint_canvas(
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-    }
-
-    let grid = Color32::from_rgba_unmultiplied(255, 255, 255, 18);
-    for i in 1..4 {
-        let x = image_rect.left() + image_rect.width() * i as f32 / 4.0;
-        let y = image_rect.top() + image_rect.height() * i as f32 / 4.0;
-        painter.line_segment(
-            [pos2(x, image_rect.top()), pos2(x, image_rect.bottom())],
-            Stroke::new(1.0, grid),
+        for i in 1..4 {
+            let x = image_rect.left() + image_rect.width() * i as f32 / 4.0;
+            let y = image_rect.top() + image_rect.height() * i as f32 / 4.0;
+            painter.line_segment(
+                [pos2(x, image_rect.top()), pos2(x, image_rect.bottom())],
+                Stroke::new(1.0, theme::CANVAS_GRID),
+            );
+            painter.line_segment(
+                [pos2(image_rect.left(), y), pos2(image_rect.right(), y)],
+                Stroke::new(1.0, theme::CANVAS_GRID),
+            );
+        }
+    } else {
+        painter.text(
+            viewport.center(),
+            egui::Align2::CENTER_CENTER,
+            "Image preview unavailable",
+            egui::FontId::new(theme::BODY_SIZE, egui::FontFamily::Proportional),
+            theme::TEXT_MUTED,
         );
-        painter.line_segment(
-            [pos2(image_rect.left(), y), pos2(image_rect.right(), y)],
-            Stroke::new(1.0, grid),
-        );
+        ui.interact(
+            viewport,
+            ui.id().with("image_preview_unavailable"),
+            Sense::hover(),
+        )
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Image preview unavailable"));
     }
 
     for suggestion in prelabels {
-        let color = Color32::from_rgb(192, 132, 252);
+        let color = theme::PRELABEL;
         match &suggestion.geometry {
             AnnotationGeometry::BoundingBox(bbox) => {
                 let rect = bbox_to_screen_rect(image_rect, *bbox);
@@ -580,17 +636,13 @@ fn paint_canvas(
                     .filter(|(id, _)| *id == &annotation.annotation_id)
                     .map_or(*bbox, |(_, preview)| preview);
                 if selected {
-                    paint_selected_box(&painter, image_rect, bbox, editable);
+                    paint_selected_box(&painter, image_rect, bbox, editable, annotation_color);
                 } else {
-                    paint_existing_box(&painter, image_rect, bbox);
+                    paint_existing_box(&painter, image_rect, bbox, annotation_color);
                 }
             }
             AnnotationGeometry::Skeleton(skeleton) => {
-                let color = if selected {
-                    Color32::from_rgb(251, 191, 36)
-                } else {
-                    Color32::from_rgb(250, 204, 21)
-                };
+                let color = annotation_color;
                 for (from, to) in skeleton_edges {
                     let from = skeleton
                         .keypoints
@@ -628,7 +680,7 @@ fn paint_canvas(
                             painter.circle_stroke(
                                 center,
                                 10.0,
-                                Stroke::new(3.0, Color32::from_rgb(96, 165, 250)),
+                                Stroke::new(3.0, theme::FOCUS_RING),
                             );
                         }
                     }
@@ -644,7 +696,7 @@ fn paint_canvas(
     painter.rect_stroke(
         viewport,
         CornerRadius::same(VIEWPORT_CORNER_RADIUS),
-        Stroke::new(1.0, Color32::from_rgb(70, 82, 105)),
+        Stroke::new(1.0, theme::BORDER_STRONG),
         StrokeKind::Inside,
     );
 }
@@ -698,9 +750,13 @@ fn rounded_corner_mask(viewport: Rect, color: Color32) -> Mesh {
     mesh
 }
 
-fn paint_existing_box(painter: &egui::Painter, image_rect: Rect, bbox: BoundingBox) {
+fn paint_existing_box(
+    painter: &egui::Painter,
+    image_rect: Rect,
+    bbox: BoundingBox,
+    color: Color32,
+) {
     let rect = bbox_to_screen_rect(image_rect, bbox);
-    let color = Color32::from_rgb(94, 234, 212);
     painter.rect_filled(
         rect,
         CornerRadius::same(4),
@@ -719,9 +775,9 @@ fn paint_selected_box(
     image_rect: Rect,
     bbox: BoundingBox,
     editable: bool,
+    color: Color32,
 ) {
     let rect = bbox_to_screen_rect(image_rect, bbox);
-    let color = Color32::from_rgb(251, 191, 36);
     painter.rect_filled(
         rect,
         CornerRadius::same(5),
@@ -741,7 +797,7 @@ fn paint_selected_box(
             painter.rect_stroke(
                 handle,
                 CornerRadius::same(2),
-                Stroke::new(1.5, color),
+                Stroke::new(1.5, theme::SELECTION),
                 StrokeKind::Inside,
             );
         }
@@ -750,7 +806,7 @@ fn paint_selected_box(
 
 fn paint_draft_box(painter: &egui::Painter, image_rect: Rect, bbox: BoundingBox) {
     let rect = bbox_to_screen_rect(image_rect, bbox);
-    let color = Color32::from_rgb(96, 165, 250);
+    let color = theme::DRAFT;
     painter.rect_filled(
         rect,
         CornerRadius::same(3),
@@ -790,6 +846,77 @@ fn paint_dashed_segment(painter: &egui::Painter, start: Pos2, end: Pos2, color: 
             break;
         }
         offset = next;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canvas_hover_cursor(
+    pointer: Option<Pos2>,
+    image_rect: Rect,
+    state: &CanvasState,
+    annotations: &[AnnotationVersion],
+    selected_annotation: Option<&AnnotationId>,
+    interaction: CanvasInteraction,
+    bounding_box_tool: bool,
+    primary_down: bool,
+    middle_down: bool,
+) -> Option<egui::CursorIcon> {
+    if middle_down {
+        return Some(egui::CursorIcon::Grabbing);
+    }
+    if state.pan_mode || state.space_pan || state.primary_pan {
+        return Some(if primary_down {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
+    if !interaction.editable {
+        return None;
+    }
+    if let Some(drag) = state.drag.as_ref() {
+        return Some(match drag {
+            DragOperation::Resize { handle, .. } => resize_cursor(*handle),
+            DragOperation::Move { .. } | DragOperation::Keypoint { .. } => {
+                egui::CursorIcon::Grabbing
+            }
+            DragOperation::Create { .. } => egui::CursorIcon::Crosshair,
+        });
+    }
+
+    let pointer = pointer?;
+    if let Some(annotation_id) = selected_annotation {
+        if let Some(bbox) = annotation_bbox(annotation_id, annotations) {
+            let rect = bbox_to_screen_rect(image_rect, bbox);
+            if let Some(handle) = resize_handle_at(pointer, rect) {
+                return Some(resize_cursor(handle));
+            }
+            if rect.contains(pointer) {
+                return Some(egui::CursorIcon::Move);
+            }
+        }
+        if interaction.edit_keypoints
+            && keypoint_at(pointer, image_rect, annotation_id, annotations).is_some()
+        {
+            return Some(egui::CursorIcon::Move);
+        }
+    }
+    if interaction.allow_selection && annotation_at(pointer, image_rect, annotations).is_some() {
+        return Some(egui::CursorIcon::PointingHand);
+    }
+    (interaction.allow_create && image_rect.contains(pointer)).then_some(if bounding_box_tool {
+        egui::CursorIcon::Crosshair
+    } else {
+        egui::CursorIcon::Cell
+    })
+}
+
+fn resize_cursor(handle: ResizeHandle) -> egui::CursorIcon {
+    match handle {
+        ResizeHandle::TopLeft | ResizeHandle::BottomRight => egui::CursorIcon::ResizeNwSe,
+        ResizeHandle::TopRight | ResizeHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+        ResizeHandle::Top | ResizeHandle::Bottom => egui::CursorIcon::ResizeVertical,
+        ResizeHandle::Left | ResizeHandle::Right => egui::CursorIcon::ResizeHorizontal,
     }
 }
 
@@ -1524,6 +1651,128 @@ mod tests {
             updated_at: labello_domain::now(),
             deleted: false,
         }
+    }
+
+    #[test]
+    fn editable_canvas_uses_move_resize_and_keypoint_cursors() {
+        let image_rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let annotation = test_annotation(AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.4,
+            height: 0.4,
+        }));
+        let selected = annotation.annotation_id.clone();
+        let annotations = [annotation];
+        let state = CanvasState::default();
+        let interaction = CanvasInteraction::annotations(true);
+
+        assert_eq!(
+            canvas_hover_cursor(
+                Some(pos2(20.0, 20.0)),
+                image_rect,
+                &state,
+                &annotations,
+                Some(&selected),
+                interaction,
+                true,
+                false,
+                false,
+            ),
+            Some(egui::CursorIcon::ResizeNwSe)
+        );
+        assert_eq!(
+            canvas_hover_cursor(
+                Some(pos2(40.0, 40.0)),
+                image_rect,
+                &state,
+                &annotations,
+                Some(&selected),
+                interaction,
+                true,
+                false,
+                false,
+            ),
+            Some(egui::CursorIcon::Move)
+        );
+        assert_eq!(
+            canvas_hover_cursor(
+                Some(pos2(90.0, 90.0)),
+                image_rect,
+                &state,
+                &annotations,
+                Some(&selected),
+                interaction,
+                true,
+                false,
+                false,
+            ),
+            Some(egui::CursorIcon::Crosshair)
+        );
+
+        let skeleton = test_annotation(AnnotationGeometry::Skeleton(
+            labello_domain::SkeletonGeometry {
+                keypoints: vec![labello_domain::KeypointAnnotation {
+                    name: "nose".to_string(),
+                    state: labello_domain::KeypointState::Visible,
+                    point: Some(NormalizedPoint { x: 0.5, y: 0.5 }),
+                }],
+            },
+        ));
+        let selected = skeleton.annotation_id.clone();
+        assert_eq!(
+            canvas_hover_cursor(
+                Some(pos2(50.0, 50.0)),
+                image_rect,
+                &state,
+                &[skeleton],
+                Some(&selected),
+                CanvasInteraction::correction(Some(0)),
+                false,
+                false,
+                false,
+            ),
+            Some(egui::CursorIcon::Move)
+        );
+
+        assert_eq!(
+            canvas_hover_cursor(
+                Some(pos2(90.0, 90.0)),
+                image_rect,
+                &state,
+                &annotations,
+                Some(&selected),
+                interaction,
+                true,
+                false,
+                true,
+            ),
+            Some(egui::CursorIcon::Grabbing)
+        );
+
+        for (handle, cursor) in [
+            (ResizeHandle::TopLeft, egui::CursorIcon::ResizeNwSe),
+            (ResizeHandle::Top, egui::CursorIcon::ResizeVertical),
+            (ResizeHandle::TopRight, egui::CursorIcon::ResizeNeSw),
+            (ResizeHandle::Right, egui::CursorIcon::ResizeHorizontal),
+            (ResizeHandle::BottomRight, egui::CursorIcon::ResizeNwSe),
+            (ResizeHandle::Bottom, egui::CursorIcon::ResizeVertical),
+            (ResizeHandle::BottomLeft, egui::CursorIcon::ResizeNeSw),
+            (ResizeHandle::Left, egui::CursorIcon::ResizeHorizontal),
+        ] {
+            assert_eq!(resize_cursor(handle), cursor);
+        }
+    }
+
+    #[test]
+    fn unavailable_preview_is_exposed_to_accessibility() {
+        let harness = canvas_harness(true);
+
+        assert!(
+            harness
+                .query_by_label("Image preview unavailable")
+                .is_some()
+        );
     }
 
     fn click_at(harness: &mut Harness<'_, InteractiveTestState>, pos: Pos2) {
