@@ -165,6 +165,7 @@ fn work_preset(kind: AssignmentKind, ctx: &egui::Context) -> LabelloApp {
         view,
         ..Default::default()
     };
+    seed_dataset(&mut app);
     let image_id = app.current.as_ref().unwrap().image.image_id.clone();
     app.current_state = Some(ImageState::new(image_id.clone()));
     app.current_texture = Some(ctx.load_texture(

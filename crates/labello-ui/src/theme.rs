@@ -51,6 +51,7 @@ pub const SUPPORTING_SIZE: f32 = 12.0;
 pub const METRIC_SIZE: f32 = 30.0;
 pub const MONOSPACE_SIZE: f32 = 13.0;
 pub const COMPACT_TEXT_FIELD_HEIGHT: f32 = 28.0;
+pub const MENU_WIDTH: f32 = 220.0;
 
 // Compatibility aliases while screens move to semantic names in later phases.
 pub const BG: Color32 = APP_BG;

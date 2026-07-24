@@ -23,7 +23,7 @@ Only after that continue with the next issue.
   - One example that looks good already is the API URL box in Setup.
   - Also boxes where large amounts of text need to be fit into like descriptions should be resizable text boxes.
   - All single line text boxes should be vertically centered. The height of the text box should only be adjusted to fit the text if the height does not need to match another element in its proximity. E.g. the text boxes in Admin sections actually look good as high as they are, since they match the height of some buttons next to them. 
-- [ ] The navigation dropdown is very awkward in views with the image view.
+- [x] The navigation dropdown is very awkward in views with the image view.
   - I think we can remove the upper layer of that menu hierarchy and simply put all elements of that menu in the bar.
   - On mobile/small narrow screen, it is still necessary. The sizing of the menu items needs to be improved. The status item from that menu can be removed entirely.
 - [ ] The admin view has some layouting issues:

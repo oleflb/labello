@@ -354,9 +354,13 @@ impl LabelloApp {
     }
 
     pub(crate) fn navigation_menu_contents(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(theme::MENU_WIDTH);
         for (view, label) in self.navigation_destinations() {
             if ui
-                .add(egui::Button::selectable(self.view == view, label))
+                .add(
+                    egui::Button::selectable(self.view == view, label)
+                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
+                )
                 .clicked()
             {
                 self.open_view(view);

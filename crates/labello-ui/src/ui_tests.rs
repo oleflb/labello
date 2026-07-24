@@ -1333,7 +1333,7 @@ fn draft_recovery_modal_blocks_background_controls() {
         .with_size(egui::vec2(1500.0, 780.0))
         .build_eframe(|_| LabelloApp::default());
     let menu = harness
-        .query_all_by_label_contains("Menu")
+        .query_all_by_label_contains("Navigation")
         .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
         .expect("application menu button")
         .rect()
@@ -1395,7 +1395,7 @@ fn overlays_and_menus_block_background_shortcuts() {
     harness.state_mut().drawer = None;
     harness.step();
 
-    click(&mut harness, "Menu");
+    click(&mut harness, "Navigation");
     harness.key_press(egui::Key::ArrowRight);
     harness.step();
     assert_eq!(api.counts().complete_assignment, 0);
@@ -1464,13 +1464,23 @@ fn long_status_messages_keep_their_complete_accessible_text() {
         harness.step();
         let dataset = harness.get_by_label("Dataset Demo Dataset").rect();
         let status = harness.get_by_label(message).rect();
-        let menu = harness.get_by_label("Menu").rect();
+        let layout = LayoutMode::for_width(width);
+        let left_action = if layout == LayoutMode::Wide {
+            "Navigation"
+        } else {
+            "Menu"
+        };
+        let menu = harness.get_by_label(left_action).rect();
+        assert!((dataset.center().x - width / 2.0).abs() <= 1.0);
+        assert!(menu.right() <= dataset.left() + 0.5);
         assert!(dataset.right() <= status.left() + 0.5);
-        assert!(status.right() <= menu.left() + 0.5);
         if width >= LayoutMode::COMPACT_MAX_WIDTH {
             let save = harness.get_by_label("Idle").rect();
             assert!(status.right() <= save.left() + 0.5);
-            assert!(save.right() <= menu.left() + 0.5);
+            if layout == LayoutMode::Wide {
+                let sign_out = harness.get_by_label("Sign out").rect();
+                assert!(save.right() <= sign_out.left() + 0.5);
+            }
         }
         assert_visible_controls_clamped(&harness, width, height);
     }
@@ -2601,6 +2611,8 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
             .role_assignments
             .is_empty()
     );
+    harness.set_size(egui::vec2(600.0, 800.0));
+    harness.step();
     click(&mut harness, "Menu");
     click_accesskit_button(&mut harness, "Navigation");
     for label in ["Annotate", "Review", "Adjudicate", "Admin", "Stats"] {
@@ -2617,6 +2629,8 @@ fn annotator_and_reviewer_roles_are_independent_capabilities() {
     api.set_summary_roles(vec![DatasetRole::Annotator, DatasetRole::Reviewer]);
     let mut harness = loaded_work_harness(api);
 
+    harness.set_size(egui::vec2(600.0, 800.0));
+    harness.step();
     click(&mut harness, "Menu");
     click_accesskit_button(&mut harness, "Navigation");
     for label in ["Annotate", "Review", "Stats"] {
@@ -2720,14 +2734,23 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             "dataset badge is missing at {width}x{height}",
         );
         assert!(status_badge.height() > 0.0);
-        let menu = harness.get_by_label("Menu").rect();
+        let layout = LayoutMode::for_width(width);
+        let left_action = if layout == LayoutMode::Wide {
+            "Navigation"
+        } else {
+            "Menu"
+        };
+        let menu = harness.get_by_label(left_action).rect();
+        assert!((dataset_badge.center().x - width / 2.0).abs() <= 1.0);
+        assert!(menu.right() <= dataset_badge.left() + 0.5);
         assert!(dataset_badge.right() <= status_badge.left() + 0.5);
-        assert!(status_badge.right() <= menu.left() + 0.5);
-        if width >= LayoutMode::COMPACT_MAX_WIDTH {
-            assert!(
-                width - menu.right() <= 25.0,
-                "application menu is not right-aligned at {width}x{height}: {menu:?}",
-            );
+        assert!(
+            menu.left() <= 25.0,
+            "application menu is not left-aligned at {width}x{height}: {menu:?}",
+        );
+        if layout == LayoutMode::Wide {
+            let sign_out = harness.get_by_label("Sign out").rect();
+            assert!(status_badge.right() <= sign_out.left() + 0.5);
         }
         let canvas = harness.get_by_label("Annotation canvas");
         let app_bar = harness.get_by_label("Application bar").rect();
@@ -2828,9 +2851,10 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     }
 
     click(&mut harness, "Menu");
-    for label in ["Navigation", "Workspace", "Status", "Sign out"] {
+    for label in ["Navigation", "Workspace", "Sign out"] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
     }
+    assert!(harness.query_by_label("Status").is_none());
     click_accesskit_button(&mut harness, "Navigation");
     for label in [
         "Setup",
@@ -2840,6 +2864,14 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
         "Stats",
         "Admin",
     ] {
+        let item = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, label)
+            .rect();
+        assert!(item.height() >= 43.0);
+        assert!(
+            item.width() >= 200.0,
+            "{label} has narrow menu bounds: {item:?}"
+        );
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
     }
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
@@ -4558,12 +4590,14 @@ fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
 }
 
 fn click_application_menu_item(harness: &mut Harness<'static, LabelloApp>, label: &str) {
-    click(harness, "Menu");
+    if click_visible(harness, "Menu") {
+        harness.step();
+    }
     let section = match label {
-        "Annotate" | "Review" | "Adjudicate" | "Admin" | "Stats" => "Navigation",
+        "Setup" | "Annotate" | "Review" | "Adjudicate" | "Admin" | "Stats" => "Navigation",
         _ => "Workspace",
     };
-    click_accesskit_button(harness, section);
+    click(harness, section);
     click_accesskit_button(harness, label);
 }
 
