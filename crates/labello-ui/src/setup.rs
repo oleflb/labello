@@ -104,6 +104,23 @@ impl LabelloApp {
 
     fn datasets_section(&mut self, ui: &mut egui::Ui) {
         let signed_in = self.auth.account.is_some();
+        if !self.auth.checked {
+            ui.heading("Datasets");
+            if self.runtime.api.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Checking dataset access...").color(theme::TEXT_MUTED));
+                });
+            } else {
+                theme::empty_state(
+                    ui,
+                    "Connection unavailable",
+                    "Enter a valid API URL to check dataset access.",
+                    None,
+                );
+            }
+            return;
+        }
         let has_datasets = !self.datasets.summaries.is_empty();
         let summaries_error = self.datasets.summaries_error.clone();
         let datasets = self.datasets.summaries.clone();
@@ -423,13 +440,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_view(&mut self, view: AppView) {
-        if self.view == AppView::Admin
-            && view != AppView::Admin
-            && self.datasets.users != self.datasets.users_baseline
-        {
-            self.runtime.error = Some(
-                "Save or revert permission changes in People before leaving Admin.".to_string(),
-            );
+        if self.view == AppView::Admin && view != AppView::Admin && self.admin_changes_dirty() {
+            self.runtime.error =
+                Some("Save or discard staged Admin changes before leaving Admin.".to_string());
             return;
         }
         if view == AppView::Setup {
@@ -461,11 +474,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_dataset(&mut self, dataset_id: labello_domain::DatasetId, view: AppView) {
-        if self.view == AppView::Admin && self.datasets.users != self.datasets.users_baseline {
-            self.runtime.error = Some(
-                "Save or revert permission changes in People before switching datasets."
-                    .to_string(),
-            );
+        if self.view == AppView::Admin && self.admin_changes_dirty() {
+            self.runtime.error =
+                Some("Save or discard staged Admin changes before switching datasets.".to_string());
             return;
         }
         if self.loading.dataset {

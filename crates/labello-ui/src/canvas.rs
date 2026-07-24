@@ -159,6 +159,14 @@ impl CanvasState {
         self.zoom > MIN_ZOOM
     }
 
+    pub fn can_zoom_in(&self) -> bool {
+        self.zoom < MAX_ZOOM
+    }
+
+    pub fn can_zoom_out(&self) -> bool {
+        self.zoom > MIN_ZOOM
+    }
+
     pub fn toggle_pan_mode(&mut self) {
         self.cancel_drag();
         self.primary_pan = false;

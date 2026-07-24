@@ -2,6 +2,8 @@ pub mod admin;
 pub mod app;
 pub mod canvas;
 pub mod folder_upload;
+#[cfg(feature = "inspector-presets")]
+pub mod inspector_presets;
 pub mod live;
 pub mod live_workflow;
 pub mod panels;

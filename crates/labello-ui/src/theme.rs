@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use egui::{
     Button, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId,
-    Frame, Margin, Response, RichText, Shadow, Stroke, Style, TextEdit, TextStyle, Ui, Vec2,
-    Visuals,
+    Frame, Id, Margin, Modal, Response, RichText, Shadow, Stroke, Style, TextEdit, TextStyle, Ui,
+    Vec2, Visuals,
     style::{ScrollAnimation, ScrollStyle, WidgetVisuals},
 };
 
@@ -291,6 +291,10 @@ pub fn selected_card_frame(selected: bool) -> Frame {
     } else {
         card_frame()
     }
+}
+
+pub fn modal(ctx: &egui::Context, id: Id) -> Modal {
+    Modal::new(id).frame(Frame::window(&ctx.style_of(ctx.theme())))
 }
 
 pub fn primary_button(ui: &mut Ui, enabled: bool, button: Button<'_>) -> Response {

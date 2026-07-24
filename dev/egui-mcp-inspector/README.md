@@ -11,6 +11,19 @@ cargo install egui_mcp --locked
 EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
 ```
 
+The default is the annotation preset. Select another frozen visual state with:
+
+```sh
+EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --preset review
+```
+
+Available presets are `annotation`, `setup`, `review`, `review-correction`,
+`adjudication`, `admin`, `statistics`, `dialog-settings`, `dialog-transition`,
+`dialog-admin-discard`, `setup-failure`, `admin-failure`,
+`statistics-failure`, `assignment-failure`, and `image-failure`. Preset actions
+are intentionally local and deterministic; restart with another preset for a
+clean inspection context.
+
 To connect the inspector to a running Labello server instead, use live mode:
 
 ```sh

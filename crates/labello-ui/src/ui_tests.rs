@@ -422,6 +422,52 @@ fn signed_out_setup_offers_advertised_login_methods_without_raw_credentials() {
 }
 
 #[test]
+fn auth_options_failure_clears_state_from_the_previous_endpoint() {
+    let api = Rc::new(SpyApi::new());
+    let metadata = api.metadata();
+    let mut app = LabelloApp::default();
+    app.runtime.api = Some(api.clone());
+    app.auth.account = Some(api.state.borrow().users[0].account.clone());
+    app.datasets.summaries = vec![DatasetSummary {
+        dataset_id: metadata.dataset_id.clone(),
+        name: metadata.name.clone(),
+        roles: vec![DatasetRole::DataAdmin],
+        total_images: metadata.images.len(),
+    }];
+    app.datasets.metadata = Some(metadata.clone());
+    app.datasets.admin_config = Some(metadata.clone());
+    app.datasets.admin_baseline = Some(metadata);
+    app.datasets.stats = stats(3);
+    app.datasets.last_stats_completion = Some(Instant::now());
+    app.datasets.stats_error = Some("old statistics error".to_string());
+    app.runtime.notice = Some("Signed in as Previous User".to_string());
+    app.view = AppView::Admin;
+    app.request_auth_options();
+    let request = app.runtime.commands.back().unwrap().request().clone();
+    app.runtime
+        .tx
+        .send(UiMessage::AuthOptionsLoaded {
+            request,
+            result: Err("server unavailable".to_string()),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert!(app.auth.checked);
+    assert!(app.auth.account.is_none());
+    assert!(app.datasets.summaries.is_empty());
+    assert!(app.datasets.metadata.is_none());
+    assert!(app.datasets.admin_config.is_none());
+    assert_eq!(app.datasets.stats, DatasetStats::default());
+    assert!(app.datasets.last_stats_completion.is_none());
+    assert!(app.datasets.stats_error.is_none());
+    assert!(app.runtime.notice.is_none());
+    assert!(app.current.is_none());
+    assert_eq!(app.view, AppView::Setup);
+}
+
+#[test]
 fn replacement_session_request_ignores_the_stale_result() {
     let api = Rc::new(SpyApi::new());
     let account = api.state.borrow().users[0].account.clone();
@@ -537,6 +583,30 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
             .as_deref()
             .is_some_and(|error| error.contains("before leaving Admin"))
     );
+    assert!(harness.query_by_label("Discard staged changes").is_some());
+    let dataset_id = harness.state().config.dataset_id.clone();
+    harness
+        .state_mut()
+        .open_dataset(DatasetId::from("other"), AppView::Stats);
+    assert_eq!(harness.state().config.dataset_id, dataset_id);
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("before switching datasets"))
+    );
+    harness.state_mut().request_logout();
+    assert!(!harness.state().loading.logout);
+    assert!(
+        harness
+            .state()
+            .runtime
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("before signing out"))
+    );
     harness
         .state_mut()
         .request_role_save(UserId::from("reviewer"));
@@ -602,10 +672,50 @@ fn admin_staged_changes_can_be_discarded_without_a_server_reload() {
     );
 
     click(&mut harness, "Discard staged changes");
+    assert!(
+        harness
+            .query_by_label("Discard staged Admin changes?")
+            .is_some()
+    );
+    assert_eq!(
+        harness.state().datasets.admin_config.as_ref().unwrap().name,
+        "Unsaved rename"
+    );
+    click_accesskit_button(&mut harness, "Discard changes");
     assert_eq!(
         harness.state().datasets.admin_config.as_ref().unwrap().name,
         original_name
     );
+    assert_eq!(api.counts().get_admin_dataset, 1);
+}
+
+#[test]
+fn admin_permission_changes_can_be_discarded() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api.clone());
+    let baseline = harness.state().datasets.users_baseline.clone();
+    harness
+        .state_mut()
+        .datasets
+        .users
+        .iter_mut()
+        .find(|user| user.account.user_id == UserId::from("reviewer"))
+        .unwrap()
+        .roles
+        .push(DatasetRole::Reviewer);
+    harness.step();
+
+    click(&mut harness, "Discard staged changes");
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("All unsaved configuration and permission edits will be lost.")
+            .is_some()
+    );
+    click_accesskit_button(&mut harness, "Discard changes");
+
+    assert_eq!(harness.state().datasets.users, baseline);
+    assert!(!harness.state().admin_changes_dirty());
     assert_eq!(api.counts().get_admin_dataset, 1);
 }
 
@@ -1057,9 +1167,14 @@ fn keybindings_are_editable_and_persisted() {
     assert!(harness.query_by_label("Keyboard shortcuts").is_none());
     click_application_menu_item(&mut harness, "Settings");
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
-    click(&mut harness, "Record shortcut for Submit and next");
+    click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
+    assert_eq!(
+        harness.state().shortcut_settings.recording,
+        Some(labello_domain::UserAction::NextImage),
+    );
     harness.key_press(egui::Key::Enter);
     harness.step();
+    assert_eq!(harness.state().shortcut_settings.recording, None);
     assert_eq!(
         harness
             .state()
@@ -1145,10 +1260,17 @@ fn shortcut_settings_cancel_discards_the_draft() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
     click_application_menu_item(&mut harness, "Settings");
-    click(&mut harness, "Record shortcut for Submit and next");
+    click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
+    harness.key_press(egui::Key::Escape);
+    harness.step();
+    assert!(harness.state().show_settings);
+    assert_eq!(harness.state().shortcut_settings.recording, None);
+    assert!(!harness.state().shortcut_settings.confirm_discard);
+    click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Enter);
     harness.step();
     click(&mut harness, "Cancel");
+    harness.step();
     assert!(
         harness
             .query_by_label("Discard shortcut changes?")
@@ -1222,6 +1344,47 @@ fn draft_recovery_modal_blocks_background_controls() {
 
     assert!(!harness.state().show_settings);
     assert!(harness.state().runtime.persistence.recovery.is_some());
+}
+
+#[test]
+fn overlays_and_menus_block_background_shortcuts() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    let image_id = harness
+        .state()
+        .assignment
+        .as_ref()
+        .unwrap()
+        .image_id
+        .clone();
+    harness.state_mut().drawer = Some(Drawer::Inspector);
+    harness.step();
+
+    harness.key_press(egui::Key::ArrowRight);
+    harness.step();
+
+    assert_eq!(api.counts().complete_assignment, 0);
+    assert_eq!(
+        harness.state().assignment.as_ref().unwrap().image_id,
+        image_id
+    );
+
+    harness.state_mut().canvas.zoom_in();
+    harness.state_mut().canvas.toggle_pan_mode();
+    harness.key_press(egui::Key::Escape);
+    harness.step();
+    assert!(harness.state().canvas.pan_mode());
+    harness.state_mut().drawer = None;
+    harness.step();
+
+    click(&mut harness, "Menu");
+    harness.key_press(egui::Key::ArrowRight);
+    harness.step();
+    assert_eq!(api.counts().complete_assignment, 0);
+    assert_eq!(
+        harness.state().assignment.as_ref().unwrap().image_id,
+        image_id
+    );
 }
 
 #[test]
@@ -2093,6 +2256,12 @@ fn api_url_focus_loss_does_not_reconnect_and_enter_commits() {
     harness.step();
     assert_eq!(harness.state().config.api_base_url, "not a URL");
     assert!(harness.state().auth_epoch > auth_epoch);
+    assert!(harness.query_by_label("Connection unavailable").is_some());
+    assert!(
+        harness
+            .query_by_label("Checking dataset access...")
+            .is_none()
+    );
 }
 
 #[test]
@@ -2101,6 +2270,23 @@ fn dataset_states_distinguish_loading_and_stale_refresh_failure() {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
     let summaries = harness.state().datasets.summaries.clone();
+
+    harness.state_mut().auth.checked = false;
+    harness.state_mut().loading.session = true;
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Checking dataset access...")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Continue with Demo Dataset")
+            .is_none()
+    );
+    harness.state_mut().auth.checked = true;
+    harness.state_mut().loading.session = false;
+    harness.step();
 
     harness.state_mut().datasets.summaries.clear();
     harness.state_mut().loading.datasets = true;
@@ -2632,6 +2818,21 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
     harness.key_press(egui::Key::Escape);
     harness.step();
+
+    harness.set_size(egui::vec2(320.0, 320.0));
+    harness.step();
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    assert!(canvas.top() >= 0.0 && canvas.bottom() <= 320.0 && canvas.height() >= 100.0);
+    for label in [
+        "Pan",
+        "Zoom out",
+        "Zoom in",
+        "Fit",
+        "Submit & next",
+        "More actions",
+    ] {
+        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
+    }
 }
 
 #[test]
@@ -2830,6 +3031,25 @@ fn review_correction_drawer_and_actions_stay_reachable() {
         );
         assert_visible_controls_clamped(&harness, width, height);
     }
+
+    for (width, height) in [(320.0, 320.0), (600.0, 568.0), (600.0, 320.0)] {
+        harness.state_mut().drawer = Some(Drawer::Inspector);
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Correct & finalize")
+            .scroll_to_me();
+        for _ in 0..8 {
+            harness.step();
+        }
+        assert_control_inside(
+            &harness,
+            "Correct & finalize",
+            egui::accesskit::Role::Button,
+            width,
+            height,
+        );
+    }
 }
 
 #[test]
@@ -2895,6 +3115,20 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
             );
             harness.state_mut().drawer = None;
         }
+    }
+
+    harness.set_size(egui::vec2(320.0, 320.0));
+    harness.step();
+    for label in [
+        "Pan",
+        "Zoom out",
+        "Zoom in",
+        "Fit",
+        "Approve object",
+        "Reject object & finish",
+        "More",
+    ] {
+        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
     }
 
     harness.state_mut().review_index = 1;
@@ -3127,6 +3361,7 @@ fn settings_and_transition_modals_are_viewport_constrained() {
         harness.set_size(egui::vec2(width, height));
         harness.state_mut().show_settings = true;
         harness.step();
+        harness.step();
         assert_label_inside(&harness, "Keyboard shortcuts", width, height);
         assert_visible_controls_clamped(&harness, width, height);
         if width == 320.0 {
@@ -3140,6 +3375,7 @@ fn settings_and_transition_modals_are_viewport_constrained() {
             draft
                 .bindings
                 .insert(labello_domain::UserAction::RedoEdit, chord);
+            harness.step();
             harness.step();
             assert!(
                 harness
@@ -3178,10 +3414,25 @@ fn settings_and_transition_modals_are_viewport_constrained() {
     harness.set_size(egui::vec2(600.0, 568.0));
     harness.state_mut().show_settings = true;
     harness.step();
+    harness.step();
     for label in ["Restore all defaults", "Cancel", "Save changes"] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 600.0, 568.0);
     }
     assert_visible_controls_clamped(&harness, 600.0, 568.0);
+
+    for width in [320.0, 600.0] {
+        harness.set_size(egui::vec2(width, 320.0));
+        harness.step();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Save changes")
+            .scroll_to_me();
+        for _ in 0..8 {
+            harness.step();
+        }
+        for label in ["Restore all defaults", "Cancel", "Save changes"] {
+            assert_control_inside(&harness, label, egui::accesskit::Role::Button, width, 320.0);
+        }
+    }
 }
 
 #[test]

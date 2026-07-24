@@ -637,6 +637,7 @@ pub(crate) struct AdminToolsState {
     pub snapshots_loaded: bool,
     pub snapshots_error: Option<String>,
     pub snapshot_action_error: Option<String>,
+    pub confirm_discard: bool,
 }
 
 impl Default for AdminToolsState {
@@ -662,6 +663,7 @@ impl Default for AdminToolsState {
             snapshots_loaded: false,
             snapshots_error: None,
             snapshot_action_error: None,
+            confirm_discard: false,
         }
     }
 }
@@ -1116,6 +1118,40 @@ impl LabelloApp {
 
     pub(crate) fn work_view(&self) -> bool {
         self.assignment_kind().is_some()
+    }
+
+    pub(crate) fn admin_changes_dirty(&self) -> bool {
+        self.datasets.admin_config != self.datasets.admin_baseline
+            || self.datasets.users != self.datasets.users_baseline
+    }
+
+    pub(crate) fn short_viewport(size: egui::Vec2) -> bool {
+        size.y < 480.0
+    }
+
+    pub(crate) fn workspace_context_height(&self, layout: LayoutMode, viewport: egui::Vec2) -> f32 {
+        if self.current.is_some()
+            && !Self::short_viewport(viewport)
+            && (layout == LayoutMode::Compact
+                || (layout == LayoutMode::Medium && self.view != AppView::Annotate))
+        {
+            100.0
+        } else {
+            56.0
+        }
+    }
+
+    pub(crate) fn workspace_actions_height(&self, layout: LayoutMode, viewport: egui::Vec2) -> f32 {
+        if layout == LayoutMode::Compact
+            && self.view == AppView::Review
+            && self.correction_draft.is_none()
+        {
+            112.0
+        } else if Self::short_viewport(viewport) || layout == LayoutMode::Compact {
+            60.0
+        } else {
+            68.0
+        }
     }
 
     pub(crate) fn class_name(&self, class_id: &ClassId) -> String {
@@ -1866,6 +1902,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_shortcut_settings(&mut self) {
+        if self.show_settings {
+            return;
+        }
         let mut draft = self.keybindings.clone();
         draft.normalize();
         self.shortcut_settings.baseline = Some(draft.clone());
@@ -1873,6 +1912,8 @@ impl LabelloApp {
         self.shortcut_settings.error = None;
         self.shortcut_settings.recording = None;
         self.shortcut_settings.confirm_discard = false;
+        self.drawer = None;
+        self.show_tutorial = false;
         self.show_settings = true;
     }
 
@@ -1993,11 +2034,16 @@ impl LabelloApp {
             UserAction::DeleteAnnotation if self.view == AppView::Annotate && ready => {
                 self.delete_selected()
             }
-            UserAction::OpenTutorial => self.show_tutorial = !self.show_tutorial,
+            UserAction::OpenTutorial => {
+                self.drawer = None;
+                self.show_tutorial = !self.show_tutorial;
+            }
             UserAction::ToggleWorkflowPanel => {
+                self.show_tutorial = false;
                 self.drawer = (self.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow)
             }
             UserAction::ToggleInspectorPanel => {
+                self.show_tutorial = false;
                 self.drawer = (self.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector)
             }
             UserAction::OpenSettings => self.open_shortcut_settings(),
@@ -2090,18 +2136,20 @@ impl LabelloApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.canvas.exit_pan_mode();
-        }
         if !self.work_view()
             || ctx.text_edit_focused()
             || self.loading.saving
             || self.loading.image
             || self.pending_transition.is_some()
             || self.show_settings
+            || self.drawer.is_some()
             || self.runtime.persistence.recovery.is_some()
+            || egui::Popup::is_any_open(ctx)
         {
             return;
+        }
+        if self.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.canvas.exit_pan_mode();
         }
         if self.view == AppView::Review
             && self.correction_draft.is_some()
@@ -2227,6 +2275,7 @@ impl eframe::App for LabelloApp {
         self.refresh_ingest_if_due();
         self.autosave_if_due();
         self.handle_shortcuts(ui.ctx());
+        let viewport = ui.available_size();
         let layout = LayoutMode::for_width(ui.available_width());
         egui::Panel::top("app_bar")
             .exact_size(56.0)
@@ -2234,16 +2283,7 @@ impl eframe::App for LabelloApp {
             .show(ui, |ui| self.app_bar(ui, layout));
         if self.work_view() {
             egui::Panel::top("workspace_context")
-                .exact_size(
-                    if self.current.is_some()
-                        && (layout == LayoutMode::Compact
-                            || (layout == LayoutMode::Medium && self.view != AppView::Annotate))
-                    {
-                        100.0
-                    } else {
-                        56.0
-                    },
-                )
+                .exact_size(self.workspace_context_height(layout, viewport))
                 .frame(
                     theme::top_bar_frame()
                         .fill(theme::PANEL)
@@ -2253,18 +2293,7 @@ impl eframe::App for LabelloApp {
         }
         if self.work_view() && layout != LayoutMode::Wide {
             egui::Panel::bottom("compact_primary_actions")
-                .exact_size(
-                    if layout == LayoutMode::Compact
-                        && self.view == AppView::Review
-                        && self.correction_draft.is_none()
-                    {
-                        112.0
-                    } else if layout == LayoutMode::Compact {
-                        60.0
-                    } else {
-                        68.0
-                    },
-                )
+                .exact_size(self.workspace_actions_height(layout, viewport))
                 .frame(theme::top_bar_frame())
                 .show(ui, |ui| {
                     if layout == LayoutMode::Compact {
@@ -2273,10 +2302,7 @@ impl eframe::App for LabelloApp {
                         ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
                     }
                 });
-        } else if self.view == AppView::Admin
-            && (self.datasets.admin_config != self.datasets.admin_baseline
-                || self.datasets.users != self.datasets.users_baseline)
-        {
+        } else if self.view == AppView::Admin && self.admin_changes_dirty() {
             egui::Panel::bottom("admin_save_status")
                 .exact_size(self.admin_status_height(layout))
                 .frame(theme::top_bar_frame())

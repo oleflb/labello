@@ -1,10 +1,12 @@
 use std::{cell::Cell, error::Error, future::Future, pin::Pin, rc::Rc, time::Duration};
 
+use labello_ui::inspector_presets::InspectorPreset;
+
 type LocalTask = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectorMode {
-    Demo,
+    Preset(InspectorPreset),
     Live,
 }
 
@@ -19,7 +21,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         Box::new(move |creation_context| {
             creation_context.egui_ctx.enable_accesskit();
-            Ok(Box::new(InspectorApp::new(mode)?))
+            Ok(Box::new(InspectorApp::new(
+                mode,
+                &creation_context.egui_ctx,
+            )?))
         }),
     )?;
     Ok(())
@@ -28,10 +33,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn parse_mode(args: impl IntoIterator<Item = String>) -> Result<InspectorMode, String> {
     let args = args.into_iter().collect::<Vec<_>>();
     match args.as_slice() {
-        [] => Ok(InspectorMode::Demo),
+        [] => Ok(InspectorMode::Preset(InspectorPreset::Annotation)),
         [argument] if argument == "--live" => Ok(InspectorMode::Live),
-        _ => Err("Usage: labello-egui-mcp-inspector [--live]".to_string()),
+        [flag, name] if flag == "--preset" => InspectorPreset::from_name(name)
+            .map(InspectorMode::Preset)
+            .ok_or_else(usage),
+        _ => Err(usage()),
     }
+}
+
+fn usage() -> String {
+    format!(
+        "Usage: labello-egui-mcp-inspector [--live | --preset <{}>]",
+        InspectorPreset::ALL
+            .into_iter()
+            .map(InspectorPreset::name)
+            .collect::<Vec<_>>()
+            .join("|")
+    )
 }
 
 struct InspectorApp {
@@ -40,10 +59,10 @@ struct InspectorApp {
 }
 
 impl InspectorApp {
-    fn new(mode: InspectorMode) -> std::io::Result<Self> {
+    fn new(mode: InspectorMode, ctx: &eframe::egui::Context) -> std::io::Result<Self> {
         match mode {
-            InspectorMode::Demo => Ok(Self {
-                app: labello_ui::LabelloApp::default(),
+            InspectorMode::Preset(preset) => Ok(Self {
+                app: labello_ui::inspector_presets::build(preset, ctx),
                 executor: None,
             }),
             InspectorMode::Live => {
@@ -132,15 +151,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_mode_is_the_default_and_live_mode_is_explicit() {
+    fn annotation_is_the_default_and_live_mode_is_explicit() {
         assert_eq!(
             parse_mode(Vec::<String>::new()).unwrap(),
-            InspectorMode::Demo
+            InspectorMode::Preset(InspectorPreset::Annotation)
         );
         assert_eq!(
             parse_mode(["--live".to_string()]).unwrap(),
             InspectorMode::Live
         );
+    }
+
+    #[test]
+    fn every_named_preset_is_accepted() {
+        for preset in InspectorPreset::ALL {
+            assert_eq!(
+                parse_mode(["--preset".to_string(), preset.name().to_string()]).unwrap(),
+                InspectorMode::Preset(preset)
+            );
+        }
     }
 
     #[test]

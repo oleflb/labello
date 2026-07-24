@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+inspector-presets = []
+
 [dependencies]
 eframe.workspace = true
 egui.workspace = true

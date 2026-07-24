@@ -510,6 +510,7 @@ impl LabelloApp {
             .as_ref()
             .map(|config| config_issues(config, &self.config.user_id))
             .unwrap_or_default();
+        let idle = !self.loading.admin && self.loading.roles_user.is_none();
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(if config_dirty {
@@ -520,28 +521,22 @@ impl LabelloApp {
                 .color(theme::AMBER)
                 .strong(),
             );
-            if config_dirty {
-                if theme::primary_button(
+            if config_dirty
+                && theme::primary_button(
                     ui,
-                    issues.is_empty() && !self.loading.admin,
+                    issues.is_empty() && idle,
                     egui::Button::new("Save Admin Config"),
                 )
                 .on_disabled_hover_text("Fix validation errors before saving.")
                 .clicked()
-                {
-                    self.request_admin_save();
-                }
-                if theme::danger_button(
-                    ui,
-                    !self.loading.admin,
-                    egui::Button::new("Discard staged changes"),
-                )
-                .clicked()
-                {
-                    self.datasets.admin_config = self.datasets.admin_baseline.clone();
-                    self.clear_admin_draft();
-                    self.runtime.notice = Some("Staged admin changes discarded".to_string());
-                }
+            {
+                self.request_admin_save();
+            }
+            if (config_dirty || permissions_dirty)
+                && theme::danger_button(ui, idle, egui::Button::new("Discard staged changes"))
+                    .clicked()
+            {
+                self.admin_tools.confirm_discard = true;
             }
             if !issues.is_empty() {
                 ui.label(
@@ -3199,7 +3194,7 @@ fn destructive_button(ui: &mut egui::Ui, label: &str, item: String) -> bool {
     }
 
     let mut confirmed = false;
-    egui::Modal::new(modal_id).show(ui.ctx(), |ui| {
+    let response = theme::modal(ui.ctx(), modal_id).show(ui.ctx(), |ui| {
         ui.set_max_width((ui.ctx().content_rect().width() - 48.0).clamp(240.0, 480.0));
         ui.heading("Confirm removal");
         ui.label(format!(
@@ -3215,6 +3210,16 @@ fn destructive_button(ui: &mut egui::Ui, label: &str, item: String) -> bool {
             }
         });
     });
+    response.response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Window,
+            true,
+            format!("Confirm removal: {item}"),
+        )
+    });
+    if response.should_close() {
+        ui.ctx().data_mut(|data| data.remove::<bool>(modal_id));
+    }
     confirmed
 }
 

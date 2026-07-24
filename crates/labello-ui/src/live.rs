@@ -65,6 +65,7 @@ impl LabelloApp {
                             self.runtime.error = None;
                         }
                         Err(error) => {
+                            self.clear_authenticated_state();
                             self.auth.checked = true;
                             self.runtime.error = Some(error);
                         }
@@ -106,21 +107,7 @@ impl LabelloApp {
                     self.loading.logout = false;
                     match result {
                         Ok(()) => {
-                            self.auth.account = None;
-                            self.datasets.summaries.clear();
-                            self.datasets.summaries_error = None;
-                            self.datasets.metadata = None;
-                            self.datasets.admin_config = None;
-                            self.datasets.admin_baseline = None;
-                            self.datasets.users.clear();
-                            self.datasets.users_baseline.clear();
-                            self.admin_tools = Default::default();
-                            self.drawer = None;
-                            self.show_tutorial = false;
-                            self.clear_current_image();
-                            self.isolate_browser_workspace();
-                            self.runtime.storage_error = None;
-                            self.view = AppView::Setup;
+                            self.clear_authenticated_state();
                             self.runtime.notice = Some("Signed out".to_string());
                             self.runtime.error = None;
                         }
@@ -933,6 +920,33 @@ impl LabelloApp {
         }
     }
 
+    fn clear_authenticated_state(&mut self) {
+        self.auth.account = None;
+        self.datasets.summaries.clear();
+        self.datasets.summaries_error = None;
+        self.datasets.metadata = None;
+        self.datasets.admin_config = None;
+        self.datasets.admin_baseline = None;
+        self.datasets.users.clear();
+        self.datasets.users_baseline.clear();
+        self.datasets.stats = Default::default();
+        self.datasets.active_stats_request = None;
+        self.datasets.last_stats_attempt = None;
+        self.datasets.last_stats_completion = None;
+        self.datasets.stats_error = None;
+        self.datasets.requested_view = None;
+        self.admin_tools = Default::default();
+        self.drawer = None;
+        self.show_tutorial = false;
+        self.shortcut_settings = Default::default();
+        self.keybindings = labello_domain::KeybindingSet::defaults_for(self.config.user_id.clone());
+        self.clear_current_image();
+        self.isolate_browser_workspace();
+        self.runtime.storage_error = None;
+        self.runtime.notice = None;
+        self.view = AppView::Setup;
+    }
+
     pub(crate) fn request_auth_options(&mut self) {
         if self.runtime.api.is_none() {
             return;
@@ -951,6 +965,11 @@ impl LabelloApp {
 
     pub(crate) fn request_logout(&mut self) {
         if self.loading.logout || self.runtime.api.is_none() {
+            return;
+        }
+        if self.view == AppView::Admin && self.admin_changes_dirty() {
+            self.runtime.error =
+                Some("Save or discard staged Admin changes before signing out.".to_string());
             return;
         }
         self.begin_auth_epoch();
