@@ -564,6 +564,28 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     assert!(harness.query_by_label("People").is_some());
     click_accesskit_button(&mut harness, "People");
     assert!(harness.query_by_label("Reviewer Person").is_some());
+    let role_bounds = ["Annotator", "Reviewer", "Adjudicator", "Data admin"].map(|role| {
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::CheckBox,
+                &format!("{role} role for Reviewer Person (reviewer)"),
+            )
+            .rect()
+    });
+    assert!(role_bounds.windows(2).all(|roles| {
+        (roles[0].top() - roles[1].top()).abs() <= 1.0
+            && (roles[0].bottom() - roles[1].bottom()).abs() <= 1.0
+    }));
+    let identity_bounds = ["Reviewer Person", "@review-person", "ID: reviewer"]
+        .map(|label| harness.get_by_label(label).rect())
+        .into_iter()
+        .reduce(egui::Rect::union)
+        .unwrap();
+    assert!(
+        (identity_bounds.center().y - role_bounds[0].center().y).abs() <= 2.0,
+        "identity={identity_bounds:?} roles={:?}",
+        role_bounds[0]
+    );
     assert!(
         harness
             .query_all_by_role_and_label(
@@ -954,6 +976,12 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search people")
         .rect();
     assert!((people_search.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
+    harness.set_size(egui::vec2(390.0, 844.0));
+    harness.step();
+    let person_card = harness.get_by_label("Person card Admin User").rect();
+    assert!(person_card.left() <= 38.5 && person_card.right() >= 347.5);
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
     harness.state_mut().admin_tools.section = AdminSection::Images;
     harness.step();
     let root_path = harness

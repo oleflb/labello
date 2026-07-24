@@ -141,6 +141,7 @@ impl LabelloApp {
         if self.datasets.admin_config.is_none() {
             if self.loading.admin {
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.spinner();
                     ui.label("Loading admin configuration...");
                 });
@@ -332,16 +333,19 @@ impl LabelloApp {
                 !self.loading.admin && !self.loading.uploading && !self.loading.ingesting,
                 |ui| {
                     theme::card_frame().show(ui, |ui| {
-                        ui.set_max_width(640.0_f32.min(ui.available_width()));
-                        ui.heading("Dataset details");
-                        theme::labeled_text_field(
-                            ui,
-                            "Dataset name",
-                            &mut config.name,
-                            theme::COMPACT_TEXT_FIELD_HEIGHT,
-                        )
-                        .on_hover_text("Human-readable name stored in labello.dataset.toml.");
-                        show_issues(ui, &dataset_name_issues(&config.name));
+                        ui.set_min_width(ui.available_width());
+                        ui.vertical(|ui| {
+                            ui.set_max_width(640.0_f32.min(ui.available_width()));
+                            ui.heading("Dataset details");
+                            theme::labeled_text_field(
+                                ui,
+                                "Dataset name",
+                                &mut config.name,
+                                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                            )
+                            .on_hover_text("Human-readable name stored in labello.dataset.toml.");
+                            show_issues(ui, &dataset_name_issues(&config.name));
+                        });
                     });
                 },
             );
@@ -391,6 +395,8 @@ impl LabelloApp {
         if let Some(config) = self.datasets.admin_config.as_mut() {
             ui.add_enabled_ui(!busy, |ui| {
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.vertical(|ui| {
                     ui.set_max_width(640.0_f32.min(ui.available_width()));
                     ui.heading("Image roots and ingestion");
                     edit_string_list(
@@ -447,6 +453,7 @@ impl LabelloApp {
                     }
                     ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
                     show_issues(ui, &image_root_issues(&config.image_roots));
+                    });
                 });
             });
         }
@@ -633,44 +640,71 @@ impl LabelloApp {
                             .filter(|user| user_matches_search(user, &search))
                         {
                             visible_users += 1;
-                            ui.vertical(|ui| {
-                                ui.set_width(180.0);
-                                user_identity(ui, user);
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.set_min_width(300.0);
-                                edit_user_roles(
-                                    ui,
-                                    user,
-                                    &current_user,
-                                    admin_count,
-                                    admin_loading,
-                                    saving.as_ref(),
-                                );
-                            });
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(180.0, 76.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.add_space(theme::SPACE_1);
+                                        user_identity(ui, user);
+                                    });
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(420.0, 76.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = theme::SPACE_2;
+                                    edit_user_roles(
+                                        ui,
+                                        user,
+                                        &current_user,
+                                        admin_count,
+                                        admin_loading,
+                                        saving.as_ref(),
+                                    );
+                                },
+                            );
                             let dirty = user_permissions_dirty(user, &baseline);
                             let this_saving = saving.as_ref() == Some(&user.account.user_id);
-                            ui.label(
-                                RichText::new(if this_saving {
-                                    "Saving"
-                                } else if dirty {
-                                    "Staged"
-                                } else {
-                                    "Saved"
-                                })
-                                .color(if dirty || this_saving {
-                                    theme::WARNING
-                                } else {
-                                    theme::SUCCESS
-                                }),
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(50.0, 76.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(if this_saving {
+                                            "Saving"
+                                        } else if dirty {
+                                            "Staged"
+                                        } else {
+                                            "Saved"
+                                        })
+                                        .color(
+                                            if dirty || this_saving {
+                                                theme::WARNING
+                                            } else {
+                                                theme::SUCCESS
+                                            },
+                                        ),
+                                    );
+                                },
                             );
-                            if save_permissions_button(
-                                ui,
-                                user,
-                                dirty,
-                                admin_loading,
-                                saving.as_ref(),
-                            ) {
+                            let save = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(148.0, 76.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        save_permissions_button(
+                                            ui,
+                                            user,
+                                            dirty,
+                                            admin_loading,
+                                            saving.as_ref(),
+                                        )
+                                    },
+                                )
+                                .inner;
+                            if save {
                                 save_user = Some(user.account.user_id.clone());
                             }
                             ui.end_row();
@@ -685,7 +719,9 @@ impl LabelloApp {
                 {
                     visible_users += 1;
                     ui.add_space(theme::SPACE_1);
-                    theme::inset_frame().show(ui, |ui| {
+                    let card_label = format!("Person card {}", user.account.display_name);
+                    let card = theme::inset_frame().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         user_identity(ui, user);
                         ui.add_space(theme::SPACE_1);
                         ui.horizontal_wrapped(|ui| {
@@ -724,6 +760,9 @@ impl LabelloApp {
                                 save_user = Some(user.account.user_id.clone());
                             }
                         });
+                    });
+                    card.response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, card_label.clone())
                     });
                 }
             }
@@ -1137,6 +1176,7 @@ impl LabelloApp {
         });
         if initial_loading {
             theme::card_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(RichText::new("Loading statistics...").strong());

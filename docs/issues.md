@@ -26,7 +26,7 @@ Only after that continue with the next issue.
 - [x] The navigation dropdown is very awkward in views with the image view.
   - I think we can remove the upper layer of that menu hierarchy and simply put all elements of that menu in the bar.
   - On mobile/small narrow screen, it is still necessary. The sizing of the menu items needs to be improved. The status item from that menu can be removed entirely.
-- [ ] The admin view has some layouting issues:
+- [x] The admin view has some layouting issues:
   - In People, the role checkboxes are offset and do not fit. Also the Person column should be centered vertically.
   - All background cards in the sections should be full width. 
 - [ ] The normal non-highlighted button does not look enough like a button. Make it just slightly more different from the background and other text.
