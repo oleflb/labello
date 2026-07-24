@@ -353,6 +353,7 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
     let class_description_fields = harness
         .query_all_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Description")
         .collect::<Vec<_>>();
+    let classes_card = harness.get_by_label("Classes card").rect();
     assert_eq!(class_name_fields.len(), 2);
     for index in 0..class_name_fields.len() {
         let unit = class_name_fields[index].rect().width();
@@ -366,9 +367,17 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
         assert!(class_name_fields[index].rect().height() >= 27.0);
         assert!(class_description_fields[index].rect().width() >= 2.9 * unit);
         assert!(
-            class_description_fields[index].rect().right() - class_name_fields[index].rect().left()
-                <= 640.5,
-            "class editor exceeds the 640-point form column"
+            class_description_fields[index].rect().right() >= classes_card.right() - 32.0,
+            "class editor does not fill its card"
+        );
+        assert!(
+            (class_description_fields[index].rect().height()
+                - class_name_fields[index].rect().height())
+            .abs()
+                <= 2.0,
+            "description={:?} name={:?}",
+            class_description_fields[index].rect(),
+            class_name_fields[index].rect()
         );
     }
     let person_workflow = "Person boxes | bounding_box | Person | Enabled";
@@ -858,13 +867,51 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
             "missing wide Admin destination {section}"
         );
     }
+    let title = harness.get_by_label("Dataset Admin").rect();
+    let status = harness.get_by_label("Admin config saved").rect();
+    let reload = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Reload")
+        .rect();
+    assert!(status.left() > title.right());
+    assert!(reload.left() > title.right());
+    assert!(
+        status.right().max(reload.right()) >= 1330.0,
+        "status={status:?}, reload={reload:?}"
+    );
+
     harness.state_mut().admin_tools.section = AdminSection::Overview;
     harness.step();
     let unscrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
     harness.state_mut().admin_tools.section = AdminSection::Schema;
     harness.step();
+    for label in [
+        "Class Workflows card",
+        "Classes card",
+        "Labeling Workflows card",
+    ] {
+        let card = harness.get_by_label(label).rect();
+        assert!(card.width() >= 900.0, "{label} was only {card:?}");
+        assert!(card.right() >= 1330.0, "{label} was only {card:?}");
+    }
     let scrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
     assert!((unscrolled_admin_x - scrolled_admin_x).abs() <= 0.5);
+    harness.state_mut().admin_tools.section = AdminSection::Automation;
+    harness.step();
+    let prelabels_card = harness.get_by_label("Prelabels card").rect();
+    for label in ["Prelabels card", "Assignment Balance card"] {
+        let card = harness.get_by_label(label).rect();
+        assert!(card.width() >= 900.0, "{label} was only {card:?}");
+        assert!(card.right() >= 1330.0, "{label} was only {card:?}");
+    }
+    for label in ["Name", "Model name", "Location"] {
+        let field = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, label)
+            .rect();
+        assert!(
+            field.right() >= prelabels_card.right() - 48.0,
+            "{label} does not fill its Automation column: field={field:?}, card={prelabels_card:?}"
+        );
+    }
     harness.state_mut().admin_tools.section = AdminSection::Overview;
     harness.step();
     harness
@@ -1001,6 +1048,18 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search images")
         .rect();
     assert!((image_search.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
+    assert_visible_controls_clamped(&harness, 320.0, 568.0);
+    harness.state_mut().admin_tools.section = AdminSection::Automation;
+    harness.step();
+    let prelabels_card = harness.get_by_label("Prelabels card").rect();
+    let location = harness
+        .get_by_role_and_label(egui::accesskit::Role::TextInput, "Location")
+        .rect();
+    assert!(location.left() <= prelabels_card.left() + 16.0);
+    assert!(
+        location.right() >= prelabels_card.right() - 32.0,
+        "location={location:?}, card={prelabels_card:?}"
+    );
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
 }
 

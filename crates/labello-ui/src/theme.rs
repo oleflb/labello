@@ -513,7 +513,9 @@ pub fn resizable_multiline_text_edit(
         .resizable([false, true])
         .with_stroke(false)
         .show(ui, |ui| {
-            let mut edit = TextEdit::multiline(value).desired_width(f32::INFINITY);
+            let mut edit = TextEdit::multiline(value)
+                .desired_width(f32::INFINITY)
+                .desired_rows(desired_rows);
             if let Some(hint_text) = hint_text {
                 edit = edit.hint_text(hint_text);
             }

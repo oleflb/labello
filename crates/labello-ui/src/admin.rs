@@ -76,7 +76,7 @@ impl LabelloApp {
         let mut reload = false;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            let mut header = |ui: &mut egui::Ui| {
+            let title = |ui: &mut egui::Ui| {
                 ui.vertical(|ui| {
                     ui.heading("Dataset Admin");
                     ui.label(
@@ -86,6 +86,8 @@ impl LabelloApp {
                         .color(theme::TEXT_MUTED),
                     );
                 });
+            };
+            let mut status = |ui: &mut egui::Ui| {
                 if self.loading.admin {
                     ui.spinner();
                 }
@@ -107,9 +109,18 @@ impl LabelloApp {
                 }
             };
             if layout == LayoutMode::Compact {
-                ui.vertical(header);
+                ui.vertical(|ui| {
+                    title(ui);
+                    ui.horizontal_wrapped(status);
+                });
             } else {
-                ui.horizontal_wrapped(&mut header);
+                ui.horizontal(|ui| {
+                    title(ui);
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| status(ui),
+                    );
+                });
             }
         });
         if reload {
@@ -476,21 +487,18 @@ impl LabelloApp {
             && self.loading.roles_user.is_none()
             && !self.loading.uploading
             && !self.loading.ingesting;
-        ui.scope(|ui| {
-            ui.set_max_width(ui.available_width().min(640.0));
-            if let Some(config) = self.datasets.admin_config.as_mut() {
-                ui.add_enabled_ui(enabled, |ui| {
-                    edit_quick_workflows(ui, config);
-                    edit_labels(ui, &mut config.label_classes, &mut config.tasks);
-                    edit_tasks(
-                        ui,
-                        &mut config.tasks,
-                        &config.label_classes,
-                        &config.prelabel_configs,
-                    );
-                });
-            }
-        });
+        if let Some(config) = self.datasets.admin_config.as_mut() {
+            ui.add_enabled_ui(enabled, |ui| {
+                edit_quick_workflows(ui, config);
+                edit_labels(ui, &mut config.label_classes, &mut config.tasks);
+                edit_tasks(
+                    ui,
+                    &mut config.tasks,
+                    &config.label_classes,
+                    &config.prelabel_configs,
+                );
+            });
+        }
     }
 
     fn admin_automation(&mut self, ui: &mut egui::Ui) {
@@ -502,15 +510,12 @@ impl LabelloApp {
             && self.loading.roles_user.is_none()
             && !self.loading.uploading
             && !self.loading.ingesting;
-        ui.scope(|ui| {
-            ui.set_max_width(ui.available_width().min(640.0));
-            if let Some(config) = self.datasets.admin_config.as_mut() {
-                ui.add_enabled_ui(enabled, |ui| {
-                    edit_prelabels(ui, &mut config.prelabel_configs, &mut config.tasks);
-                    edit_imbalance(ui, &mut config.imbalance);
-                });
-            }
-        });
+        if let Some(config) = self.datasets.admin_config.as_mut() {
+            ui.add_enabled_ui(enabled, |ui| {
+                edit_prelabels(ui, &mut config.prelabel_configs, &mut config.tasks);
+                edit_imbalance(ui, &mut config.imbalance);
+            });
+        }
     }
 
     pub(crate) fn admin_status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1864,9 +1869,18 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
     error.as_string().unwrap_or_else(|| format!("{error:?}"))
 }
 
-fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
-    theme::card_frame().show(ui, |ui| {
+fn admin_card(ui: &mut egui::Ui, label: &'static str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let response = theme::card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
+        add_contents(ui);
+    });
+    response
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label));
+}
+
+fn edit_quick_workflows(ui: &mut egui::Ui, config: &mut DatasetMetadata) {
+    admin_card(ui, "Class Workflows card", |ui| {
         ui.heading("Class Workflows");
         ui.label(
             RichText::new("Fast path: create a class and its worker-visible task together.")
@@ -2049,8 +2063,7 @@ fn edit_string_list(
 }
 
 fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [TaskDefinition]) {
-    theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+    admin_card(ui, "Classes card", |ui| {
         ui.heading("Classes");
         ui.label(
             RichText::new("Classes define the objects annotators can label.").color(theme::MUTED),
@@ -2163,7 +2176,7 @@ fn edit_class_card(
                         ui,
                         ui.make_persistent_id(("class-description", index)),
                         &mut description,
-                        2,
+                        1,
                         None,
                     )
                     .labelled_by(field_label.id)
@@ -2197,7 +2210,7 @@ fn edit_class_card(
             ui,
             ui.make_persistent_id(("class-description", index)),
             &mut description,
-            2,
+            1,
             None,
         )
         .labelled_by(field_label.id)
@@ -2231,8 +2244,7 @@ fn edit_tasks(
     labels: &[LabelClass],
     prelabels: &[PrelabelConfig],
 ) {
-    theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+    admin_card(ui, "Labeling Workflows card", |ui| {
         ui.heading("Labeling Workflows");
         ui.label(
             RichText::new(
@@ -2257,37 +2269,36 @@ fn edit_tasks(
                 if task.enabled { "Enabled" } else { "Disabled" }
             );
             ui.add_space(4.0);
-            theme::inset_frame()
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    egui::CollapsingHeader::new(summary)
-                        .id_salt(("workflow-editor", index))
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            let remove_clicked = if ui.available_width() >= 760.0 {
-                                let mut remove_clicked = false;
-                                ui.columns(2, |columns| {
-                                    remove_clicked = edit_workflow_basics(
-                                        &mut columns[0],
-                                        index,
-                                        task,
-                                        labels,
-                                        prelabels,
-                                    );
-                                    edit_workflow_instructions(&mut columns[1], task);
-                                });
-                                remove_clicked
-                            } else {
-                                let remove_clicked =
-                                    edit_workflow_basics(ui, index, task, labels, prelabels);
-                                edit_workflow_instructions(ui, task);
-                                remove_clicked
-                            };
-                            if remove_clicked {
-                                remove = Some(index);
-                            }
-                        });
-                });
+            theme::inset_frame().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                egui::CollapsingHeader::new(summary)
+                    .id_salt(("workflow-editor", index))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let remove_clicked = if ui.available_width() >= 760.0 {
+                            let mut remove_clicked = false;
+                            ui.columns(2, |columns| {
+                                remove_clicked = edit_workflow_basics(
+                                    &mut columns[0],
+                                    index,
+                                    task,
+                                    labels,
+                                    prelabels,
+                                );
+                                edit_workflow_instructions(&mut columns[1], task);
+                            });
+                            remove_clicked
+                        } else {
+                            let remove_clicked =
+                                edit_workflow_basics(ui, index, task, labels, prelabels);
+                            edit_workflow_instructions(ui, task);
+                            remove_clicked
+                        };
+                        if remove_clicked {
+                            remove = Some(index);
+                        }
+                    });
+            });
         }
         if let Some(index) = remove {
             tasks.remove(index);
@@ -2743,40 +2754,64 @@ fn edit_prelabels(
     configs: &mut Vec<PrelabelConfig>,
     tasks: &mut [TaskDefinition],
 ) {
-    theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+    admin_card(ui, "Prelabels card", |ui| {
         ui.heading("Prelabels");
         let mut remove = None;
         for (index, config) in configs.iter_mut().enumerate() {
             ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Prelabel ID");
-                let mut config_id = config.config_id.to_string();
-                if ui
-                    .add_sized(
-                        [ui.available_width().min(280.0), 44.0],
-                        theme::singleline_text_edit(&mut config_id),
+            let wide = ui.available_width() >= 600.0;
+            let mut config_id = config.config_id.to_string();
+            let config_id_changed = if wide {
+                let mut changed = false;
+                ui.columns(2, |columns| {
+                    changed = theme::labeled_text_field(
+                        &mut columns[0],
+                        "Prelabel ID",
+                        &mut config_id,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
                     )
                     .on_hover_text("Stable prelabel config id referenced by tasks.")
-                    .changed()
-                {
-                    let previous = config.config_id.clone();
-                    let updated = PrelabelConfigId::from(config_id);
-                    config.config_id = updated.clone();
-                    for task in tasks.iter_mut() {
-                        for config_id in &mut task.prelabel_config_ids {
-                            if config_id == &previous {
-                                *config_id = updated.clone();
-                            }
+                    .changed();
+                    theme::labeled_text_field(
+                        &mut columns[1],
+                        "Name",
+                        &mut config.name,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    )
+                    .on_hover_text("Display name for this prelabel source.");
+                });
+                changed
+            } else {
+                let changed = theme::labeled_text_field(
+                    ui,
+                    "Prelabel ID",
+                    &mut config_id,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                )
+                .on_hover_text("Stable prelabel config id referenced by tasks.")
+                .changed();
+                theme::labeled_text_field(
+                    ui,
+                    "Name",
+                    &mut config.name,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                )
+                .on_hover_text("Display name for this prelabel source.");
+                changed
+            };
+            if config_id_changed {
+                let previous = config.config_id.clone();
+                let updated = PrelabelConfigId::from(config_id);
+                config.config_id = updated.clone();
+                for task in tasks.iter_mut() {
+                    for config_id in &mut task.prelabel_config_ids {
+                        if config_id == &previous {
+                            *config_id = updated.clone();
                         }
                     }
                 }
-                ui.label("Name");
-                ui.add_sized(
-                    [ui.available_width().min(280.0), 44.0],
-                    theme::singleline_text_edit(&mut config.name),
-                )
-                .on_hover_text("Display name for this prelabel source.");
+            }
+            ui.horizontal_wrapped(|ui| {
                 ui.checkbox(
                     &mut config.available_to_annotators,
                     "Available to annotators",
@@ -2789,44 +2824,57 @@ fn edit_prelabels(
                     remove = Some(index);
                 }
             });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Model ID");
-                ui.add_sized(
-                    [
-                        ui.available_width().min(280.0),
+            if wide {
+                ui.columns(2, |columns| {
+                    theme::labeled_text_field(
+                        &mut columns[0],
+                        "Model ID",
+                        &mut config.model.model_id,
                         theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    ],
-                    theme::singleline_text_edit(&mut config.model.model_id),
+                    )
+                    .on_hover_text("Stable model id.");
+                    theme::labeled_text_field(
+                        &mut columns[1],
+                        "Model name",
+                        &mut config.model.display_name,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    )
+                    .on_hover_text("Model display name.");
+                });
+            } else {
+                theme::labeled_text_field(
+                    ui,
+                    "Model ID",
+                    &mut config.model.model_id,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
                 )
                 .on_hover_text("Stable model id.");
-                ui.label("Model name");
-                ui.add_sized(
-                    [
-                        ui.available_width().min(280.0),
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    ],
-                    theme::singleline_text_edit(&mut config.model.display_name),
+                theme::labeled_text_field(
+                    ui,
+                    "Model name",
+                    &mut config.model.display_name,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
                 )
                 .on_hover_text("Model display name.");
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Location");
+            }
+            theme::labeled_text_field(
+                ui,
+                "Location",
+                &mut config.model.location,
+                theme::COMPACT_TEXT_FIELD_HEIGHT,
+            )
+            .on_hover_text("Server/browser model location, depending on execution mode.");
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 140.0).max(100.0);
                 ui.add_sized(
-                    [
-                        ui.available_width().min(560.0),
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    ],
-                    theme::singleline_text_edit(&mut config.model.location),
-                )
-                .on_hover_text("Server/browser model location, depending on execution mode.");
+                    [ui.available_width(), 44.0],
+                    egui::Slider::new(
+                        &mut config.output_processing.confidence_threshold,
+                        0.0..=1.0,
+                    )
+                    .text("confidence"),
+                );
             });
-            ui.add(
-                egui::Slider::new(
-                    &mut config.output_processing.confidence_threshold,
-                    0.0..=1.0,
-                )
-                .text("confidence"),
-            );
         }
         if let Some(index) = remove {
             let removed = configs.remove(index).config_id;
@@ -2863,8 +2911,7 @@ fn edit_prelabels(
 }
 
 fn edit_imbalance(ui: &mut egui::Ui, imbalance: &mut Option<ImbalanceConfig>) {
-    theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+    admin_card(ui, "Assignment Balance card", |ui| {
         ui.heading("Assignment Balance");
         ui.label(
             RichText::new("Limit how unevenly work may be distributed across classes.")
