@@ -1,6 +1,6 @@
 use crate::app::LabelloApp;
 #[cfg(target_arch = "wasm32")]
-use crate::app::{FolderUploadProgress, UiMessage};
+use crate::app::{FolderUploadProgress, RequestIdentity, UiMessage};
 
 #[cfg(target_arch = "wasm32")]
 const MAX_FILES_PER_BATCH: u32 = 24;
@@ -38,12 +38,16 @@ impl LabelloApp {
         }
         self.loading.uploading = true;
         self.loading.upload_progress = None;
+        self.admin_tools.upload_error = None;
         let root = upload_root();
-        match open_folder_picker(self, root.clone()) {
+        let operation_id = self.next_operation();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        match open_folder_picker(self, root.clone(), request) {
             Ok(()) => {}
             Err(error) => {
                 self.loading.uploading = false;
                 self.loading.upload_progress = None;
+                self.admin_tools.upload_error = Some(error.clone());
                 self.runtime.error = Some(error);
             }
         }
@@ -62,12 +66,20 @@ fn upload_root() -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn open_folder_picker(_app: &LabelloApp, _root: String) -> Result<(), String> {
+fn open_folder_picker(
+    _app: &LabelloApp,
+    _root: String,
+    _request: crate::app::RequestIdentity,
+) -> Result<(), String> {
     Err("folder picker upload is available in the browser build".to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
+fn open_folder_picker(
+    app: &LabelloApp,
+    root: String,
+    request: RequestIdentity,
+) -> Result<(), String> {
     use wasm_bindgen::{JsCast, closure::Closure};
 
     let window = web_sys::window().ok_or_else(|| "missing browser window".to_string())?;
@@ -104,6 +116,7 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
         api_base_url: app.config.api_base_url.clone(),
         dataset_id: app.config.dataset_id.to_string(),
         root,
+        request,
     };
     type PickerCallback = Closure<dyn FnMut(web_sys::Event)>;
     let callback_holder = std::rc::Rc::new(std::cell::RefCell::new(None::<PickerCallback>));
@@ -127,17 +140,25 @@ fn open_folder_picker(app: &LabelloApp, root: String) -> Result<(), String> {
 
         let tx = tx.clone();
         let repaint = repaint.clone();
+        let request = config.request.clone();
         if event.type_() == "change" {
             let config = config.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let result = upload_files(files, config, tx.clone(), repaint.clone()).await;
-                send_ui_message(&tx, &repaint, UiMessage::FolderUploadFinished(result));
+                send_ui_message(
+                    &tx,
+                    &repaint,
+                    UiMessage::FolderUploadFinished { request, result },
+                );
             });
         } else {
             send_ui_message(
                 &tx,
                 &repaint,
-                UiMessage::FolderUploadFinished(Err("folder selection cancelled".to_string())),
+                UiMessage::FolderUploadFinished {
+                    request,
+                    result: Err("folder selection cancelled".to_string()),
+                },
             );
         }
 
@@ -165,6 +186,7 @@ struct UploadConfig {
     api_base_url: String,
     dataset_id: String,
     root: String,
+    request: RequestIdentity,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -185,6 +207,7 @@ async fn upload_files(
     send_progress(
         &tx,
         &repaint,
+        &config.request,
         total_files,
         0,
         0,
@@ -217,6 +240,7 @@ async fn upload_files(
         send_progress(
             &tx,
             &repaint,
+            &config.request,
             total_files,
             uploaded_files,
             current_batch,
@@ -229,6 +253,7 @@ async fn upload_files(
         send_progress(
             &tx,
             &repaint,
+            &config.request,
             total_files,
             uploaded_files,
             current_batch,
@@ -240,6 +265,7 @@ async fn upload_files(
     send_progress(
         &tx,
         &repaint,
+        &config.request,
         total_files,
         uploaded_files,
         current_batch,
@@ -332,6 +358,7 @@ async fn run_ingest_job(
         send_progress(
             tx,
             repaint,
+            &config.request,
             total_files,
             uploaded_files,
             current_batch,
@@ -409,6 +436,7 @@ async fn fetch(url: &str, init: &web_sys::RequestInit) -> Result<web_sys::Respon
 fn send_progress(
     tx: &std::sync::mpsc::Sender<UiMessage>,
     repaint: &egui::Context,
+    request: &RequestIdentity,
     total_files: u32,
     uploaded_files: u32,
     current_batch: u32,
@@ -417,12 +445,15 @@ fn send_progress(
     send_ui_message(
         tx,
         repaint,
-        UiMessage::FolderUploadProgress(FolderUploadProgress {
-            uploaded_files,
-            total_files,
-            current_batch,
-            message,
-        }),
+        UiMessage::FolderUploadProgress {
+            request: request.clone(),
+            progress: FolderUploadProgress {
+                uploaded_files,
+                total_files,
+                current_batch,
+                message,
+            },
+        },
     );
 }
 

@@ -39,8 +39,8 @@ use labello_domain::{
 use web_time::{Duration, Instant};
 
 use crate::app::{
-    AppConfig, AppView, Drawer, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp, LayoutMode,
-    RequestIdentity, SaveStatus, UiCommand, UiMessage,
+    AdminSection, AppConfig, AppView, Drawer, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp,
+    LayoutMode, RequestIdentity, SaveStatus, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
 use crate::persistence::{StoredCanvasTransform, StoredView, WorkspacePreference};
@@ -145,6 +145,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     harness.step();
 
     assert!(harness.query_by_label("Dataset Admin").is_some());
+    click_accesskit_button(&mut harness, "Images");
     click(&mut harness, "Pick folder and upload");
     harness.step();
     assert!(!harness.state().loading.uploading);
@@ -157,11 +158,21 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
             .unwrap_or_default()
             .contains("browser build")
     );
+    assert!(
+        harness
+            .state()
+            .admin_tools
+            .upload_error
+            .as_deref()
+            .is_some_and(|error| error.contains("browser build"))
+    );
 
     click_accesskit_button(&mut harness, "Add image root");
     harness.step();
+    click_accesskit_button(&mut harness, "Schema");
     click_accesskit_button(&mut harness, "Add bounding box class workflow");
     harness.step();
+    click_accesskit_button(&mut harness, "Automation");
     click_accesskit_button(&mut harness, "Add browser prelabel config");
     harness.step();
     let config = harness.state().datasets.admin_config.as_ref().unwrap();
@@ -234,12 +245,18 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
             .next()
             .is_some()
     );
-    assert!(
-        harness
-            .query_all_by_label_contains("Pending 1 | Classes: person")
-            .next()
-            .is_some()
-    );
+    for label in ["Status filter", "Workflow filter", "Class filter"] {
+        assert!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::ComboBox, label)
+                .next()
+                .is_some(),
+            "missing accessible image {label}"
+        );
+    }
+    assert!(harness.query_by_label("Workflow").is_some());
+    assert!(harness.query_all_by_label("Pending 1").next().is_some());
+    assert!(harness.query_all_by_label("person").next().is_some());
 
     harness.state_mut().admin_tools.image_query.page_size = 1;
     harness.state_mut().admin_tools.image_search = "png".to_string();
@@ -270,12 +287,22 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     });
     assert_eq!(api.last_image_query().unwrap().page, 2);
 
-    click_accesskit_button(&mut harness, "Backups / Snapshots");
+    click_accesskit_button(&mut harness, "Backups");
     click_accesskit_button(&mut harness, "Create snapshot");
     step_until(&mut harness, 8, |app| !app.loading.creating_snapshot);
     assert_eq!(api.counts().create_snapshot, 1);
     assert!(harness.query_by_label("snapshot-test").is_some());
 
+    click_accesskit_button(&mut harness, "Show files");
+    assert!(
+        harness
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Download snapshot.json from snapshot snapshot-test"
+            )
+            .next()
+            .is_some()
+    );
     click_accesskit_button(&mut harness, "Download");
     step_until(&mut harness, 8, |app| app.loading.snapshot_file.is_none());
     assert_eq!(api.counts().get_snapshot_file, 1);
@@ -283,7 +310,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
         harness
             .state()
             .admin_tools
-            .snapshots_error
+            .snapshot_action_error
             .as_deref()
             .is_some_and(|error| error.contains("browser build"))
     );
@@ -296,6 +323,7 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
     let mut harness = loaded_admin_harness(api);
     harness.set_size(egui::vec2(1300.0, 8000.0));
     harness.step();
+    click_accesskit_button(&mut harness, "Schema");
 
     let class_name_fields = harness
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Name")
@@ -320,6 +348,11 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
         );
         assert!((class_color_fields[index].rect().width() - unit).abs() <= 2.0);
         assert!(class_description_fields[index].rect().width() >= 2.9 * unit);
+        assert!(
+            class_description_fields[index].rect().right() - class_name_fields[index].rect().left()
+                <= 640.5,
+            "class editor exceeds the 640-point form column"
+        );
     }
     let person_workflow = "Person boxes | bounding_box | Person | Enabled";
     let vehicle_workflow = "Vehicle boxes | bounding_box | Vehicle | Enabled";
@@ -460,7 +493,26 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     harness.step();
 
     assert!(harness.query_by_label("People").is_some());
+    click_accesskit_button(&mut harness, "People");
     assert!(harness.query_by_label("Reviewer Person").is_some());
+    assert!(
+        harness
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::CheckBox,
+                "Reviewer role for Reviewer Person (reviewer)"
+            )
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Save permissions for Reviewer Person (reviewer)"
+            )
+            .next()
+            .is_some()
+    );
     let reviewer = harness
         .state_mut()
         .datasets
@@ -541,12 +593,278 @@ fn admin_staged_changes_can_be_discarded_without_a_server_reload() {
         .name = "Unsaved rename".to_string();
     harness.step();
 
+    click_accesskit_button(&mut harness, "Schema");
+    assert_eq!(harness.state().admin_tools.section, AdminSection::Schema);
+    click_accesskit_button(&mut harness, "Overview");
+    assert_eq!(
+        harness.state().datasets.admin_config.as_ref().unwrap().name,
+        "Unsaved rename"
+    );
+
     click(&mut harness, "Discard staged changes");
     assert_eq!(
         harness.state().datasets.admin_config.as_ref().unwrap().name,
         original_name
     );
     assert_eq!(api.counts().get_admin_dataset, 1);
+}
+
+#[test]
+fn admin_destructive_edits_require_confirmation() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api);
+    harness.set_size(egui::vec2(1300.0, 4000.0));
+    harness.step();
+    click_accesskit_button(&mut harness, "Schema");
+    let classes = harness
+        .state()
+        .datasets
+        .admin_config
+        .as_ref()
+        .unwrap()
+        .label_classes
+        .len();
+
+    click_accesskit_button(&mut harness, "Remove class");
+    assert!(
+        harness
+            .query_all_by_label("Confirm removal")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("Remove class 'Person'")
+            .next()
+            .is_some()
+    );
+    assert_eq!(
+        harness
+            .state()
+            .datasets
+            .admin_config
+            .as_ref()
+            .unwrap()
+            .label_classes
+            .len(),
+        classes
+    );
+    click_accesskit_button(&mut harness, "Cancel");
+    assert_eq!(
+        harness
+            .state()
+            .datasets
+            .admin_config
+            .as_ref()
+            .unwrap()
+            .label_classes
+            .len(),
+        classes
+    );
+
+    click_accesskit_button(&mut harness, "Remove class");
+    click_accesskit_button(&mut harness, "Confirm removal");
+    assert_eq!(
+        harness
+            .state()
+            .datasets
+            .admin_config
+            .as_ref()
+            .unwrap()
+            .label_classes
+            .len(),
+        classes - 1
+    );
+}
+
+#[test]
+fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_admin_harness(api);
+    step_until(&mut harness, 12, |app| {
+        app.admin_tools.images.is_some() && app.admin_tools.snapshots_loaded
+    });
+
+    harness.set_size(egui::vec2(1440.0, 1000.0));
+    harness.step();
+    for section in [
+        "Overview",
+        "People",
+        "Images",
+        "Schema",
+        "Automation",
+        "Backups",
+    ] {
+        assert!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Button, section)
+                .next()
+                .is_some(),
+            "missing wide Admin destination {section}"
+        );
+    }
+    harness
+        .state_mut()
+        .datasets
+        .admin_config
+        .as_mut()
+        .unwrap()
+        .images
+        .clear();
+    harness
+        .state_mut()
+        .datasets
+        .admin_baseline
+        .as_mut()
+        .unwrap()
+        .images
+        .clear();
+    harness.step();
+    click_accesskit_button(&mut harness, "Explore images");
+    assert_eq!(harness.state().admin_tools.section, AdminSection::Images);
+    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.step();
+
+    harness.state_mut().loading.admin = true;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing admin config").is_some());
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Reload")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Dataset name")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.state_mut().loading.admin = false;
+
+    harness.state_mut().admin_tools.section = AdminSection::People;
+    harness.state_mut().loading.uploading = true;
+    harness.step();
+    assert!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::CheckBox,
+                "Annotator role for Admin User (admin)"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.state_mut().loading.uploading = false;
+
+    harness.state_mut().admin_tools.section = AdminSection::Images;
+    harness.state_mut().loading.images = true;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing images...").is_some());
+    harness.state_mut().loading.images = false;
+    harness.state_mut().admin_tools.images_error = Some("offline".to_string());
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Showing saved image results. Refresh failed: offline")
+            .is_some()
+    );
+    let mut empty_page = harness.state().admin_tools.images.clone().unwrap();
+    empty_page.items.clear();
+    harness.state_mut().admin_tools.images = Some(empty_page);
+    harness.state_mut().admin_tools.images_error = None;
+    harness.state_mut().loading.images = true;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing images...").is_some());
+    assert!(harness.query_by_label("No matching images").is_none());
+    harness.state_mut().loading.images = false;
+
+    harness.state_mut().admin_tools.section = AdminSection::Backups;
+    harness.state_mut().loading.snapshots = true;
+    harness.step();
+    assert!(harness.query_by_label("Refreshing backups...").is_some());
+    harness.state_mut().loading.snapshots = false;
+    harness.state_mut().admin_tools.snapshots_error = Some("offline".to_string());
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Showing the last loaded backups. Refresh failed: offline")
+            .is_some()
+    );
+    harness.state_mut().admin_tools.snapshots_loaded = false;
+    harness.state_mut().admin_tools.snapshots = vec![test_snapshot(DatasetId::from("demo"))];
+    harness.state_mut().admin_tools.snapshots_error = Some("offline".to_string());
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Showing newly created backups. Catalog refresh failed: offline")
+            .is_some()
+    );
+
+    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::ComboBox, "Admin section")
+            .next()
+            .is_some()
+    );
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "People")
+            .count(),
+        0
+    );
+    harness.state_mut().admin_tools.section = AdminSection::People;
+    harness.step();
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search people")
+            .rect()
+            .height()
+            >= 43.0
+    );
+    harness.state_mut().admin_tools.section = AdminSection::Images;
+    harness.step();
+    for label in ["Root path", "Search images"] {
+        assert!(
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, label)
+                .rect()
+                .height()
+                >= 43.0,
+            "{label} is not touch-friendly"
+        );
+    }
+    assert_visible_controls_clamped(&harness, 320.0, 568.0);
+}
+
+#[test]
+fn snapshot_load_history_advances_only_after_a_successful_catalog_request() {
+    let mut app = base_live_app(Rc::new(SpyApi::new()));
+    for (request_id, result) in [
+        (1, Err("initial failure".to_string())),
+        (2, Ok(Vec::new())),
+        (3, Err("refresh failure".to_string())),
+    ] {
+        let request = test_request(&app, request_id, Some("demo"));
+        app.runtime.active_requests.insert(request_id);
+        app.loading.snapshots = true;
+        app.runtime
+            .tx
+            .send(UiMessage::SnapshotsLoaded { request, result })
+            .unwrap();
+        app.process_messages(&egui::Context::default());
+        if request_id == 1 {
+            assert!(!app.admin_tools.snapshots_loaded);
+        } else {
+            assert!(app.admin_tools.snapshots_loaded);
+        }
+    }
+    assert_eq!(
+        app.admin_tools.snapshots_error.as_deref(),
+        Some("refresh failure")
+    );
 }
 
 #[test]
@@ -1315,18 +1633,22 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_images();
     assert!(!app.loading.images);
+    assert!(app.admin_tools.images_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshots();
     assert!(!app.loading.snapshots);
+    assert!(app.admin_tools.snapshots_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshot_create();
     assert!(!app.loading.creating_snapshot);
+    assert!(app.admin_tools.snapshot_action_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshot_download("snapshot".to_string(), "manifest.json".to_string());
     assert!(app.loading.snapshot_file.is_none());
+    assert!(app.admin_tools.snapshot_action_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_ingest();
@@ -3455,6 +3777,7 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
 
     let mut app = base_live_app(Rc::new(SpyApi::new()));
     app.setup.started = true;
+    app.view = AppView::Stats;
     app.datasets.active_stats_request = Some((20, DatasetId::from("demo")));
     app.loading.stats = true;
     app.runtime.active_requests.insert(20);
@@ -3475,14 +3798,18 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
     assert_eq!(app.datasets.stats.total_images, 19);
     assert!(!app.loading.stats);
 
+    let upload_request = test_request(&app, 90_000, Some("demo"));
     app.runtime
         .tx
-        .send(UiMessage::FolderUploadProgress(FolderUploadProgress {
-            uploaded_files: 12,
-            total_files: 24,
-            current_batch: 2,
-            message: "Uploading batch 2".to_string(),
-        }))
+        .send(UiMessage::FolderUploadProgress {
+            request: upload_request.clone(),
+            progress: FolderUploadProgress {
+                uploaded_files: 12,
+                total_files: 24,
+                current_batch: 2,
+                message: "Uploading batch 2".to_string(),
+            },
+        })
         .unwrap();
     app.process_messages(&egui::Context::default());
     assert!(app.loading.uploading);
@@ -3493,6 +3820,19 @@ fn command_and_message_budgets_preserve_frame_responsiveness() {
             .map(|progress| progress.fraction()),
         Some(0.5)
     );
+
+    app.begin_workspace_epoch();
+    app.runtime
+        .tx
+        .send(UiMessage::FolderUploadFinished {
+            request: upload_request,
+            result: Ok("Uploaded stale files".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(!app.loading.uploading);
+    assert_ne!(app.runtime.notice.as_deref(), Some("Uploaded stale files"));
+    assert_eq!(app.view, AppView::Stats);
 }
 
 #[test]

@@ -832,14 +832,14 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn central(&mut self, ui: &mut egui::Ui, _layout: LayoutMode) {
+    pub(crate) fn central(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         match self.view {
             AppView::Setup => {
                 centered_scroll(ui, 760.0, |ui| self.setup_view(ui));
                 return;
             }
             AppView::Admin => {
-                centered_scroll(ui, 1100.0, |ui| self.admin_view(ui));
+                centered_scroll(ui, 1100.0, |ui| self.admin_view(ui, layout));
                 return;
             }
             AppView::Stats => {

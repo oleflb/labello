@@ -4,124 +4,135 @@ use eframe::egui::{self, RichText};
 use labello_client::DatasetUser;
 use labello_domain::{
     AgreementMetric, AgreementThreshold, AnnotationType, BrowserAcceleration, ClassId,
-    DatasetMetadata, DatasetRole, DatasetRoleAssignment, ImbalanceConfig, KeypointSpec, LabelClass,
-    ModelSpec, OutputProcessing, PrelabelConfig, PrelabelConfigId, PrelabelExecution, ReviewConfig,
-    ReviewWorkflow, SkeletonEdge, SkeletonSpec, TaskDefinition, TaskId, TaskStatus,
-    TutorialContent, UserId,
+    DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetSnapshot, ImageExplorerItem,
+    ImbalanceConfig, KeypointSpec, LabelClass, ModelSpec, OutputProcessing, PrelabelConfig,
+    PrelabelConfigId, PrelabelExecution, ReviewConfig, ReviewWorkflow, SkeletonEdge, SkeletonSpec,
+    TaskDefinition, TaskId, TaskStatus, TutorialContent, UserId,
 };
 
 use crate::{
-    app::{LabelloApp, LayoutMode},
+    app::{AdminSection, LabelloApp, LayoutMode},
     theme,
 };
 
+impl AdminSection {
+    const ALL: [Self; 6] = [
+        Self::Overview,
+        Self::People,
+        Self::Images,
+        Self::Schema,
+        Self::Automation,
+        Self::Backups,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::People => "People",
+            Self::Images => "Images",
+            Self::Schema => "Schema",
+            Self::Automation => "Automation",
+            Self::Backups => "Backups",
+        }
+    }
+}
+
 impl LabelloApp {
-    pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn admin_view(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
         let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
         let load_error = self.admin_tools.load_error.clone();
-        let user_count = self.datasets.users.len();
-        let image_count = self
-            .admin_tools
-            .images
-            .as_ref()
-            .map(|page| page.total_items.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let workflow_count = self
-            .datasets
-            .admin_config
-            .as_ref()
-            .map(|config| config.tasks.iter().filter(|task| task.enabled).count())
-            .unwrap_or_default();
+        let status_text = if self.loading.admin {
+            if self.datasets.admin_config.is_some() {
+                "Refreshing admin config"
+            } else {
+                "Loading admin config"
+            }
+        } else if load_error.is_some() {
+            if self.datasets.admin_config.is_some() {
+                "Admin refresh failed"
+            } else {
+                "Admin config unavailable"
+            }
+        } else if config_dirty {
+            "Configuration changes staged"
+        } else if permissions_dirty {
+            "Permission changes staged"
+        } else {
+            "Admin config saved"
+        };
+        let status_color =
+            if self.loading.admin || load_error.is_some() || config_dirty || permissions_dirty {
+                theme::WARNING
+            } else {
+                theme::SUCCESS
+            };
+        let can_reload = !self.loading.admin
+            && self.loading.roles_user.is_none()
+            && !self.loading.uploading
+            && !self.loading.ingesting
+            && !config_dirty
+            && !permissions_dirty;
+        let mut reload = false;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
+            let mut header = |ui: &mut egui::Ui| {
                 ui.vertical(|ui| {
                     ui.heading("Dataset Admin");
                     ui.label(
                         RichText::new(
                             "Manage access, inspect images, and configure labeling workflows.",
                         )
-                        .color(theme::MUTED),
+                        .color(theme::TEXT_MUTED),
                     );
                 });
                 if self.loading.admin {
                     ui.spinner();
                 }
-                ui.label(
-                    RichText::new(
-                        if self.loading.admin && self.datasets.admin_config.is_none() {
-                            "Loading admin config"
-                        } else if load_error.is_some() {
-                            if self.datasets.admin_config.is_some() {
-                                "Admin refresh failed"
-                            } else {
-                                "Admin config unavailable"
-                            }
-                        } else if config_dirty {
-                            "Configuration changes staged"
-                        } else if permissions_dirty {
-                            "Permission changes staged"
-                        } else {
-                            "Admin config saved"
-                        },
-                    )
-                    .color(
-                        if self.loading.admin
-                            || load_error.is_some()
-                            || config_dirty
-                            || permissions_dirty
-                        {
-                            theme::AMBER
-                        } else {
-                            theme::TEAL
-                        },
-                    )
-                    .strong(),
-                );
+                ui.label(RichText::new(status_text).color(status_color).strong());
                 if self.datasets.admin_config.is_some()
                     && theme::quiet_button(
                         ui,
-                        !config_dirty && !permissions_dirty,
+                        can_reload,
                         egui::Button::new("Reload"),
                     )
-                    .on_hover_text(if config_dirty || permissions_dirty {
-                        "Discard or save staged changes before reloading."
+                    .on_hover_text(if !can_reload {
+                        "Finish the active operation and save or discard staged changes before reloading."
                     } else {
                         "Reload configuration from the server."
                     })
                     .clicked()
                 {
-                    self.request_admin_dataset();
+                    reload = true;
                 }
-            });
-            if self.datasets.admin_config.is_some() {
-                ui.add_space(8.0);
-                ui.columns(3, |columns| {
-                    theme::metric(&mut columns[0], "Users", user_count.to_string());
-                    theme::metric(&mut columns[1], "Indexed images", image_count);
-                    theme::metric(
-                        &mut columns[2],
-                        "Active workflows",
-                        workflow_count.to_string(),
-                    );
-                });
+            };
+            if layout == LayoutMode::Compact {
+                ui.vertical(header);
+            } else {
+                ui.horizontal_wrapped(&mut header);
             }
         });
-        ui.add_space(8.0);
+        if reload {
+            self.request_admin_dataset();
+        }
+        ui.add_space(theme::SPACE_2);
         if let Some(error) = load_error {
             ui.horizontal_wrapped(|ui| {
                 theme::inline_message(
                     ui,
-                    theme::Intent::Error,
-                    format!("Admin load failed: {error}"),
+                    if self.datasets.admin_config.is_some() {
+                        theme::Intent::Warning
+                    } else {
+                        theme::Intent::Error
+                    },
+                    if self.datasets.admin_config.is_some() {
+                        format!("Showing saved admin data. Refresh failed: {error}")
+                    } else {
+                        format!("Admin load failed: {error}")
+                    },
                 );
-                if theme::quiet_button(
-                    ui,
-                    !self.loading.admin,
-                    egui::Button::new("Retry admin load"),
-                )
-                .clicked()
+                if theme::quiet_button(ui, can_reload, egui::Button::new("Retry admin load"))
+                    .clicked()
                 {
                     self.request_admin_dataset();
                 }
@@ -145,143 +156,349 @@ impl LabelloApp {
             }
             return;
         }
-        self.people_section(ui);
-        self.images_section(ui);
-        self.snapshots_section(ui);
-        let current_user = self.config.user_id.clone();
-        let admin_loading = self.loading.admin;
-        let roles_saving = self.loading.roles_user.is_some();
-        let ingesting_now = self.loading.ingesting;
-        let uploading_now = self.loading.uploading;
-        let upload_progress = self.loading.upload_progress.clone();
-        let Some(config) = self.datasets.admin_config.as_mut() else {
-            return;
-        };
+        if let Some(config) = self.datasets.admin_config.as_mut() {
+            for task in &mut config.tasks {
+                normalize_task_annotation(task);
+            }
+        }
 
+        if layout == LayoutMode::Wide {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(160.0);
+                    self.admin_navigation(ui, layout);
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    self.admin_section(ui, layout);
+                });
+            });
+        } else {
+            self.admin_navigation(ui, layout);
+            ui.add_space(theme::SPACE_4);
+            self.admin_section(ui, layout);
+        }
+    }
+
+    fn admin_navigation(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        let response = ui.vertical(|ui| match layout {
+            LayoutMode::Compact => {
+                let label = ui.label("Admin section");
+                egui::ComboBox::from_id_salt("admin-section")
+                    .width(ui.available_width())
+                    .selected_text(self.admin_tools.section.label())
+                    .show_ui(ui, |ui| {
+                        for section in AdminSection::ALL {
+                            ui.selectable_value(
+                                &mut self.admin_tools.section,
+                                section,
+                                section.label(),
+                            );
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+            }
+            LayoutMode::Medium => {
+                ui.horizontal_wrapped(|ui| {
+                    for section in AdminSection::ALL {
+                        if ui
+                            .add_sized(
+                                [110.0, 44.0],
+                                egui::Button::selectable(
+                                    self.admin_tools.section == section,
+                                    section.label(),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.admin_tools.section = section;
+                        }
+                    }
+                });
+            }
+            LayoutMode::Wide => {
+                ui.label(
+                    RichText::new("Admin sections")
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add_space(theme::SPACE_1);
+                for section in AdminSection::ALL {
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 44.0],
+                            egui::Button::selectable(
+                                self.admin_tools.section == section,
+                                section.label(),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.admin_tools.section = section;
+                    }
+                }
+            }
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Admin navigation")
+        });
+    }
+
+    fn admin_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        match self.admin_tools.section {
+            AdminSection::Overview => self.admin_overview(ui),
+            AdminSection::People => self.people_section(ui, layout),
+            AdminSection::Images => self.admin_images(ui, layout),
+            AdminSection::Schema => self.admin_schema(ui),
+            AdminSection::Automation => self.admin_automation(ui),
+            AdminSection::Backups => self.snapshots_section(ui, layout),
+        }
+    }
+
+    fn admin_overview(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Overview");
+        ui.label(
+            RichText::new("Review dataset health before opening a focused admin section.")
+                .color(theme::TEXT_MUTED),
+        );
+        let image_count = self
+            .datasets
+            .summaries
+            .iter()
+            .find(|dataset| dataset.dataset_id == self.config.dataset_id)
+            .map(|dataset| dataset.total_images)
+            .unwrap_or_default();
+        let workflow_count = self
+            .datasets
+            .admin_config
+            .as_ref()
+            .map(|config| config.tasks.iter().filter(|task| task.enabled).count())
+            .unwrap_or_default();
+        let metrics = [
+            ("Users", self.datasets.users.len()),
+            ("Indexed images", image_count),
+            ("Active workflows", workflow_count),
+        ];
+        let columns = (((ui.available_width() + theme::SPACE_2) / (200.0 + theme::SPACE_2)).floor()
+            as usize)
+            .clamp(1, 3);
+        for row in metrics.chunks(columns) {
+            ui.columns(columns, |columns| {
+                for (column, (label, value)) in columns.iter_mut().zip(row) {
+                    theme::metric(column, label, value.to_string());
+                }
+            });
+        }
+        let (action_label, action_section) = if workflow_count == 0 {
+            ("Configure workflows", AdminSection::Schema)
+        } else if image_count == 0 {
+            ("Add images", AdminSection::Images)
+        } else {
+            ("Explore images", AdminSection::Images)
+        };
+        if theme::primary_button(
+            ui,
+            !self.loading.admin && !self.loading.uploading && !self.loading.ingesting,
+            egui::Button::new(action_label),
+        )
+        .clicked()
+        {
+            self.admin_tools.section = action_section;
+        }
+
+        if self.loading.uploading {
+            theme::inline_message(ui, theme::Intent::Info, "Folder upload is in progress.");
+        } else if self.loading.ingesting {
+            theme::inline_message(ui, theme::Intent::Info, "Dataset ingest is in progress.");
+        } else if let Some(notice) = self.runtime.notice.as_deref().filter(|notice| {
+            notice.starts_with("Ingest ")
+                || notice.starts_with("Uploading ")
+                || notice.starts_with("Uploaded ")
+        }) {
+            theme::inline_message(ui, theme::Intent::Success, notice);
+        }
+        if let Some(error) = &self.admin_tools.upload_error {
+            theme::inline_message(
+                ui,
+                theme::Intent::Error,
+                format!("Folder upload failed: {error}"),
+            );
+        }
+
+        if let Some(config) = self.datasets.admin_config.as_mut() {
+            ui.add_enabled_ui(
+                !self.loading.admin && !self.loading.uploading && !self.loading.ingesting,
+                |ui| {
+                    theme::card_frame().show(ui, |ui| {
+                        ui.set_max_width(640.0_f32.min(ui.available_width()));
+                        ui.heading("Dataset details");
+                        theme::labeled_text_field(ui, "Dataset name", &mut config.name, 44.0)
+                            .on_hover_text("Human-readable name stored in labello.dataset.toml.");
+                        show_issues(ui, &dataset_name_issues(&config.name));
+                    });
+                },
+            );
+        }
+
+        let issues = self
+            .datasets
+            .admin_config
+            .as_ref()
+            .map(|config| config_issues(config, &self.config.user_id))
+            .unwrap_or_default();
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("Validation summary");
+            if issues.is_empty() {
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Success,
+                    "Configuration is ready to save.",
+                );
+            } else {
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Error,
+                    format!("{} configuration error(s) need attention.", issues.len()),
+                );
+                show_issues(ui, &issues);
+            }
+        });
+    }
+
+    fn admin_images(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        ui.heading("Images");
+        ui.label(
+            RichText::new("Manage image roots, ingestion, uploads, and indexed image state.")
+                .color(theme::TEXT_MUTED),
+        );
+        let config_dirty = self.datasets.admin_config != self.datasets.admin_baseline;
+        let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
+        let busy = self.loading.admin
+            || self.loading.roles_user.is_some()
+            || self.loading.images
+            || self.loading.uploading
+            || self.loading.ingesting;
         let mut ingest = false;
         let mut upload_folder = false;
-        ui.add_space(8.0);
-        ui.heading("Dataset configuration");
-        ui.add_enabled_ui(
-            !admin_loading && !roles_saving && !uploading_now && !ingesting_now,
-            |ui| {
-            ui.label(
-                RichText::new(
-                    "Edits are staged here. Review the validation summary before saving them.",
-                )
-                .color(theme::MUTED),
-            );
-            theme::card_frame().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.heading("Dataset Details");
-                theme::labeled_text_field(ui, "Dataset name", &mut config.name, 44.0)
-                    .on_hover_text("Human-readable name stored in labello.dataset.toml.");
-                show_issues(ui, &dataset_name_issues(&config.name));
-            });
-
-            theme::card_frame().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.heading("Image Roots");
-                edit_string_list(
-                    ui,
-                    &mut config.image_roots,
-                    "Root path",
-                    "Add image root",
-                    "images",
-                );
-                ui.horizontal_wrapped(|ui| {
-                    if theme::primary_button(
+        if let Some(config) = self.datasets.admin_config.as_mut() {
+            ui.add_enabled_ui(!busy, |ui| {
+                theme::card_frame().show(ui, |ui| {
+                    ui.set_max_width(640.0_f32.min(ui.available_width()));
+                    ui.heading("Image roots and ingestion");
+                    edit_string_list(
                         ui,
+                        &mut config.image_roots,
+                        "Root path",
+                        "Add image root",
+                        "images",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if theme::primary_button(
+                            ui,
                             !config_dirty && !permissions_dirty,
                             egui::Button::new("Pick folder and upload"),
                         )
                         .on_hover_text("Open a browser folder picker, upload files to a new dataset-relative root, then ingest them.")
                         .clicked()
-                    {
-                        upload_folder = true;
+                        {
+                            upload_folder = true;
+                        }
+                        if theme::quiet_button(
+                            ui,
+                            !config_dirty && !permissions_dirty,
+                            egui::Button::new("Run ingest"),
+                        )
+                        .on_hover_text("Scan configured image roots and update the dataset image index.")
+                        .clicked()
+                        {
+                            ingest = true;
+                        }
+                    });
+                    if let Some(progress) = self.loading.upload_progress.as_ref() {
+                        ui.add(
+                            egui::ProgressBar::new(progress.fraction())
+                                .desired_width(ui.available_width().min(460.0))
+                                .text(progress.label()),
+                        );
+                        if progress.current_batch > 0 {
+                            ui.small(format!("Batch {}", progress.current_batch));
+                        }
                     }
-                    if uploading_now {
-                        ui.spinner();
+                    if let Some(error) = &self.admin_tools.upload_error {
+                        theme::inline_message(
+                            ui,
+                            theme::Intent::Error,
+                            format!("Folder upload failed: {error}"),
+                        );
                     }
+                    if config_dirty {
+                        ui.label(
+                            RichText::new("Save or discard root changes before uploading or ingesting.")
+                                .color(theme::WARNING),
+                        );
+                    }
+                    ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
+                    show_issues(ui, &image_root_issues(&config.image_roots));
                 });
-                if let Some(progress) = upload_progress.as_ref() {
-                    ui.add(
-                        egui::ProgressBar::new(progress.fraction())
-                            .desired_width(ui.available_width().min(460.0))
-                            .text(progress.label()),
-                    );
-                    if progress.current_batch > 0 {
-                        ui.small(format!("Batch {}", progress.current_batch));
-                    }
-                }
-                if config_dirty {
-                    ui.label(
-                        RichText::new("Save or discard root changes before uploading or ingesting.")
-                            .color(theme::AMBER),
-                    );
-                }
-                ui.small("Paths are relative to the dataset root and may be edited in labello.dataset.toml.");
-                show_issues(ui, &image_root_issues(&config.image_roots));
             });
-
-            edit_quick_workflows(ui, config);
-            edit_labels(ui, &mut config.label_classes, &mut config.tasks);
-            edit_tasks(
-                ui,
-                &mut config.tasks,
-                &config.label_classes,
-                &config.prelabel_configs,
-            );
-            edit_prelabels(ui, &mut config.prelabel_configs, &mut config.tasks);
-            edit_imbalance(ui, &mut config.imbalance);
-            let issues = config_issues(config, &current_user);
-            theme::card_frame().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.heading("Validation Summary");
-                if issues.is_empty() {
-                    theme::inline_message(
-                        ui,
-                        theme::Intent::Success,
-                        "Configuration is ready to save.",
-                    );
-                } else {
-                    ui.label(
-                        RichText::new(format!(
-                            "Fix {} configuration error(s) before saving:",
-                            issues.len()
-                        ))
-                        .color(theme::RED)
-                        .strong(),
-                    );
-                    show_issues(ui, &issues);
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if theme::primary_button(
-                    ui,
-                        !config_dirty && !permissions_dirty,
-                        egui::Button::new("Run Ingest"),
-                    )
-                    .on_hover_text("Scan configured image roots and update the dataset image index.")
-                    .clicked()
-                {
-                    ingest = true;
-                }
-                if ingesting_now {
-                    ui.spinner();
-                    ui.small("Ingest running...");
-                }
-            });
-            },
-        );
+        }
         if ingest {
             self.request_ingest();
         }
         if upload_folder {
             self.request_folder_upload();
         }
+        self.images_section(ui, layout);
+    }
+
+    fn admin_schema(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Schema");
+        ui.label(
+            RichText::new("Configure label classes, skeletons, and labeling workflows.")
+                .color(theme::TEXT_MUTED),
+        );
+        let enabled = !self.loading.admin
+            && self.loading.roles_user.is_none()
+            && !self.loading.uploading
+            && !self.loading.ingesting;
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(640.0));
+            if let Some(config) = self.datasets.admin_config.as_mut() {
+                ui.add_enabled_ui(enabled, |ui| {
+                    edit_quick_workflows(ui, config);
+                    edit_labels(ui, &mut config.label_classes, &mut config.tasks);
+                    edit_tasks(
+                        ui,
+                        &mut config.tasks,
+                        &config.label_classes,
+                        &config.prelabel_configs,
+                    );
+                });
+            }
+        });
+    }
+
+    fn admin_automation(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Automation");
+        ui.label(
+            RichText::new("Configure prelabels and assignment balancing.").color(theme::TEXT_MUTED),
+        );
+        let enabled = !self.loading.admin
+            && self.loading.roles_user.is_none()
+            && !self.loading.uploading
+            && !self.loading.ingesting;
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(640.0));
+            if let Some(config) = self.datasets.admin_config.as_mut() {
+                ui.add_enabled_ui(enabled, |ui| {
+                    edit_prelabels(ui, &mut config.prelabel_configs, &mut config.tasks);
+                    edit_imbalance(ui, &mut config.imbalance);
+                });
+            }
+        });
     }
 
     pub(crate) fn admin_status_bar(&mut self, ui: &mut egui::Ui) {
@@ -357,26 +574,35 @@ impl LabelloApp {
             + if permissions_dirty { 44.0 } else { 0.0 }
     }
 
-    fn people_section(&mut self, ui: &mut egui::Ui) {
+    fn people_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        ui.heading("People");
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                ui.heading("People");
                 ui.label(
                     RichText::new(format!("{} users", self.datasets.users.len()))
-                        .color(theme::BLUE),
+                        .color(theme::INFO),
                 );
             });
             ui.label(
                 RichText::new("Grant dataset roles to people who have signed in to this server.")
-                    .color(theme::MUTED),
+                    .color(theme::TEXT_MUTED),
             );
+            let search_label = ui.label("Search people");
+            ui.add_sized(
+                [ui.available_width().min(480.0), 44.0],
+                egui::TextEdit::singleline(&mut self.admin_tools.people_search)
+                    .hint_text("Name, login, or user ID"),
+            )
+            .labelled_by(search_label.id);
             if self.loading.admin && self.datasets.users.is_empty() {
                 ui.spinner();
                 return;
             }
+            let search = self.admin_tools.people_search.trim().to_lowercase();
             let current_user = self.config.user_id.clone();
-            let admin_loading = self.loading.admin;
+            let admin_loading =
+                self.loading.admin || self.loading.uploading || self.loading.ingesting;
             let baseline = self.datasets.users_baseline.clone();
             let admin_count = self
                 .datasets
@@ -386,53 +612,125 @@ impl LabelloApp {
                 .count();
             let saving = self.loading.roles_user.clone();
             let mut save_user = None;
-            for user in &mut self.datasets.users {
-                ui.add_space(4.0);
-                theme::inset_frame().show(ui, |ui| {
-                    let compact = ui.available_width() < 760.0;
-                    let save_clicked = if compact {
-                        ui.vertical(|ui| {
-                            user_identity(ui, user);
-                            ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
-                                user_role_controls(
-                                    ui,
-                                    user,
-                                    &baseline,
-                                    &current_user,
-                                    admin_count,
-                                    admin_loading,
-                                    saving.as_ref(),
-                                )
-                            })
-                            .inner
-                        })
-                        .inner
-                    } else {
-                        ui.horizontal_wrapped(|ui| {
+            let mut visible_users = 0;
+            if layout == LayoutMode::Wide {
+                egui::Grid::new("admin-people-grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([theme::SPACE_4, theme::SPACE_2])
+                    .show(ui, |ui| {
+                        for heading in ["Person", "Roles", "Status", "Action"] {
+                            ui.label(RichText::new(heading).strong().color(theme::TEXT_MUTED));
+                        }
+                        ui.end_row();
+                        for user in self
+                            .datasets
+                            .users
+                            .iter_mut()
+                            .filter(|user| user_matches_search(user, &search))
+                        {
+                            visible_users += 1;
                             ui.vertical(|ui| {
-                                ui.set_width(210.0);
+                                ui.set_width(180.0);
                                 user_identity(ui, user);
                             });
                             ui.horizontal_wrapped(|ui| {
-                                user_role_controls(
+                                ui.set_min_width(300.0);
+                                edit_user_roles(
                                     ui,
                                     user,
-                                    &baseline,
                                     &current_user,
                                     admin_count,
                                     admin_loading,
                                     saving.as_ref(),
-                                )
-                            })
-                            .inner
-                        })
-                        .inner
-                    };
-                    if save_clicked {
-                        save_user = Some(user.account.user_id.clone());
-                    }
-                });
+                                );
+                            });
+                            let dirty = user_permissions_dirty(user, &baseline);
+                            let this_saving = saving.as_ref() == Some(&user.account.user_id);
+                            ui.label(
+                                RichText::new(if this_saving {
+                                    "Saving"
+                                } else if dirty {
+                                    "Staged"
+                                } else {
+                                    "Saved"
+                                })
+                                .color(if dirty || this_saving {
+                                    theme::WARNING
+                                } else {
+                                    theme::SUCCESS
+                                }),
+                            );
+                            if save_permissions_button(
+                                ui,
+                                user,
+                                dirty,
+                                admin_loading,
+                                saving.as_ref(),
+                            ) {
+                                save_user = Some(user.account.user_id.clone());
+                            }
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                for user in self
+                    .datasets
+                    .users
+                    .iter_mut()
+                    .filter(|user| user_matches_search(user, &search))
+                {
+                    visible_users += 1;
+                    ui.add_space(theme::SPACE_1);
+                    theme::inset_frame().show(ui, |ui| {
+                        user_identity(ui, user);
+                        ui.add_space(theme::SPACE_1);
+                        ui.horizontal_wrapped(|ui| {
+                            edit_user_roles(
+                                ui,
+                                user,
+                                &current_user,
+                                admin_count,
+                                admin_loading,
+                                saving.as_ref(),
+                            );
+                        });
+                        let dirty = user_permissions_dirty(user, &baseline);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(if saving.as_ref() == Some(&user.account.user_id) {
+                                    "Saving"
+                                } else if dirty {
+                                    "Changes staged"
+                                } else {
+                                    "Permissions saved"
+                                })
+                                .color(if dirty {
+                                    theme::WARNING
+                                } else {
+                                    theme::TEXT_MUTED
+                                }),
+                            );
+                            if save_permissions_button(
+                                ui,
+                                user,
+                                dirty,
+                                admin_loading,
+                                saving.as_ref(),
+                            ) {
+                                save_user = Some(user.account.user_id.clone());
+                            }
+                        });
+                    });
+                }
+            }
+            if visible_users == 0 && !self.datasets.users.is_empty() {
+                theme::empty_state(
+                    ui,
+                    "No matching people",
+                    "Change the search to show more accounts.",
+                    None,
+                );
             }
             if self.datasets.users.is_empty() && !self.loading.admin {
                 theme::empty_state(
@@ -448,354 +746,370 @@ impl LabelloApp {
         });
     }
 
-    fn images_section(&mut self, ui: &mut egui::Ui) {
+    fn images_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        let controls_enabled = !self.loading.images
+            && !self.loading.admin
+            && !self.loading.uploading
+            && !self.loading.ingesting;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            egui::CollapsingHeader::new("Images")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Search the indexed images and inspect workflow state.")
-                            .color(theme::MUTED),
-                    );
-                    let compact_filters = ui.available_width() < 600.0;
-                    let search_label = ui.label("Search images");
-                    let search = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.admin_tools.image_search)
-                                .hint_text("File name or path")
-                                .desired_width(ui.available_width()),
+            ui.heading("Image explorer");
+            ui.label(
+                RichText::new("Search the indexed images and inspect workflow state.")
+                    .color(theme::TEXT_MUTED),
+            );
+            let compact_filters = ui.available_width() < 600.0;
+            let search_label = ui.label("Search images");
+            let search = ui
+                .add_sized(
+                    [ui.available_width(), 44.0],
+                    egui::TextEdit::singleline(&mut self.admin_tools.image_search)
+                        .hint_text("File name or path"),
+                )
+                .labelled_by(search_label.id);
+            if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                self.admin_tools.image_query.page = 1;
+                self.request_images();
+            }
+            let control_width = if compact_filters {
+                ui.available_width()
+            } else {
+                140.0
+            };
+            let mut show_filters = |ui: &mut egui::Ui| {
+                ui.vertical(|ui| {
+                    let label = ui.label("Status filter");
+                    egui::ComboBox::from_id_salt("image-explorer-status")
+                        .width(control_width)
+                        .selected_text(
+                            self.admin_tools
+                                .image_status
+                                .as_ref()
+                                .map(task_status_label)
+                                .unwrap_or("Any status"),
                         )
-                        .labelled_by(search_label.id);
-                    if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        self.admin_tools.image_query.page = 1;
-                        self.request_images();
-                    }
-                    let control_width = if compact_filters {
-                        ui.available_width()
-                    } else {
-                        140.0
-                    };
-                    let mut show_filters = |ui: &mut egui::Ui| {
-                        egui::ComboBox::from_id_salt("image-explorer-status")
-                            .width(control_width)
-                            .selected_text(
-                                self.admin_tools
-                                    .image_status
-                                    .as_ref()
-                                    .map(task_status_label)
-                                    .unwrap_or("Any status"),
-                            )
-                            .show_ui(ui, |ui| {
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.admin_tools.image_status,
+                                None,
+                                "Any status",
+                            );
+                            for status in task_statuses() {
+                                let label = task_status_label(&status);
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_status,
-                                    None,
-                                    "Any status",
+                                    Some(status),
+                                    label,
                                 );
-                                for status in task_statuses() {
-                                    let label = task_status_label(&status);
-                                    ui.selectable_value(
-                                        &mut self.admin_tools.image_status,
-                                        Some(status),
-                                        label,
-                                    );
-                                }
-                            });
+                            }
+                        })
+                        .response
+                        .labelled_by(label.id);
+                });
 
-                        let tasks = self
-                            .datasets
-                            .admin_config
-                            .as_ref()
-                            .map(|config| config.tasks.clone())
-                            .unwrap_or_default();
-                        egui::ComboBox::from_id_salt("image-explorer-task")
-                            .width(control_width)
-                            .selected_text(
-                                self.admin_tools
-                                    .image_task
-                                    .as_ref()
-                                    .and_then(|task_id| {
-                                        tasks
-                                            .iter()
-                                            .find(|task| &task.task_id == task_id)
-                                            .map(|task| task.name.as_str())
-                                    })
-                                    .unwrap_or("Any task"),
-                            )
-                            .show_ui(ui, |ui| {
+                let tasks = self
+                    .datasets
+                    .admin_config
+                    .as_ref()
+                    .map(|config| config.tasks.clone())
+                    .unwrap_or_default();
+                ui.vertical(|ui| {
+                    let label = ui.label("Workflow filter");
+                    egui::ComboBox::from_id_salt("image-explorer-task")
+                        .width(control_width)
+                        .selected_text(
+                            self.admin_tools
+                                .image_task
+                                .as_ref()
+                                .and_then(|task_id| {
+                                    tasks
+                                        .iter()
+                                        .find(|task| &task.task_id == task_id)
+                                        .map(|task| task.name.as_str())
+                                })
+                                .unwrap_or("Any task"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.admin_tools.image_task, None, "Any task");
+                            for task in &tasks {
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_task,
-                                    None,
-                                    "Any task",
+                                    Some(task.task_id.clone()),
+                                    &task.name,
                                 );
-                                for task in &tasks {
-                                    ui.selectable_value(
-                                        &mut self.admin_tools.image_task,
-                                        Some(task.task_id.clone()),
-                                        &task.name,
-                                    );
-                                }
-                            });
+                            }
+                        })
+                        .response
+                        .labelled_by(label.id);
+                });
 
-                        let classes = self
-                            .datasets
-                            .admin_config
-                            .as_ref()
-                            .map(|config| config.label_classes.clone())
-                            .unwrap_or_default();
-                        egui::ComboBox::from_id_salt("image-explorer-class")
-                            .width(control_width)
-                            .selected_text(
-                                self.admin_tools
-                                    .image_class
-                                    .as_ref()
-                                    .and_then(|class_id| {
-                                        classes
-                                            .iter()
-                                            .find(|class| &class.class_id == class_id)
-                                            .map(|class| class.name.as_str())
-                                    })
-                                    .unwrap_or("Any class"),
-                            )
-                            .show_ui(ui, |ui| {
+                let classes = self
+                    .datasets
+                    .admin_config
+                    .as_ref()
+                    .map(|config| config.label_classes.clone())
+                    .unwrap_or_default();
+                ui.vertical(|ui| {
+                    let label = ui.label("Class filter");
+                    egui::ComboBox::from_id_salt("image-explorer-class")
+                        .width(control_width)
+                        .selected_text(
+                            self.admin_tools
+                                .image_class
+                                .as_ref()
+                                .and_then(|class_id| {
+                                    classes
+                                        .iter()
+                                        .find(|class| &class.class_id == class_id)
+                                        .map(|class| class.name.as_str())
+                                })
+                                .unwrap_or("Any class"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.admin_tools.image_class,
+                                None,
+                                "Any class",
+                            );
+                            for class in &classes {
                                 ui.selectable_value(
                                     &mut self.admin_tools.image_class,
-                                    None,
-                                    "Any class",
+                                    Some(class.class_id.clone()),
+                                    &class.name,
                                 );
-                                for class in &classes {
-                                    ui.selectable_value(
-                                        &mut self.admin_tools.image_class,
-                                        Some(class.class_id.clone()),
-                                        &class.name,
-                                    );
-                                }
-                            });
-                        if theme::primary_button(
-                            ui,
-                            !self.loading.images,
-                            egui::Button::new("Apply filters"),
-                        )
-                        .clicked()
+                            }
+                        })
+                        .response
+                        .labelled_by(label.id);
+                });
+                if theme::primary_button(ui, controls_enabled, egui::Button::new("Apply filters"))
+                    .clicked()
+                {
+                    self.admin_tools.image_query.page = 1;
+                    self.request_images();
+                }
+                if theme::quiet_button(
+                    ui,
+                    controls_enabled,
+                    egui::Button::new(
+                        if self.admin_tools.images_error.is_some()
+                            && self.admin_tools.images.is_none()
                         {
-                            self.admin_tools.image_query.page = 1;
-                            self.request_images();
-                        }
-                        if theme::quiet_button(
-                            ui,
-                            !self.loading.images,
-                            egui::Button::new("Refresh images"),
-                        )
-                        .clicked()
-                        {
-                            self.request_images();
-                        }
-                        if self.loading.images {
-                            ui.spinner();
-                        }
-                    };
-                    if compact_filters {
-                        ui.vertical(&mut show_filters);
+                            "Retry image load"
+                        } else {
+                            "Refresh images"
+                        },
+                    ),
+                )
+                .clicked()
+                {
+                    self.request_images();
+                }
+                if self.loading.images {
+                    ui.spinner();
+                    ui.small(if self.admin_tools.images.is_some() {
+                        "Refreshing images..."
                     } else {
-                        ui.horizontal_wrapped(show_filters);
+                        "Loading images..."
+                    });
+                }
+            };
+            if compact_filters {
+                ui.vertical(&mut show_filters);
+            } else {
+                ui.horizontal_wrapped(show_filters);
+            }
+            if let Some(error) = &self.admin_tools.images_error {
+                theme::inline_message(
+                    ui,
+                    if self.admin_tools.images.is_some() {
+                        theme::Intent::Warning
+                    } else {
+                        theme::Intent::Error
+                    },
+                    if self.admin_tools.images.is_some() {
+                        format!("Showing saved image results. Refresh failed: {error}")
+                    } else {
+                        format!("Could not load images: {error}")
+                    },
+                );
+            }
+            if let Some(page) = self.admin_tools.images.clone() {
+                let previous = page.page > 1;
+                let next = page.page < page.total_pages;
+                let current_page = page.page;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} images | Page {} of {}",
+                            page.total_items,
+                            page.page,
+                            page.total_pages.max(1)
+                        ))
+                        .strong(),
+                    );
+                    if ui
+                        .add_enabled(
+                            previous && controls_enabled,
+                            egui::Button::new("Previous images"),
+                        )
+                        .clicked()
+                    {
+                        self.admin_tools.image_query.page = current_page.saturating_sub(1);
+                        self.request_images();
                     }
-                    if let Some(error) = &self.admin_tools.images_error {
-                        theme::inline_message(ui, theme::Intent::Error, error);
+                    if ui
+                        .add_enabled(next && controls_enabled, egui::Button::new("Next images"))
+                        .clicked()
+                    {
+                        self.admin_tools.image_query.page = current_page + 1;
+                        self.request_images();
                     }
-                    if let Some(page) = self.admin_tools.images.clone() {
-                        let previous = page.page > 1;
-                        let next = page.page < page.total_pages;
-                        let current_page = page.page;
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} images | Page {} of {}",
-                                    page.total_items,
-                                    page.page,
-                                    page.total_pages.max(1)
-                                ))
-                                .strong(),
-                            );
-                            if ui
-                                .add_enabled(
-                                    previous && !self.loading.images,
-                                    egui::Button::new("Previous images"),
-                                )
-                                .clicked()
-                            {
-                                self.admin_tools.image_query.page = current_page.saturating_sub(1);
-                                self.request_images();
-                            }
-                            if ui
-                                .add_enabled(
-                                    next && !self.loading.images,
-                                    egui::Button::new("Next images"),
-                                )
-                                .clicked()
-                            {
-                                self.admin_tools.image_query.page = current_page + 1;
-                                self.request_images();
-                            }
-                        });
-                        if page.items.is_empty() {
-                            theme::empty_state(
-                                ui,
-                                "No matching images",
-                                "Change the filters or ingest more images.",
-                                None,
-                            );
-                        }
-                        for item in &page.items {
-                            ui.add_space(4.0);
-                            let status_details = item
-                                .task_statuses
-                                .iter()
-                                .map(|(task, status)| {
-                                    format!("{task}: {}", task_status_label(status))
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let statuses = item.task_statuses.values().cloned().collect::<Vec<_>>();
-                            let classes = item
-                                .class_ids
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            theme::inset_frame().show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(RichText::new(&item.image.file_name).strong());
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} x {} | {}",
-                                            item.image.width,
-                                            item.image.height,
-                                            human_bytes(item.image.byte_size)
-                                        ))
-                                        .color(theme::BLUE),
-                                    );
-                                });
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&item.image.canonical_path)
-                                            .color(theme::MUTED),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(&item.image.canonical_path);
-                                let class_summary = if classes.is_empty() {
-                                    "No classes".to_string()
-                                } else {
-                                    format!("Classes: {classes}")
-                                };
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} | {class_summary}",
-                                        task_status_summary(&statuses)
-                                    ))
-                                    .color(theme::MUTED),
-                                )
-                                .on_hover_text(
-                                    if status_details.is_empty() {
-                                        "No workflow status".to_string()
-                                    } else {
-                                        status_details
-                                    },
-                                );
-                            });
-                        }
-                    } else if !self.loading.images && self.admin_tools.images_error.is_none() {
+                });
+                if page.items.is_empty() {
+                    if !self.loading.images {
                         theme::empty_state(
                             ui,
-                            "No image results",
-                            "Apply filters or refresh to load indexed images.",
+                            "No matching images",
+                            "Change the filters or ingest more images.",
                             None,
                         );
                     }
-                });
+                } else if layout == LayoutMode::Wide {
+                    admin_image_grid(ui, &page.items);
+                } else {
+                    for item in &page.items {
+                        ui.add_space(theme::SPACE_1);
+                        admin_image_card(ui, item);
+                    }
+                }
+            } else if !self.loading.images && self.admin_tools.images_error.is_none() {
+                theme::empty_state(
+                    ui,
+                    "No image results",
+                    "Apply filters or refresh to load indexed images.",
+                    None,
+                );
+            }
         });
     }
 
-    fn snapshots_section(&mut self, ui: &mut egui::Ui) {
+    fn snapshots_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
+        ui.heading("Backups");
+        ui.label(
+            RichText::new(
+                "Create and download native dataset snapshots. Image bytes are not included.",
+            )
+            .color(theme::TEXT_MUTED),
+        );
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            egui::CollapsingHeader::new("Backups / Snapshots")
-                .default_open(false)
-                .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Create and download native dataset snapshots. Image bytes are not included.")
-                        .color(theme::MUTED),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    if theme::primary_button(
-                        ui,
-                            !self.loading.creating_snapshot,
-                            egui::Button::new("Create snapshot"),
-                        )
-                        .clicked()
-                    {
-                        self.request_snapshot_create();
-                    }
-                    if theme::quiet_button(
-                        ui,
-                            !self.loading.snapshots,
-                            egui::Button::new("Refresh snapshots"),
-                        )
-                        .clicked()
-                    {
-                        self.request_snapshots();
-                    }
-                    if self.loading.creating_snapshot || self.loading.snapshots {
-                        ui.spinner();
-                    }
-                });
-                if let Some(error) = &self.admin_tools.snapshots_error {
-                    theme::inline_message(ui, theme::Intent::Error, error);
-                }
-                if self.admin_tools.snapshots.is_empty()
-                    && self.admin_tools.snapshots_loaded
-                    && !self.loading.snapshots
+            ui.horizontal_wrapped(|ui| {
+                if theme::primary_button(
+                    ui,
+                    !self.loading.creating_snapshot
+                        && !self.loading.snapshots
+                        && self.loading.snapshot_file.is_none(),
+                    egui::Button::new(if self.loading.creating_snapshot {
+                        "Creating snapshot..."
+                    } else {
+                        "Create snapshot"
+                    }),
+                )
+                .clicked()
                 {
-                    theme::empty_state(
-                        ui,
-                        "No snapshots yet",
-                        "Create a snapshot to preserve the current dataset state.",
-                        None,
+                    self.request_snapshot_create();
+                }
+                if theme::quiet_button(
+                    ui,
+                    !self.loading.snapshots && !self.loading.creating_snapshot,
+                    egui::Button::new(
+                        if self.admin_tools.snapshots_error.is_some()
+                            && !self.admin_tools.snapshots_loaded
+                        {
+                            "Retry backup load"
+                        } else {
+                            "Refresh backups"
+                        },
+                    ),
+                )
+                .clicked()
+                {
+                    self.request_snapshots();
+                }
+                if self.loading.snapshots {
+                    ui.spinner();
+                    ui.small(
+                        if self.admin_tools.snapshots_loaded
+                            || !self.admin_tools.snapshots.is_empty()
+                        {
+                            "Refreshing backups..."
+                        } else {
+                            "Loading backups..."
+                        },
                     );
                 }
-                let snapshots = self.admin_tools.snapshots.clone();
-                for snapshot in snapshots {
-                    ui.separator();
-                    ui.label(RichText::new(&snapshot.snapshot_id).strong());
-                    ui.small(format!(
-                        "{} | {} files | {} total",
-                        snapshot.created_at.format("%Y-%m-%d %H:%M UTC"),
-                        snapshot.files.len(),
-                        human_bytes(snapshot.total_bytes)
-                    ));
-                    for file in snapshot.files {
-                        let downloading = self.loading.snapshot_file.as_ref()
-                            == Some(&(snapshot.snapshot_id.clone(), file.path.clone()));
-                        ui.horizontal_wrapped(|ui| {
-                            ui.small(format!("{} ({})", file.path, human_bytes(file.byte_size)));
-                            if ui
-                                .add_enabled(
-                                    self.loading.snapshot_file.is_none(),
-                                    egui::Button::new(if downloading { "Downloading..." } else { "Download" }),
-                                )
-                                .clicked()
-                            {
-                                self.request_snapshot_download(
-                                    snapshot.snapshot_id.clone(),
-                                    file.path.clone(),
-                                );
-                            }
-                        });
-                    }
-                }
-                });
+            });
+
+            if let Some(error) = &self.admin_tools.snapshots_error {
+                theme::inline_message(
+                    ui,
+                    if self.admin_tools.snapshots_loaded || !self.admin_tools.snapshots.is_empty() {
+                        theme::Intent::Warning
+                    } else {
+                        theme::Intent::Error
+                    },
+                    if self.admin_tools.snapshots_loaded {
+                        format!("Showing the last loaded backups. Refresh failed: {error}")
+                    } else if !self.admin_tools.snapshots.is_empty() {
+                        format!("Showing newly created backups. Catalog refresh failed: {error}")
+                    } else {
+                        format!("Could not load backups: {error}")
+                    },
+                );
+            }
+            if let Some(error) = &self.admin_tools.snapshot_action_error {
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Error,
+                    format!("Backup action failed: {error}"),
+                );
+            }
+
+            if !self.admin_tools.snapshots_loaded
+                && !self.loading.snapshots
+                && self.admin_tools.snapshots_error.is_none()
+            {
+                theme::empty_state(
+                    ui,
+                    "Backups are not loaded",
+                    "Refresh to load the available dataset snapshots.",
+                    None,
+                );
+            } else if self.admin_tools.snapshots.is_empty()
+                && self.admin_tools.snapshots_loaded
+                && !self.loading.snapshots
+                && self.admin_tools.snapshots_error.is_none()
+            {
+                theme::empty_state(
+                    ui,
+                    "No snapshots yet",
+                    "Create a snapshot to preserve the current dataset state.",
+                    None,
+                );
+            }
+
+            let snapshots = self.admin_tools.snapshots.clone();
+            let download = if snapshots.is_empty() {
+                None
+            } else if layout == LayoutMode::Wide {
+                admin_snapshot_grid(ui, &snapshots, self.loading.snapshot_file.as_ref())
+            } else {
+                admin_snapshot_cards(ui, &snapshots, self.loading.snapshot_file.as_ref())
+            };
+            if let Some((snapshot_id, path)) = download {
+                self.request_snapshot_download(snapshot_id, path);
+            }
         });
     }
 
@@ -1030,15 +1344,30 @@ fn user_identity(ui: &mut egui::Ui, user: &DatasetUser) {
     ui.small(format!("ID: {}", user.account.user_id));
 }
 
-fn user_role_controls(
+fn user_matches_search(user: &DatasetUser, search: &str) -> bool {
+    search.is_empty()
+        || user.account.display_name.to_lowercase().contains(search)
+        || user
+            .account
+            .user_id
+            .as_str()
+            .to_lowercase()
+            .contains(search)
+        || user
+            .account
+            .github_login
+            .as_deref()
+            .is_some_and(|login| login.to_lowercase().contains(search))
+}
+
+fn edit_user_roles(
     ui: &mut egui::Ui,
     user: &mut DatasetUser,
-    baseline: &[DatasetUser],
     current_user: &UserId,
     admin_count: usize,
     admin_loading: bool,
     saving: Option<&UserId>,
-) -> bool {
+) {
     for (role, label) in [
         (DatasetRole::Annotator, "Annotator"),
         (DatasetRole::Reviewer, "Reviewer"),
@@ -1052,15 +1381,25 @@ fn user_role_controls(
                 && user.roles.contains(&role)
                 && (&user.account.user_id == current_user || admin_count == 1));
         let mut enabled = user.roles.contains(&role);
-        if ui
+        let response = ui
             .add_enabled(role_enabled, egui::Checkbox::new(&mut enabled, label))
             .on_disabled_hover_text(if &user.account.user_id == current_user {
                 "You cannot remove your own data admin role."
             } else {
                 "At least one data admin must remain."
-            })
-            .changed()
-        {
+            });
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                role_enabled,
+                enabled,
+                format!(
+                    "{label} role for {} ({})",
+                    user.account.display_name, user.account.user_id
+                ),
+            )
+        });
+        if response.changed() {
             if enabled {
                 user.roles.push(role);
                 user.roles.sort();
@@ -1070,21 +1409,44 @@ fn user_role_controls(
             }
         }
     }
-    let dirty = baseline
+}
+
+fn user_permissions_dirty(user: &DatasetUser, baseline: &[DatasetUser]) -> bool {
+    baseline
         .iter()
         .find(|existing| existing.account.user_id == user.account.user_id)
-        .is_none_or(|existing| existing.roles != user.roles);
+        .is_none_or(|existing| existing.roles != user.roles)
+}
+
+fn save_permissions_button(
+    ui: &mut egui::Ui,
+    user: &DatasetUser,
+    dirty: bool,
+    admin_loading: bool,
+    saving: Option<&UserId>,
+) -> bool {
     let this_saving = saving == Some(&user.account.user_id);
-    theme::primary_button(
+    let enabled = dirty && saving.is_none() && !admin_loading;
+    let response = theme::primary_button(
         ui,
-        dirty && saving.is_none() && !admin_loading,
+        enabled,
         egui::Button::new(if this_saving {
             "Saving..."
         } else {
             "Save permissions"
         }),
-    )
-    .clicked()
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled,
+            format!(
+                "Save permissions for {} ({})",
+                user.account.display_name, user.account.user_id
+            ),
+        )
+    });
+    response.clicked()
 }
 
 fn task_statuses() -> [TaskStatus; 6] {
@@ -1126,6 +1488,298 @@ fn task_status_summary(statuses: &[TaskStatus]) -> String {
     } else {
         summary
     }
+}
+
+fn image_classes(item: &ImageExplorerItem) -> String {
+    let classes = item
+        .class_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if classes.is_empty() {
+        "None".to_string()
+    } else {
+        classes
+    }
+}
+
+fn image_status_details(item: &ImageExplorerItem) -> String {
+    let details = item
+        .task_statuses
+        .iter()
+        .map(|(task, status)| format!("{task}: {}", task_status_label(status)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if details.is_empty() {
+        "No workflow status".to_string()
+    } else {
+        details
+    }
+}
+
+fn admin_image_card(ui: &mut egui::Ui, item: &ImageExplorerItem) {
+    let statuses = item.task_statuses.values().cloned().collect::<Vec<_>>();
+    theme::inset_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&item.image.file_name).strong());
+            ui.label(
+                RichText::new(format!(
+                    "{} x {} | {}",
+                    item.image.width,
+                    item.image.height,
+                    human_bytes(item.image.byte_size)
+                ))
+                .color(theme::INFO),
+            );
+        });
+        ui.add(
+            egui::Label::new(RichText::new(&item.image.canonical_path).color(theme::TEXT_MUTED))
+                .truncate(),
+        )
+        .on_hover_text(&item.image.canonical_path);
+        ui.label(
+            RichText::new(format!(
+                "{} | Classes: {}",
+                task_status_summary(&statuses),
+                image_classes(item)
+            ))
+            .color(theme::TEXT_MUTED),
+        )
+        .on_hover_text(image_status_details(item));
+    });
+}
+
+fn admin_image_grid(ui: &mut egui::Ui, items: &[ImageExplorerItem]) {
+    egui::ScrollArea::horizontal()
+        .id_salt("admin-image-grid-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("admin-image-grid")
+                .num_columns(5)
+                .striped(true)
+                .spacing([theme::SPACE_4, theme::SPACE_2])
+                .show(ui, |ui| {
+                    for heading in ["Image", "Dimensions", "Path", "Classes", "Workflow"] {
+                        ui.label(RichText::new(heading).strong().color(theme::TEXT_MUTED));
+                    }
+                    ui.end_row();
+                    for item in items {
+                        let statuses = item.task_statuses.values().cloned().collect::<Vec<_>>();
+                        ui.add_sized(
+                            [180.0, 44.0],
+                            egui::Label::new(RichText::new(&item.image.file_name).strong())
+                                .truncate(),
+                        )
+                        .on_hover_text(&item.image.file_name);
+                        ui.add_sized(
+                            [120.0, 44.0],
+                            egui::Label::new(format!(
+                                "{} x {} | {}",
+                                item.image.width,
+                                item.image.height,
+                                human_bytes(item.image.byte_size)
+                            )),
+                        );
+                        ui.add_sized(
+                            [240.0, 44.0],
+                            egui::Label::new(&item.image.canonical_path).truncate(),
+                        )
+                        .on_hover_text(&item.image.canonical_path);
+                        ui.add_sized(
+                            [130.0, 44.0],
+                            egui::Label::new(image_classes(item)).truncate(),
+                        );
+                        ui.add_sized(
+                            [170.0, 44.0],
+                            egui::Label::new(task_status_summary(&statuses)).truncate(),
+                        )
+                        .on_hover_text(image_status_details(item));
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn snapshot_expanded(ui: &egui::Ui, snapshot_id: &str) -> (egui::Id, bool) {
+    let id = egui::Id::new(("admin-snapshot-files", snapshot_id));
+    let expanded = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    (id, expanded)
+}
+
+fn set_snapshot_expanded(ui: &egui::Ui, id: egui::Id, expanded: bool) {
+    ui.ctx().data_mut(|data| data.insert_temp(id, expanded));
+}
+
+fn admin_snapshot_grid(
+    ui: &mut egui::Ui,
+    snapshots: &[DatasetSnapshot],
+    active_download: Option<&(String, String)>,
+) -> Option<(String, String)> {
+    let mut download = None;
+    egui::ScrollArea::horizontal()
+        .id_salt("admin-snapshot-grid-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("admin-snapshot-grid")
+                .num_columns(5)
+                .striped(true)
+                .spacing([theme::SPACE_4, theme::SPACE_2])
+                .show(ui, |ui| {
+                    for heading in ["Snapshot", "Created", "Files", "Size", "Details"] {
+                        ui.label(RichText::new(heading).strong().color(theme::TEXT_MUTED));
+                    }
+                    ui.end_row();
+                    for snapshot in snapshots {
+                        let (expanded_id, mut expanded) =
+                            snapshot_expanded(ui, &snapshot.snapshot_id);
+                        ui.add_sized(
+                            [200.0, 44.0],
+                            egui::Label::new(RichText::new(&snapshot.snapshot_id).strong())
+                                .truncate(),
+                        )
+                        .on_hover_text(&snapshot.snapshot_id);
+                        ui.add_sized(
+                            [180.0, 44.0],
+                            egui::Label::new(
+                                snapshot.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                            ),
+                        );
+                        ui.add_sized(
+                            [64.0, 44.0],
+                            egui::Label::new(snapshot.files.len().to_string()),
+                        );
+                        ui.add_sized(
+                            [100.0, 44.0],
+                            egui::Label::new(human_bytes(snapshot.total_bytes)),
+                        );
+                        let details_label = if expanded { "Hide files" } else { "Show files" };
+                        let details = ui.add_sized([110.0, 44.0], egui::Button::new(details_label));
+                        details.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("{details_label} for snapshot {}", snapshot.snapshot_id),
+                            )
+                        });
+                        if details.clicked() {
+                            expanded = !expanded;
+                            set_snapshot_expanded(ui, expanded_id, expanded);
+                        }
+                        ui.end_row();
+
+                        if expanded {
+                            for file in &snapshot.files {
+                                let downloading = active_download
+                                    == Some(&(snapshot.snapshot_id.clone(), file.path.clone()));
+                                ui.add_sized(
+                                    [200.0, 44.0],
+                                    egui::Label::new(&file.path).truncate(),
+                                )
+                                .on_hover_text(&file.path);
+                                ui.label("");
+                                ui.label("File");
+                                ui.label(human_bytes(file.byte_size));
+                                let download_enabled = active_download.is_none();
+                                let response = ui.add_enabled(
+                                    download_enabled,
+                                    egui::Button::new(if downloading {
+                                        "Downloading..."
+                                    } else {
+                                        "Download"
+                                    })
+                                    .min_size(egui::vec2(110.0, 44.0)),
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        download_enabled,
+                                        format!(
+                                            "Download {} from snapshot {}",
+                                            file.path, snapshot.snapshot_id
+                                        ),
+                                    )
+                                });
+                                if response.clicked() {
+                                    download =
+                                        Some((snapshot.snapshot_id.clone(), file.path.clone()));
+                                }
+                                ui.end_row();
+                            }
+                        }
+                    }
+                });
+        });
+    download
+}
+
+fn admin_snapshot_cards(
+    ui: &mut egui::Ui,
+    snapshots: &[DatasetSnapshot],
+    active_download: Option<&(String, String)>,
+) -> Option<(String, String)> {
+    let mut download = None;
+    for snapshot in snapshots {
+        ui.add_space(theme::SPACE_1);
+        theme::inset_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(&snapshot.snapshot_id).strong());
+            ui.small(format!(
+                "{} | {} files | {} total",
+                snapshot.created_at.format("%Y-%m-%d %H:%M UTC"),
+                snapshot.files.len(),
+                human_bytes(snapshot.total_bytes)
+            ));
+            let (expanded_id, mut expanded) = snapshot_expanded(ui, &snapshot.snapshot_id);
+            let details_label = if expanded { "Hide files" } else { "Show files" };
+            let details = theme::quiet_button(ui, true, egui::Button::new(details_label));
+            details.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("{details_label} for snapshot {}", snapshot.snapshot_id),
+                )
+            });
+            if details.clicked() {
+                expanded = !expanded;
+                set_snapshot_expanded(ui, expanded_id, expanded);
+            }
+            if expanded {
+                for file in &snapshot.files {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} ({})", file.path, human_bytes(file.byte_size)));
+                        let downloading = active_download
+                            == Some(&(snapshot.snapshot_id.clone(), file.path.clone()));
+                        let download_enabled = active_download.is_none();
+                        let response = ui.add_enabled(
+                            download_enabled,
+                            egui::Button::new(if downloading {
+                                "Downloading..."
+                            } else {
+                                "Download"
+                            })
+                            .min_size(egui::vec2(110.0, 44.0)),
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                download_enabled,
+                                format!(
+                                    "Download {} from snapshot {}",
+                                    file.path, snapshot.snapshot_id
+                                ),
+                            )
+                        });
+                        if response.clicked() {
+                            download = Some((snapshot.snapshot_id.clone(), file.path.clone()));
+                        }
+                    });
+                }
+            }
+        });
+    }
+    download
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -1337,10 +1991,14 @@ fn edit_string_list(
     let mut remove = None;
     for (index, value) in values.iter_mut().enumerate() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(label);
-            ui.text_edit_singleline(value)
-                .on_hover_text("Dataset-relative path under the dataset root.");
-            if destructive_button(ui, "Remove") {
+            let field_label = ui.label(label);
+            ui.add_sized(
+                [ui.available_width().min(360.0), 44.0],
+                egui::TextEdit::singleline(value),
+            )
+            .labelled_by(field_label.id)
+            .on_hover_text("Dataset-relative path under the dataset root.");
+            if destructive_button(ui, "Remove", format!("{label} '{value}'")) {
                 remove = Some(index);
             }
         });
@@ -1365,7 +2023,7 @@ fn edit_labels(ui: &mut egui::Ui, labels: &mut Vec<LabelClass>, tasks: &mut [Tas
             RichText::new("Classes define the objects annotators can label.").color(theme::MUTED),
         );
         let mut remove = None;
-        let wide = ui.available_width() >= 820.0;
+        let wide = ui.available_width() >= 600.0;
         for (index, label) in labels.iter_mut().enumerate() {
             ui.add_space(4.0);
             theme::inset_frame().show(ui, |ui| {
@@ -1409,7 +2067,11 @@ fn edit_class_card(
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(format!("Class {}", index + 1)).strong());
         ui.label(RichText::new(&label.name).color(theme::BLUE));
-        remove = destructive_button(ui, "Remove class");
+        remove = destructive_button(
+            ui,
+            "Remove class",
+            format!("class '{}' ({})", label.name, label.class_id),
+        );
     });
 
     let (id_changed, description_changed) = if wide {
@@ -1684,7 +2346,11 @@ fn edit_workflow_basics(
         }
     }
     edit_review(ui, index, task);
-    destructive_button(ui, "Remove workflow")
+    destructive_button(
+        ui,
+        "Remove workflow",
+        format!("workflow '{}' ({})", task.name, task.task_id),
+    )
 }
 
 fn edit_workflow_instructions(ui: &mut egui::Ui, task: &mut TaskDefinition) {
@@ -1757,7 +2423,11 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
                     ui.text_edit_singleline(&mut keypoint.name)
                         .on_hover_text("Unique keypoint name used by skeleton edges.");
                     ui.checkbox(&mut keypoint.required, "Required");
-                    if destructive_button(ui, "Remove keypoint") {
+                    if destructive_button(
+                        ui,
+                        "Remove keypoint",
+                        format!("keypoint '{}'", keypoint.name),
+                    ) {
                         remove_keypoint = Some(keypoint_index);
                     }
                 });
@@ -1818,7 +2488,11 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
                             ui.selectable_value(&mut edge.to, name.clone(), name);
                         }
                     });
-                    if destructive_button(ui, "Remove edge") {
+                    if destructive_button(
+                        ui,
+                        "Remove edge",
+                        format!("edge '{} -> {}'", edge.from, edge.to),
+                    ) {
                         remove_edge = Some(edge_index);
                     }
                 });
@@ -2020,7 +2694,11 @@ fn edit_prelabels(
                     &mut config.available_to_annotators,
                     "Available to annotators",
                 );
-                if destructive_button(ui, "Remove prelabel") {
+                if destructive_button(
+                    ui,
+                    "Remove prelabel",
+                    format!("prelabel '{}' ({})", config.name, config.config_id),
+                ) {
                     remove = Some(index);
                 }
             });
@@ -2514,10 +3192,40 @@ fn is_hex_color(value: &str) -> bool {
             .all(|character| character.is_ascii_hexdigit())
 }
 
-fn destructive_button(ui: &mut egui::Ui, label: &str) -> bool {
-    theme::danger_button(ui, true, egui::Button::new(format!("Double-click {label}")))
-        .on_hover_text("Double-click to confirm this removal.")
-        .double_clicked()
+fn destructive_button(ui: &mut egui::Ui, label: &str, item: String) -> bool {
+    let response = theme::danger_button(ui, true, egui::Button::new(label));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{label}: {item}"))
+    });
+    let modal_id = response.id.with("confirmation");
+    if response.clicked() {
+        ui.ctx().data_mut(|data| data.insert_temp(modal_id, true));
+    }
+    if !ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(modal_id).unwrap_or(false))
+    {
+        return false;
+    }
+
+    let mut confirmed = false;
+    egui::Modal::new(modal_id).show(ui.ctx(), |ui| {
+        ui.set_max_width((ui.ctx().content_rect().width() - 48.0).clamp(240.0, 480.0));
+        ui.heading("Confirm removal");
+        ui.label(format!(
+            "Remove {item} from the staged dataset configuration? Related staged references will also be removed when required."
+        ));
+        ui.horizontal_wrapped(|ui| {
+            if theme::danger_button(ui, true, egui::Button::new("Confirm removal")).clicked() {
+                confirmed = true;
+                ui.ctx().data_mut(|data| data.remove::<bool>(modal_id));
+            }
+            if theme::quiet_button(ui, true, egui::Button::new("Cancel")).clicked() {
+                ui.ctx().data_mut(|data| data.remove::<bool>(modal_id));
+            }
+        });
+    });
+    confirmed
 }
 
 fn show_issues(ui: &mut egui::Ui, issues: &[String]) {

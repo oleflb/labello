@@ -199,9 +199,7 @@ impl LabelloApp {
                             self.view = AppView::Admin;
                             self.runtime.error = None;
                             self.request_admin_draft_load();
-                            if self.admin_tools.images.is_none() {
-                                self.request_images();
-                            }
+                            self.request_images();
                             if !self.admin_tools.snapshots_loaded {
                                 self.request_snapshots();
                             }
@@ -257,10 +255,10 @@ impl LabelloApp {
                 }
                 UiMessage::SnapshotsLoaded { result, .. } => {
                     self.loading.snapshots = false;
-                    self.admin_tools.snapshots_loaded = true;
                     match result {
                         Ok(snapshots) => {
                             self.admin_tools.snapshots = snapshots;
+                            self.admin_tools.snapshots_loaded = true;
                             self.admin_tools.snapshots_error = None;
                         }
                         Err(error) => self.admin_tools.snapshots_error = Some(error),
@@ -274,20 +272,20 @@ impl LabelloApp {
                                 .snapshots
                                 .retain(|existing| existing.snapshot_id != snapshot.snapshot_id);
                             self.admin_tools.snapshots.insert(0, snapshot);
-                            self.admin_tools.snapshots_loaded = true;
-                            self.admin_tools.snapshots_error = None;
+                            self.admin_tools.snapshot_action_error = None;
+                            self.request_snapshots();
                         }
-                        Err(error) => self.admin_tools.snapshots_error = Some(error),
+                        Err(error) => self.admin_tools.snapshot_action_error = Some(error),
                     }
                 }
                 UiMessage::SnapshotDownloaded { result, .. } => {
                     self.loading.snapshot_file = None;
                     match result {
                         Ok(file) => match crate::admin::download_snapshot_file(file) {
-                            Ok(()) => self.admin_tools.snapshots_error = None,
-                            Err(error) => self.admin_tools.snapshots_error = Some(error),
+                            Ok(()) => self.admin_tools.snapshot_action_error = None,
+                            Err(error) => self.admin_tools.snapshot_action_error = Some(error),
                         },
-                        Err(error) => self.admin_tools.snapshots_error = Some(error),
+                        Err(error) => self.admin_tools.snapshot_action_error = Some(error),
                     }
                 }
                 UiMessage::ImageLoaded {
@@ -643,23 +641,33 @@ impl LabelloApp {
                     self.invalidate_async_ownership();
                     self.runtime.error = Some(error);
                 }
-                UiMessage::FolderUploadProgress(progress) => {
+                UiMessage::FolderUploadProgress { request, progress } => {
+                    if !self.request_is_current(&request, true) {
+                        continue;
+                    }
                     self.loading.uploading = true;
                     self.loading.upload_progress = Some(progress);
                     self.runtime.error = None;
                     ctx.request_repaint();
                 }
-                UiMessage::FolderUploadFinished(result) => {
+                UiMessage::FolderUploadFinished { request, result } => {
+                    if !self.request_is_current(&request, true) {
+                        continue;
+                    }
                     self.loading.uploading = false;
                     self.loading.upload_progress = None;
                     match result {
                         Ok(message) => {
                             self.runtime.notice = Some(message);
                             self.runtime.error = None;
+                            self.admin_tools.upload_error = None;
                             self.request_admin_dataset();
                             self.request_dataset_list();
                         }
-                        Err(error) => self.runtime.error = Some(error),
+                        Err(error) => {
+                            self.admin_tools.upload_error = Some(error.clone());
+                            self.runtime.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::PersistenceFinished(completion) => {
@@ -1076,10 +1084,22 @@ impl LabelloApp {
             }
             UiCommand::SaveAdmin { .. } => self.loading.admin = false,
             UiCommand::SaveDatasetRoles { .. } => self.loading.roles_user = None,
-            UiCommand::LoadImages { .. } => self.loading.images = false,
-            UiCommand::LoadSnapshots { .. } => self.loading.snapshots = false,
-            UiCommand::CreateSnapshot { .. } => self.loading.creating_snapshot = false,
-            UiCommand::DownloadSnapshot { .. } => self.loading.snapshot_file = None,
+            UiCommand::LoadImages { .. } => {
+                self.loading.images = false;
+                self.admin_tools.images_error = Some(error.to_string());
+            }
+            UiCommand::LoadSnapshots { .. } => {
+                self.loading.snapshots = false;
+                self.admin_tools.snapshots_error = Some(error.to_string());
+            }
+            UiCommand::CreateSnapshot { .. } => {
+                self.loading.creating_snapshot = false;
+                self.admin_tools.snapshot_action_error = Some(error.to_string());
+            }
+            UiCommand::DownloadSnapshot { .. } => {
+                self.loading.snapshot_file = None;
+                self.admin_tools.snapshot_action_error = Some(error.to_string());
+            }
             UiCommand::Ingest { .. } => {
                 self.loading.ingesting = false;
                 self.loading.ingest_polling = false;
@@ -1158,6 +1178,15 @@ impl LabelloApp {
         request: &RequestIdentity,
         requires_current_dataset: bool,
     ) -> bool {
+        self.request_is_current(request, requires_current_dataset)
+            && self.runtime.active_requests.remove(&request.request_id)
+    }
+
+    fn request_is_current(
+        &self,
+        request: &RequestIdentity,
+        requires_current_dataset: bool,
+    ) -> bool {
         request.auth_epoch == self.auth_epoch
             && request.workspace_epoch == self.workspace_epoch
             && (!requires_current_dataset
@@ -1165,7 +1194,6 @@ impl LabelloApp {
                     .dataset_id
                     .as_ref()
                     .is_none_or(|dataset_id| dataset_id == &self.config.dataset_id))
-            && self.runtime.active_requests.remove(&request.request_id)
     }
 
     fn invalidate_async_ownership(&mut self) {
@@ -1185,6 +1213,8 @@ impl LabelloApp {
         self.loading.ingest_polling = false;
         self.loading.ingest_job_id = None;
         self.loading.last_ingest_poll = None;
+        self.loading.uploading = false;
+        self.loading.upload_progress = None;
         self.loading.stats = false;
         self.loading.keybindings = false;
         self.loading.images = false;
@@ -1299,7 +1329,12 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_images(&mut self) {
-        if self.loading.images || self.runtime.api.is_none() {
+        if self.loading.images
+            || self.loading.admin
+            || self.loading.uploading
+            || self.loading.ingesting
+            || self.runtime.api.is_none()
+        {
             return;
         }
         self.admin_tools.image_query.search = non_empty(&self.admin_tools.image_search);
@@ -1317,7 +1352,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_snapshots(&mut self) {
-        if self.loading.snapshots || self.runtime.api.is_none() {
+        if self.loading.snapshots || self.loading.creating_snapshot || self.runtime.api.is_none() {
             return;
         }
         self.loading.snapshots = true;
@@ -1330,11 +1365,11 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_snapshot_create(&mut self) {
-        if self.loading.creating_snapshot || self.runtime.api.is_none() {
+        if self.loading.creating_snapshot || self.loading.snapshots || self.runtime.api.is_none() {
             return;
         }
         self.loading.creating_snapshot = true;
-        self.admin_tools.snapshots_error = None;
+        self.admin_tools.snapshot_action_error = None;
         let request = self.request_identity(Some(self.config.dataset_id.clone()));
         self.queue_command(UiCommand::CreateSnapshot {
             request,
@@ -1347,7 +1382,7 @@ impl LabelloApp {
             return;
         }
         self.loading.snapshot_file = Some((snapshot_id.clone(), path.clone()));
-        self.admin_tools.snapshots_error = None;
+        self.admin_tools.snapshot_action_error = None;
         let request = self.request_identity(Some(self.config.dataset_id.clone()));
         self.queue_command(UiCommand::DownloadSnapshot {
             request,
@@ -1468,6 +1503,7 @@ impl LabelloApp {
     pub(crate) fn admin_mutation_blocked(&self) -> bool {
         self.loading.ingesting
             || self.loading.uploading
+            || self.loading.images
             || self.loading.admin
             || self.loading.roles_user.is_some()
             || self.datasets.admin_config != self.datasets.admin_baseline
@@ -1590,6 +1626,9 @@ impl LabelloApp {
                     ));
                     self.runtime.error = None;
                     self.request_dataset_list();
+                    if self.view == AppView::Admin {
+                        self.request_admin_dataset();
+                    }
                     if self.work_view() && self.current.is_none() {
                         self.request_next_image();
                     }

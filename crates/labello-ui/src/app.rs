@@ -261,9 +261,15 @@ pub(crate) enum UiMessage {
         error: String,
     },
     #[allow(dead_code)]
-    FolderUploadProgress(FolderUploadProgress),
+    FolderUploadProgress {
+        request: RequestIdentity,
+        progress: FolderUploadProgress,
+    },
     #[allow(dead_code)]
-    FolderUploadFinished(Result<String, String>),
+    FolderUploadFinished {
+        request: RequestIdentity,
+        result: Result<String, String>,
+    },
 }
 
 pub(crate) enum UiCommand {
@@ -485,8 +491,8 @@ impl UiMessage {
             | Self::KeybindingsSaved { request, .. }
             | Self::RequestFailed { request, .. } => Some(request),
             Self::PersistenceFinished(_)
-            | Self::FolderUploadProgress(_)
-            | Self::FolderUploadFinished(_) => None,
+            | Self::FolderUploadProgress { .. }
+            | Self::FolderUploadFinished { .. } => None,
         }
     }
 }
@@ -603,9 +609,23 @@ pub(crate) struct LoadingState {
     pub snapshot_file: Option<(String, String)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AdminSection {
+    #[default]
+    Overview,
+    People,
+    Images,
+    Schema,
+    Automation,
+    Backups,
+}
+
 pub(crate) struct AdminToolsState {
     pub dataset_id: Option<DatasetId>,
+    pub section: AdminSection,
     pub load_error: Option<String>,
+    pub upload_error: Option<String>,
+    pub people_search: String,
     pub image_query: ImageExplorerQuery,
     pub image_search: String,
     pub image_task: Option<TaskId>,
@@ -616,13 +636,17 @@ pub(crate) struct AdminToolsState {
     pub snapshots: Vec<DatasetSnapshot>,
     pub snapshots_loaded: bool,
     pub snapshots_error: Option<String>,
+    pub snapshot_action_error: Option<String>,
 }
 
 impl Default for AdminToolsState {
     fn default() -> Self {
         Self {
             dataset_id: None,
+            section: AdminSection::default(),
             load_error: None,
+            upload_error: None,
+            people_search: String::new(),
             image_query: ImageExplorerQuery {
                 page: 1,
                 page_size: 25,
@@ -637,6 +661,7 @@ impl Default for AdminToolsState {
             snapshots: Vec::new(),
             snapshots_loaded: false,
             snapshots_error: None,
+            snapshot_action_error: None,
         }
     }
 }
