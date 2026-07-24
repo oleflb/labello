@@ -613,6 +613,14 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
             .next()
             .is_some()
     );
+    let reviewer_role_id = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::CheckBox,
+            "Reviewer role for Reviewer Person (reviewer)",
+        )
+        .accesskit_node()
+        .locate()
+        .0;
     let reviewer = harness
         .state_mut()
         .datasets
@@ -622,6 +630,15 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
         .unwrap();
     reviewer.roles.push(DatasetRole::Reviewer);
     harness.step();
+    let staged_reviewer_role_id = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::CheckBox,
+            "Reviewer role for Reviewer Person (reviewer)",
+        )
+        .accesskit_node()
+        .locate()
+        .0;
+    assert_eq!(staged_reviewer_role_id, reviewer_role_id);
     assert!(
         harness
             .query_by_label("Unsaved permission changes")

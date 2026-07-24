@@ -2370,11 +2370,24 @@ impl eframe::App for LabelloApp {
                         ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
                     }
                 });
-        } else if self.view == AppView::Admin && self.admin_changes_dirty() {
+        } else if self.view == AppView::Admin {
+            let changes_dirty = self.admin_changes_dirty();
             egui::Panel::bottom("admin_save_status")
-                .exact_size(self.admin_status_height(layout))
-                .frame(theme::top_bar_frame())
-                .show(ui, |ui| self.admin_status_bar(ui));
+                .exact_size(if changes_dirty {
+                    self.admin_status_height(layout)
+                } else {
+                    0.0
+                })
+                .frame(if changes_dirty {
+                    theme::top_bar_frame()
+                } else {
+                    egui::Frame::NONE
+                })
+                .show(ui, |ui| {
+                    if changes_dirty {
+                        self.admin_status_bar(ui);
+                    }
+                });
         }
         if self.work_view() && layout == LayoutMode::Wide {
             egui::Panel::left("task_panel")
