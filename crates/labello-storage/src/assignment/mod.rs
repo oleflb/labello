@@ -7,6 +7,9 @@ use labello_domain::{
 
 use crate::{DatasetRepository, StorageError, StorageResult};
 
+mod claim;
+mod review;
+
 /// Assignments are renewed by claim retries and successful assignment-backed
 /// writes, so a separate heartbeat endpoint is not required.
 pub const DEFAULT_ASSIGNMENT_LEASE_DURATION: std::time::Duration =
@@ -20,228 +23,6 @@ pub struct AssignmentContext<'a> {
 }
 
 impl DatasetRepository {
-    /// Return an exact still-active assignment without renewing it. Browser
-    /// restoration uses this before loading image state so the validation base
-    /// sequence is not changed by the reclaim itself.
-    pub async fn reclaim_assignment(
-        &self,
-        user_id: &UserId,
-        assignment_id: &AssignmentId,
-        task_id: &TaskId,
-        kind: AssignmentKind,
-    ) -> StorageResult<Option<Assignment>> {
-        let metadata = self.load_dataset().await?;
-        let required_role = match kind {
-            AssignmentKind::Annotation => DatasetRole::Annotator,
-            AssignmentKind::Review => DatasetRole::Reviewer,
-            AssignmentKind::Adjudication => DatasetRole::Adjudicator,
-        };
-        require_role(
-            &metadata.role_assignments,
-            &metadata.dataset_id,
-            user_id,
-            required_role,
-        )?;
-        let task = metadata
-            .task(task_id)
-            .ok_or_else(|| StorageError::Unauthorized(format!("task {task_id} does not exist")))?;
-        if !task.enabled {
-            return Ok(None);
-        }
-        for image_id in metadata.images.keys() {
-            let state = self.load_image_state(image_id).await?;
-            if !state
-                .assignments
-                .iter()
-                .any(|assignment| assignment.assignment_id == *assignment_id)
-            {
-                continue;
-            }
-            return Ok(exact_active_assignment(
-                &state.assignments,
-                assignment_id,
-                image_id,
-                task_id,
-                user_id,
-                &kind,
-                labello_domain::now(),
-            )
-            .ok()
-            .cloned());
-        }
-        Ok(None)
-    }
-
-    pub async fn assign_next_image(
-        &self,
-        user_id: &UserId,
-        task_id: &TaskId,
-        kind: AssignmentKind,
-    ) -> StorageResult<Option<Assignment>> {
-        self.assign_next_image_excluding(user_id, task_id, kind, &[])
-            .await
-    }
-
-    pub async fn assign_next_image_excluding(
-        &self,
-        user_id: &UserId,
-        task_id: &TaskId,
-        kind: AssignmentKind,
-        excluded_image_ids: &[ImageId],
-    ) -> StorageResult<Option<Assignment>> {
-        let metadata = self.load_dataset().await?;
-        let required_role = match kind {
-            AssignmentKind::Annotation => DatasetRole::Annotator,
-            AssignmentKind::Review => DatasetRole::Reviewer,
-            AssignmentKind::Adjudication => DatasetRole::Adjudicator,
-        };
-        require_role(
-            &metadata.role_assignments,
-            &metadata.dataset_id,
-            user_id,
-            required_role.clone(),
-        )?;
-        let task = metadata
-            .task(task_id)
-            .ok_or_else(|| StorageError::Unauthorized(format!("task {task_id} does not exist")))?;
-        if !task.enabled {
-            return Ok(None);
-        }
-        if task.review.workflow == ReviewWorkflow::IndependentAgreement {
-            return Err(StorageError::InvalidAssignment(format!(
-                "independent agreement workflow is not implemented for task {task_id}"
-            )));
-        }
-        if task.class_ids.len() != 1 {
-            return Err(StorageError::InvalidAssignment(format!(
-                "enabled task {task_id} must have exactly one class"
-            )));
-        }
-        if kind == AssignmentKind::Review && task.review.workflow == ReviewWorkflow::None {
-            return Ok(None);
-        }
-        if metadata
-            .imbalance
-            .as_ref()
-            .is_some_and(|config| config.enforce)
-            && self.task_is_overrepresented(task_id).await?
-        {
-            return Ok(None);
-        }
-
-        for image_id in metadata.images.keys() {
-            if excluded_image_ids.contains(image_id) {
-                continue;
-            }
-            let lock = self.image_lock(image_id);
-            let _guard = lock.lock().await;
-            let state = self.load_image_state(image_id).await?;
-            let now = labello_domain::now();
-            let actor = Actor {
-                user_id: user_id.clone(),
-                role: required_role.clone(),
-            };
-            let mut payloads = expired_assignment_payloads(&state.assignments, task_id, &kind, now);
-            let mut status = state
-                .task_states
-                .get(task_id)
-                .map(|state| state.status.clone())
-                .unwrap_or(TaskStatus::Pending);
-            if kind == AssignmentKind::Annotation
-                && status == TaskStatus::InProgress
-                && payloads.iter().any(|payload| {
-                    matches!(
-                        payload,
-                        EventPayload::AssignmentUpdated { assignment }
-                            if assignment.kind == AssignmentKind::Annotation
-                    )
-                })
-                && !has_active_unexpired_assignment(&state.assignments, task_id, &kind, now)
-            {
-                status = TaskStatus::Pending;
-                payloads.push(EventPayload::TaskStateChanged {
-                    task_state: TaskState {
-                        task_id: task_id.clone(),
-                        status: TaskStatus::Pending,
-                        outcome: None,
-                        assigned_to: None,
-                        completed_by: None,
-                        completed_at: None,
-                        updated_at: now,
-                    },
-                });
-            }
-            if kind == AssignmentKind::Review {
-                let reviews = self.current_task_reviews(image_id, task_id).await?;
-                if has_task_review_by_user(&reviews, task_id, user_id)
-                    || task_approval_count(&reviews, task_id) >= task.review.required_reviews
-                {
-                    if !payloads.is_empty() {
-                        self.append_payloads_unlocked(image_id, &actor, payloads)
-                            .await?;
-                    }
-                    continue;
-                }
-            }
-            if let Some(assignment) =
-                active_assignment_for_user(&state.assignments, task_id, user_id, &kind, now)
-            {
-                let mut assignment = assignment.clone();
-                renew_assignment(&mut assignment, now);
-                payloads.push(EventPayload::AssignmentUpdated {
-                    assignment: assignment.clone(),
-                });
-                self.append_payloads_unlocked(image_id, &actor, payloads)
-                    .await?;
-                return Ok(Some(assignment));
-            }
-            if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind, now) {
-                if !payloads.is_empty() {
-                    self.append_payloads_unlocked(image_id, &actor, payloads)
-                        .await?;
-                }
-                continue;
-            }
-            if !status_matches_kind(&status, &kind) {
-                if !payloads.is_empty() {
-                    self.append_payloads_unlocked(image_id, &actor, payloads)
-                        .await?;
-                }
-                continue;
-            }
-            let assignment = Assignment {
-                assignment_id: AssignmentId::generate(),
-                image_id: image_id.clone(),
-                task_id: task.task_id.clone(),
-                assigned_to: user_id.clone(),
-                kind: kind.clone(),
-                status: AssignmentStatus::Active,
-                expires_at: Some(lease_expiration(now)),
-                created_at: now,
-                updated_at: now,
-            };
-            payloads.push(EventPayload::AssignmentUpdated {
-                assignment: assignment.clone(),
-            });
-            if kind == AssignmentKind::Annotation && status == TaskStatus::Pending {
-                let task_state = TaskState {
-                    task_id: task_id.clone(),
-                    status: TaskStatus::InProgress,
-                    outcome: None,
-                    assigned_to: Some(user_id.clone()),
-                    completed_by: None,
-                    completed_at: None,
-                    updated_at: now,
-                };
-                payloads.push(EventPayload::TaskStateChanged { task_state });
-            }
-            self.append_payloads_unlocked(image_id, &actor, payloads)
-                .await?;
-            return Ok(Some(assignment));
-        }
-        Ok(None)
-    }
-
     pub async fn release_assignment(
         &self,
         user_id: &UserId,
@@ -534,410 +315,6 @@ impl DatasetRepository {
         Ok(assignment)
     }
 
-    pub async fn current_task_reviews(
-        &self,
-        image_id: &ImageId,
-        task_id: &TaskId,
-    ) -> StorageResult<Vec<ReviewRecord>> {
-        let events = self.load_events(image_id).await?;
-        Ok(current_task_reviews_from_events(&events, task_id))
-    }
-
-    pub async fn record_review_for_assignment(
-        &self,
-        user_id: &UserId,
-        assignment_context: AssignmentContext<'_>,
-        review: ReviewRecord,
-    ) -> StorageResult<labello_domain::ImageState> {
-        let AssignmentContext {
-            assignment_id,
-            image_id,
-            task_id,
-            kind,
-        } = assignment_context;
-        if kind != AssignmentKind::Review {
-            return Err(StorageError::InvalidAssignment(
-                "reviews require a review assignment".to_string(),
-            ));
-        }
-        if review.reviewer_user_id != *user_id {
-            return Err(StorageError::Unauthorized(
-                "cannot record reviews for another user".to_string(),
-            ));
-        }
-        let metadata = self.load_dataset().await?;
-        require_role(
-            &metadata.role_assignments,
-            &metadata.dataset_id,
-            user_id,
-            DatasetRole::Reviewer,
-        )?;
-        ensure_assignment_target_exists(&metadata, image_id, task_id)?;
-        let task = metadata.task(task_id).ok_or_else(|| {
-            StorageError::InvalidAssignment(format!("task {task_id} does not exist"))
-        })?;
-        if task.review.workflow != ReviewWorkflow::Approval {
-            return Err(StorageError::InvalidAssignment(format!(
-                "approval reviews are not enabled for task {task_id}"
-            )));
-        }
-        let lock = self.image_lock(image_id);
-        let _guard = lock.lock().await;
-        let state = self.load_image_state(image_id).await?;
-        let now = labello_domain::now();
-        let mut assignment = exact_active_assignment(
-            &state.assignments,
-            assignment_id,
-            image_id,
-            task_id,
-            user_id,
-            &AssignmentKind::Review,
-            now,
-        )?
-        .clone();
-        if state
-            .task_states
-            .get(task_id)
-            .map(|task_state| &task_state.status)
-            != Some(&TaskStatus::Submitted)
-        {
-            return Err(StorageError::AssignmentConflict(format!(
-                "task {task_id} is no longer eligible for review"
-            )));
-        }
-
-        let complete = match &review.target {
-            ReviewTarget::Image {
-                image_id: reviewed_image_id,
-            } => {
-                if reviewed_image_id != image_id {
-                    return Err(StorageError::InvalidAssignment(
-                        "review target image does not match assignment image".to_string(),
-                    ));
-                }
-                false
-            }
-            ReviewTarget::Task {
-                task_id: reviewed_task_id,
-            } => {
-                if reviewed_task_id != task_id {
-                    return Err(StorageError::InvalidAssignment(
-                        "review target task does not match assignment task".to_string(),
-                    ));
-                }
-                true
-            }
-            ReviewTarget::AnnotationVersion {
-                annotation_id,
-                version,
-            } => {
-                let annotation = state
-                    .annotations
-                    .get(annotation_id)
-                    .and_then(|versions| {
-                        versions
-                            .iter()
-                            .find(|candidate| candidate.version == *version)
-                    })
-                    .ok_or_else(|| {
-                        StorageError::InvalidAssignment(format!(
-                            "annotation {annotation_id} version {version} does not exist"
-                        ))
-                    })?;
-                if annotation.task_id != *task_id {
-                    return Err(StorageError::InvalidAssignment(
-                        "review target task does not match assignment task".to_string(),
-                    ));
-                }
-                false
-            }
-        };
-
-        let mut payloads = vec![EventPayload::ReviewRecorded {
-            review: review.clone(),
-        }];
-        if complete {
-            let events = self.load_events(image_id).await?;
-            let current_reviews = current_task_reviews_from_events(&events, task_id);
-            if has_task_review_by_user(&current_reviews, task_id, user_id) {
-                return Err(StorageError::AssignmentConflict(format!(
-                    "user {user_id} already reviewed task {task_id} in this round"
-                )));
-            }
-            let approval_count = task_approval_count(&current_reviews, task_id)
-                + u32::from(review.decision == ReviewDecision::Approved);
-            let status = match review.decision {
-                ReviewDecision::Approved if approval_count >= task.review.required_reviews => {
-                    TaskStatus::Completed
-                }
-                ReviewDecision::Approved => TaskStatus::Submitted,
-                ReviewDecision::Rejected => TaskStatus::NeedsCorrection,
-            };
-            if status != TaskStatus::Submitted {
-                payloads.push(EventPayload::TaskStateChanged {
-                    task_state: TaskState {
-                        task_id: task_id.clone(),
-                        outcome: (review.decision == ReviewDecision::Approved)
-                            .then_some(TaskOutcome::Approved),
-                        status,
-                        assigned_to: None,
-                        completed_by: Some(user_id.clone()),
-                        completed_at: Some(now),
-                        updated_at: now,
-                    },
-                });
-            }
-            assignment.status = AssignmentStatus::Completed;
-            assignment.updated_at = now;
-        } else {
-            renew_assignment(&mut assignment, now);
-        }
-        payloads.push(EventPayload::AssignmentUpdated { assignment });
-        let (_, state) = self
-            .append_payloads_with_state_unlocked(
-                image_id,
-                &Actor {
-                    user_id: user_id.clone(),
-                    role: DatasetRole::Reviewer,
-                },
-                payloads,
-            )
-            .await?;
-        Ok(state)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn correct_review_annotation(
-        &self,
-        user_id: &UserId,
-        assignment_context: AssignmentContext<'_>,
-        correction_id: &CorrectionId,
-        annotation_id: &AnnotationId,
-        expected_version: u32,
-        geometry: AnnotationGeometry,
-        reason: Option<String>,
-    ) -> StorageResult<EventLogEntry> {
-        let AssignmentContext {
-            assignment_id,
-            image_id,
-            task_id,
-            kind,
-        } = assignment_context;
-        if kind != AssignmentKind::Review {
-            return Err(StorageError::InvalidCorrection(
-                "a reviewer correction requires a review assignment".to_string(),
-            ));
-        }
-        let metadata = self.load_dataset().await?;
-        require_role(
-            &metadata.role_assignments,
-            &metadata.dataset_id,
-            user_id,
-            DatasetRole::Reviewer,
-        )?;
-        ensure_assignment_target_exists(&metadata, image_id, task_id)?;
-        let task = metadata.task(task_id).ok_or_else(|| {
-            StorageError::InvalidCorrection(format!("task {task_id} does not exist"))
-        })?;
-        let image = metadata.images.get(image_id).ok_or_else(|| {
-            StorageError::InvalidCorrection(format!("image {image_id} does not exist"))
-        })?;
-
-        let lock = self.image_lock(image_id);
-        let _guard = lock.lock().await;
-        let state = self.load_image_state(image_id).await?;
-
-        if let Some(existing) = self.load_events(image_id).await?.into_iter().find(|event| {
-            matches!(
-                &event.payload,
-                EventPayload::ReviewerCorrectionRecorded { correction, .. }
-                    if &correction.correction_id == correction_id
-            )
-        }) {
-            let matches_request = matches!(
-                &existing.payload,
-                EventPayload::ReviewerCorrectionRecorded {
-                    correction,
-                    annotation,
-                    ..
-                } if correction.assignment_id == *assignment_id
-                    && correction.annotation_id == *annotation_id
-                    && correction.previous_version == expected_version
-                    && correction.task_id == *task_id
-                    && correction.reviewer_user_id == *user_id
-                    && correction.reason == reason
-                    && annotation.geometry == geometry
-            );
-            return if matches_request {
-                Ok(existing)
-            } else {
-                Err(StorageError::AssignmentConflict(format!(
-                    "correction {correction_id} was already used for a different request"
-                )))
-            };
-        }
-
-        if task.review.workflow != ReviewWorkflow::Approval {
-            return Err(StorageError::InvalidCorrection(
-                "reviewer corrections require the approval workflow".to_string(),
-            ));
-        }
-        if !task.review.allow_reviewer_corrections {
-            return Err(StorageError::InvalidCorrection(
-                "reviewer corrections are disabled for this task".to_string(),
-            ));
-        }
-
-        let now = labello_domain::now();
-        let current_assignment = exact_active_assignment(
-            &state.assignments,
-            assignment_id,
-            image_id,
-            task_id,
-            user_id,
-            &AssignmentKind::Review,
-            now,
-        )?;
-        if state
-            .task_states
-            .get(task_id)
-            .map(|task_state| &task_state.status)
-            != Some(&TaskStatus::Submitted)
-        {
-            return Err(StorageError::AssignmentConflict(format!(
-                "task {task_id} is no longer eligible for review correction"
-            )));
-        }
-        let current = state.current_annotation(annotation_id).ok_or_else(|| {
-            StorageError::InvalidCorrection(format!("annotation {annotation_id} does not exist"))
-        })?;
-        if current.task_id != *task_id {
-            return Err(StorageError::InvalidCorrection(
-                "annotation task does not match the review assignment".to_string(),
-            ));
-        }
-        if current.deleted {
-            return Err(StorageError::InvalidCorrection(format!(
-                "annotation {annotation_id} is not active"
-            )));
-        }
-        if current.version != expected_version {
-            return Err(StorageError::AssignmentConflict(format!(
-                "annotation {annotation_id} is at version {}, expected {expected_version}",
-                current.version
-            )));
-        }
-        if current.geometry == geometry {
-            return Err(StorageError::InvalidCorrection(
-                "corrected geometry must differ from the active annotation".to_string(),
-            ));
-        }
-        if !matches!(
-            (&current.annotation_type, &geometry),
-            (
-                labello_domain::AnnotationType::BoundingBox,
-                AnnotationGeometry::BoundingBox(_)
-            ) | (
-                labello_domain::AnnotationType::Skeleton,
-                AnnotationGeometry::Skeleton(_)
-            )
-        ) {
-            return Err(StorageError::InvalidCorrection(
-                "corrected geometry type does not match the active annotation".to_string(),
-            ));
-        }
-
-        let annotation = labello_domain::AnnotationVersion {
-            annotation_id: current.annotation_id.clone(),
-            version: current.version + 1,
-            task_id: current.task_id.clone(),
-            class_id: current.class_id.clone(),
-            annotation_type: current.annotation_type.clone(),
-            source: AnnotationSource::ReviewerCorrection {
-                correction_id: correction_id.clone(),
-            },
-            geometry,
-            author_user_id: user_id.clone(),
-            created_at: current.created_at,
-            updated_at: now,
-            deleted: false,
-        };
-        annotation
-            .validate_for_task(task, image.dimensions())
-            .map_err(|error| StorageError::InvalidCorrection(error.to_string()))?;
-
-        let correction = ReviewerCorrectionRecord {
-            correction_id: correction_id.clone(),
-            assignment_id: assignment_id.clone(),
-            annotation_id: annotation_id.clone(),
-            previous_version: expected_version,
-            corrected_version: annotation.version,
-            task_id: task_id.clone(),
-            reviewer_user_id: user_id.clone(),
-            timestamp: now,
-            reason: reason.clone(),
-        };
-        let review = ReviewRecord {
-            review_id: ReviewId::generate(),
-            target: ReviewTarget::AnnotationVersion {
-                annotation_id: annotation_id.clone(),
-                version: expected_version,
-            },
-            reviewer_user_id: user_id.clone(),
-            decision: ReviewDecision::Rejected,
-            timestamp: now,
-            comment: reason,
-        };
-        let task_state = TaskState {
-            task_id: task_id.clone(),
-            status: TaskStatus::Completed,
-            outcome: Some(TaskOutcome::ReviewerCorrected),
-            assigned_to: None,
-            completed_by: Some(user_id.clone()),
-            completed_at: Some(now),
-            updated_at: now,
-        };
-        let mut assignments = state
-            .assignments
-            .iter()
-            .filter(|assignment| {
-                assignment.task_id == *task_id
-                    && assignment.kind == AssignmentKind::Review
-                    && assignment.status == AssignmentStatus::Active
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for assignment in &mut assignments {
-            assignment.status = if assignment.assignment_id == current_assignment.assignment_id {
-                AssignmentStatus::Completed
-            } else {
-                AssignmentStatus::Cancelled
-            };
-            assignment.updated_at = now;
-        }
-
-        let payload = EventPayload::ReviewerCorrectionRecorded {
-            correction,
-            annotation: Box::new(annotation),
-            review,
-            task_state,
-            assignments,
-        };
-        Ok(self
-            .append_payloads_unlocked(
-                image_id,
-                &Actor {
-                    user_id: user_id.clone(),
-                    role: DatasetRole::Reviewer,
-                },
-                vec![payload],
-            )
-            .await?
-            .into_iter()
-            .next()
-            .expect("one reviewer correction event was appended"))
-    }
-
     pub async fn append_for_assignment(
         &self,
         user_id: &UserId,
@@ -1156,68 +533,6 @@ impl DatasetRepository {
             .await?;
         Ok((events, assignment))
     }
-
-    async fn task_is_overrepresented(&self, selected_task_id: &TaskId) -> StorageResult<bool> {
-        let metadata = self.load_dataset().await?;
-        let Some(config) = metadata.imbalance.as_ref() else {
-            return Ok(false);
-        };
-        let stats = self.dataset_stats().await?;
-        let selected = stats
-            .per_task
-            .get(selected_task_id)
-            .map(|task| task.completed)
-            .unwrap_or_default();
-        let min_other = metadata
-            .tasks
-            .iter()
-            .filter(|task| &task.task_id != selected_task_id)
-            .map(|task| {
-                stats
-                    .per_task
-                    .get(&task.task_id)
-                    .map(|stats| stats.completed)
-                    .unwrap_or_default()
-            })
-            .min()
-            .unwrap_or(0);
-        if min_other == 0 {
-            Ok(selected > 0 && config.max_ratio <= 1.0)
-        } else {
-            Ok((selected as f32 / min_other as f32) > config.max_ratio)
-        }
-    }
-}
-
-fn current_task_reviews_from_events(
-    events: &[EventLogEntry],
-    task_id: &TaskId,
-) -> Vec<ReviewRecord> {
-    let Some(round_start) = events.iter().rposition(|event| {
-        matches!(
-            &event.payload,
-            EventPayload::TaskStateChanged { task_state }
-                if task_state.task_id == *task_id
-                    && task_state.status == TaskStatus::Submitted
-        )
-    }) else {
-        return Vec::new();
-    };
-    events
-        .iter()
-        .skip(round_start + 1)
-        .filter_map(|event| match &event.payload {
-            EventPayload::ReviewRecorded { review }
-                if matches!(
-                    &review.target,
-                    ReviewTarget::Task { task_id: reviewed } if reviewed == task_id
-                ) =>
-            {
-                Some(review.clone())
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 fn annotation_status_before_completion(
@@ -1390,51 +705,6 @@ fn exact_active_assignment<'a>(
     Ok(assignment)
 }
 
-fn active_assignment_for_user<'a>(
-    assignments: &'a [Assignment],
-    task_id: &TaskId,
-    user_id: &UserId,
-    kind: &AssignmentKind,
-    now: labello_domain::Timestamp,
-) -> Option<&'a Assignment> {
-    assignments.iter().find(|assignment| {
-        &assignment.task_id == task_id
-            && &assignment.kind == kind
-            && assignment.status == AssignmentStatus::Active
-            && &assignment.assigned_to == user_id
-            && !assignment_is_expired(assignment, now)
-    })
-}
-
-fn status_matches_kind(status: &TaskStatus, kind: &AssignmentKind) -> bool {
-    match kind {
-        AssignmentKind::Annotation => {
-            matches!(status, TaskStatus::Pending | TaskStatus::NeedsCorrection)
-        }
-        AssignmentKind::Review => matches!(status, TaskStatus::Submitted),
-        AssignmentKind::Adjudication => matches!(status, TaskStatus::AdjudicationRequired),
-    }
-}
-
-fn has_conflicting_assignment(
-    assignments: &[Assignment],
-    task_id: &TaskId,
-    user_id: &UserId,
-    kind: &AssignmentKind,
-    now: labello_domain::Timestamp,
-) -> bool {
-    if *kind == AssignmentKind::Review {
-        return false;
-    }
-    assignments.iter().any(|assignment| {
-        &assignment.task_id == task_id
-            && &assignment.kind == kind
-            && assignment.status == AssignmentStatus::Active
-            && &assignment.assigned_to != user_id
-            && !assignment_is_expired(assignment, now)
-    })
-}
-
 fn lease_expiration(now: labello_domain::Timestamp) -> labello_domain::Timestamp {
     now + DEFAULT_ASSIGNMENT_LEASE_DURATION
 }
@@ -1449,70 +719,6 @@ fn assignment_is_expired(assignment: &Assignment, now: labello_domain::Timestamp
 fn renew_assignment(assignment: &mut Assignment, now: labello_domain::Timestamp) {
     assignment.updated_at = now;
     assignment.expires_at = Some(lease_expiration(now));
-}
-
-fn has_active_unexpired_assignment(
-    assignments: &[Assignment],
-    task_id: &TaskId,
-    kind: &AssignmentKind,
-    now: labello_domain::Timestamp,
-) -> bool {
-    assignments.iter().any(|assignment| {
-        assignment.task_id == *task_id
-            && assignment.kind == *kind
-            && assignment.status == AssignmentStatus::Active
-            && !assignment_is_expired(assignment, now)
-    })
-}
-
-fn expired_assignment_payloads(
-    assignments: &[Assignment],
-    task_id: &TaskId,
-    kind: &AssignmentKind,
-    now: labello_domain::Timestamp,
-) -> Vec<EventPayload> {
-    assignments
-        .iter()
-        .filter(|assignment| {
-            assignment.task_id == *task_id
-                && assignment.kind == *kind
-                && assignment.status == AssignmentStatus::Active
-                && assignment_is_expired(assignment, now)
-        })
-        .map(|assignment| {
-            let mut assignment = assignment.clone();
-            assignment.status = AssignmentStatus::Cancelled;
-            assignment.updated_at = now;
-            EventPayload::AssignmentUpdated { assignment }
-        })
-        .collect()
-}
-
-fn has_task_review_by_user(reviews: &[ReviewRecord], task_id: &TaskId, user_id: &UserId) -> bool {
-    reviews.iter().any(|review| {
-        review.reviewer_user_id == *user_id
-            && matches!(
-                &review.target,
-                ReviewTarget::Task {
-                    task_id: reviewed_task_id
-                } if reviewed_task_id == task_id
-            )
-    })
-}
-
-fn task_approval_count(reviews: &[ReviewRecord], task_id: &TaskId) -> u32 {
-    reviews
-        .iter()
-        .filter_map(|review| match (&review.target, &review.decision) {
-            (ReviewTarget::Task { task_id: reviewed }, ReviewDecision::Approved)
-                if reviewed == task_id =>
-            {
-                Some(&review.reviewer_user_id)
-            }
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .len() as u32
 }
 
 #[allow(dead_code)]
@@ -1531,7 +737,67 @@ mod tests {
         TaskDefinition, TutorialContent, now,
     };
 
+    use super::review::{current_task_reviews_from_events, task_approval_count};
     use super::*;
+
+    #[test]
+    fn current_reviews_begin_after_the_latest_submission() {
+        let image_id = ImageId::from("img_1");
+        let task_id = TaskId::from("bounding_box:person");
+        let reviewer = UserId::from("reviewer");
+        let timestamp = now();
+        let task_state = |status| EventPayload::TaskStateChanged {
+            task_state: TaskState {
+                task_id: task_id.clone(),
+                status,
+                outcome: None,
+                assigned_to: None,
+                completed_by: None,
+                completed_at: None,
+                updated_at: timestamp,
+            },
+        };
+        let review = |review_id: &str| ReviewRecord {
+            review_id: ReviewId::from(review_id),
+            target: ReviewTarget::Task {
+                task_id: task_id.clone(),
+            },
+            reviewer_user_id: reviewer.clone(),
+            decision: ReviewDecision::Approved,
+            timestamp,
+            comment: None,
+        };
+        let payloads = [
+            task_state(TaskStatus::Submitted),
+            EventPayload::ReviewRecorded {
+                review: review("old_review"),
+            },
+            task_state(TaskStatus::NeedsCorrection),
+            task_state(TaskStatus::Submitted),
+            EventPayload::ReviewRecorded {
+                review: review("current_review"),
+            },
+        ];
+        let events = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                EventLogEntry::new(
+                    index as u64 + 1,
+                    image_id.clone(),
+                    reviewer.clone(),
+                    DatasetRole::Reviewer,
+                    timestamp,
+                    payload,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            current_task_reviews_from_events(&events, &task_id),
+            vec![review("current_review")]
+        );
+    }
 
     #[tokio::test]
     async fn retries_return_same_users_active_assignment() {

@@ -49,3 +49,6 @@ pub type Timestamp = chrono::DateTime<chrono::Utc>;
 pub fn now() -> Timestamp {
     chrono::Utc::now()
 }
+
+#[cfg(test)]
+mod v2_contract_tests;

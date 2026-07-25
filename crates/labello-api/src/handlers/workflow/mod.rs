@@ -22,7 +22,12 @@ use crate::{
     error::{ApiError, ApiResult},
 };
 
-use super::{required_role_for_payload, validate_payload};
+mod event_policy;
+
+use event_policy::{
+    required_role_for_payload, validate_admin_repair_payload,
+    validate_annotation_assignment_payload, validate_assignment_request, validate_payload,
+};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct PreviewQuery {
@@ -406,15 +411,7 @@ pub(crate) async fn append_admin_repair_event(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    if matches!(
-        request.payload,
-        EventPayload::AssignmentUpdated { .. } | EventPayload::ReviewerCorrectionRecorded { .. }
-    ) {
-        return Err(ApiError::BadRequest(
-            "assignment and reviewer correction state is managed by workflow endpoints".to_string(),
-        ));
-    }
-    validate_payload(&metadata, &image_id, &request.payload)?;
+    validate_admin_repair_payload(&metadata, &image_id, &request.payload)?;
     Ok(Json(
         repo.append_payload(
             &image_id,
@@ -426,57 +423,6 @@ pub(crate) async fn append_admin_repair_event(
         )
         .await?,
     ))
-}
-
-fn validate_assignment_request(
-    assignment: &AssignmentActionRequest,
-    image_id: &ImageId,
-    kind: AssignmentKind,
-) -> ApiResult<()> {
-    if &assignment.image_id != image_id {
-        return Err(ApiError::BadRequest(
-            "assignment imageId does not match path image".to_string(),
-        ));
-    }
-    if assignment.kind != kind {
-        return Err(ApiError::BadRequest(format!(
-            "assignment kind must be {kind:?}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_annotation_assignment_payload(
-    image_state: &labello_domain::ImageState,
-    task_id: &labello_domain::TaskId,
-    payload: &EventPayload,
-) -> ApiResult<()> {
-    let payload_task_id = match payload {
-        EventPayload::AnnotationVersionCreated { annotation, .. } => &annotation.task_id,
-        EventPayload::AnnotationDeleted { annotation_id, .. } => {
-            &image_state
-                .current_annotation(annotation_id)
-                .ok_or_else(|| ApiError::BadRequest(format!("unknown annotation {annotation_id}")))?
-                .task_id
-        }
-        EventPayload::TaskStateChanged { .. } => {
-            return Err(ApiError::BadRequest(
-                "complete annotation assignments through the assignment completion endpoint"
-                    .to_string(),
-            ));
-        }
-        _ => {
-            return Err(ApiError::BadRequest(
-                "annotation assignments only accept annotation mutations".to_string(),
-            ));
-        }
-    };
-    if payload_task_id != task_id {
-        return Err(ApiError::BadRequest(
-            "payload task does not match assignment task".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 pub(crate) async fn rebuild_image(

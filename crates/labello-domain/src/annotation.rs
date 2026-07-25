@@ -6,6 +6,8 @@ use crate::{
     DomainResult, ImageDimensions, PrelabelConfigId, TaskDefinition, TaskId, Timestamp, UserId,
 };
 
+pub use crate::task::{TaskOutcome, TaskState, TaskStatus};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum AnnotationSource {
@@ -104,52 +106,6 @@ impl AnnotationVersion {
                 task_id: task.task_id.to_string(),
                 annotation_type: self.annotation_type.to_string(),
             }),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
-    Pending,
-    InProgress,
-    Submitted,
-    Completed,
-    NeedsCorrection,
-    AdjudicationRequired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskOutcome {
-    AnnotationCompleted,
-    Approved,
-    ReviewerCorrected,
-    Adjudicated,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskState {
-    pub task_id: TaskId,
-    pub status: TaskStatus,
-    pub outcome: Option<TaskOutcome>,
-    pub assigned_to: Option<UserId>,
-    pub completed_by: Option<UserId>,
-    pub completed_at: Option<Timestamp>,
-    pub updated_at: Timestamp,
-}
-
-impl TaskState {
-    pub fn new(task_id: TaskId, timestamp: Timestamp) -> Self {
-        Self {
-            task_id,
-            status: TaskStatus::Pending,
-            outcome: None,
-            assigned_to: None,
-            completed_by: None,
-            completed_at: None,
-            updated_at: timestamp,
         }
     }
 }

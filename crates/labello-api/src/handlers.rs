@@ -3,19 +3,18 @@ use std::{collections::BTreeSet, time::Duration};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, MatchedPath, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
 use labello_client::{
-    AuthOptions, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
-    IngestJobStatus, SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    AuthOptions, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery,
+    SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 use labello_domain::{
-    Actor, AnnotationSource, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment,
-    EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, PrelabelConfig, ReviewWorkflow,
-    TaskDefinition, TaskStatus,
+    Actor, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment, ImageExplorerItem,
+    ImageExplorerPage, PrelabelConfig, ReviewWorkflow, TaskDefinition, TaskStatus,
 };
 use tower::ServiceBuilder;
 use tower_http::{
@@ -34,10 +33,9 @@ use crate::{
     error::{ApiError, ApiResult},
 };
 
+mod ingest;
 mod oauth_routes;
 mod workflow;
-
-const MAX_INGEST_REPORT_DETAILS: usize = 100;
 
 pub fn router(state: ApiState) -> Router {
     let browser_origins = state.browser_origins().to_vec();
@@ -118,13 +116,22 @@ pub fn router(state: ApiState) -> Router {
             "/datasets/{dataset_id}/admin",
             get(get_admin_dataset).put(update_dataset_config),
         )
-        .route("/datasets/{dataset_id}/ingest", post(ingest_dataset))
-        .route("/datasets/{dataset_id}/ingest-jobs", post(start_ingest_job))
+        .route(
+            "/datasets/{dataset_id}/ingest",
+            post(ingest::ingest_dataset),
+        )
+        .route(
+            "/datasets/{dataset_id}/ingest-jobs",
+            post(ingest::start_ingest_job),
+        )
         .route(
             "/datasets/{dataset_id}/ingest-jobs/{job_id}",
-            get(get_ingest_job),
+            get(ingest::get_ingest_job),
         )
-        .route("/datasets/{dataset_id}/uploads", post(upload_images))
+        .route(
+            "/datasets/{dataset_id}/uploads",
+            post(ingest::upload_images),
+        )
         .route(
             "/datasets/{dataset_id}/snapshots",
             get(list_snapshots).post(create_snapshot),
@@ -643,227 +650,6 @@ async fn update_dataset_config(
     Ok(Json(config_response(metadata)))
 }
 
-async fn ingest_dataset(
-    State(state): State<ApiState>,
-    Path(dataset_id): Path<DatasetId>,
-    headers: HeaderMap,
-) -> ApiResult<Json<labello_client::IngestReport>> {
-    let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id)?;
-    let metadata = repo.load_dataset_config().await?;
-    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    tracing::info!(
-        event = "ingest.started",
-        dataset_id = %dataset_id,
-        actor_user_id = %actor.user_id,
-        mode = "synchronous",
-        "dataset ingest started"
-    );
-    let started = std::time::Instant::now();
-    let report = storage_ingest_to_client(repo.ingest_images().await?);
-    tracing::info!(
-        event = "ingest.completed",
-        dataset_id = %dataset_id,
-        mode = "synchronous",
-        latency_ms = started.elapsed().as_millis() as u64,
-        discovered_files = report.discovered_files,
-        new_images = report.new_images,
-        duplicate_files = report.duplicate_files.len(),
-        unreadable_files = report.unreadable_files.len(),
-        "dataset ingest completed"
-    );
-    Ok(Json(report))
-}
-
-async fn start_ingest_job(
-    State(state): State<ApiState>,
-    Path(dataset_id): Path<DatasetId>,
-    headers: HeaderMap,
-) -> ApiResult<Json<IngestJob>> {
-    let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id)?;
-    let metadata = repo.load_dataset_config().await?;
-    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    let job = IngestJob {
-        job_id: uuid::Uuid::new_v4().to_string(),
-        dataset_id: dataset_id.clone(),
-        status: IngestJobStatus::Running,
-        report: None,
-        error: None,
-    };
-    state.put_ingest_job(job.clone()).await;
-    tracing::info!(
-        event = "ingest.started",
-        dataset_id = %dataset_id,
-        job_id = %job.job_id,
-        actor_user_id = %actor.user_id,
-        mode = "background",
-        "dataset ingest started"
-    );
-
-    let state_for_job = state.clone();
-    let job_for_task = job.clone();
-    let repo_for_job = repo.clone();
-    let started = std::time::Instant::now();
-    let ingest_task = tokio::spawn(async move { repo_for_job.ingest_images().await });
-    tokio::spawn(async move {
-        let mut finished = job_for_task;
-        match ingest_task.await {
-            Ok(Ok(report)) => {
-                finished.status = IngestJobStatus::Completed;
-                let report = storage_ingest_to_client(report);
-                tracing::info!(
-                    event = "ingest.completed",
-                    dataset_id = %finished.dataset_id,
-                    job_id = %finished.job_id,
-                    mode = "background",
-                    latency_ms = started.elapsed().as_millis() as u64,
-                    discovered_files = report.discovered_files,
-                    new_images = report.new_images,
-                    duplicate_files = report.duplicate_files.len(),
-                    unreadable_files = report.unreadable_files.len(),
-                    "dataset ingest completed"
-                );
-                finished.report = Some(report);
-            }
-            Ok(Err(error)) => {
-                finished.status = IngestJobStatus::Failed;
-                finished.error = Some("ingest failed".to_string());
-                tracing::error!(
-                    event = "ingest.failed",
-                    dataset_id = %finished.dataset_id,
-                    job_id = %finished.job_id,
-                    error_kind = error.kind(),
-                    diagnostic = error.safe_diagnostic().as_deref().unwrap_or("redacted"),
-                    latency_ms = started.elapsed().as_millis() as u64,
-                    "dataset ingest failed"
-                );
-            }
-            Err(error) => {
-                finished.status = IngestJobStatus::Failed;
-                finished.error = Some("ingest task failed".to_string());
-                tracing::error!(
-                    event = "ingest.failed",
-                    dataset_id = %finished.dataset_id,
-                    job_id = %finished.job_id,
-                    error_kind = "background_task",
-                    cancelled = error.is_cancelled(),
-                    panic = error.is_panic(),
-                    latency_ms = started.elapsed().as_millis() as u64,
-                    "dataset ingest task failed"
-                );
-            }
-        }
-        state_for_job.put_ingest_job(finished).await;
-    });
-
-    Ok(Json(job))
-}
-
-async fn get_ingest_job(
-    State(state): State<ApiState>,
-    Path((dataset_id, job_id)): Path<(DatasetId, String)>,
-    headers: HeaderMap,
-) -> ApiResult<Json<IngestJob>> {
-    let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id)?;
-    let metadata = repo.load_dataset_config().await?;
-    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    let job = state
-        .get_ingest_job(&job_id)
-        .await
-        .filter(|job| job.dataset_id == dataset_id)
-        .ok_or_else(|| ApiError::NotFound(format!("ingest job {job_id}")))?;
-    Ok(Json(job))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadQuery {
-    root: String,
-    #[serde(default = "default_upload_ingest")]
-    ingest: bool,
-}
-
-fn default_upload_ingest() -> bool {
-    true
-}
-
-async fn upload_images(
-    State(state): State<ApiState>,
-    Path(dataset_id): Path<DatasetId>,
-    Query(query): Query<UploadQuery>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
-) -> ApiResult<Json<labello_client::IngestReport>> {
-    let actor = actor_from_headers(&state, &headers)?;
-    let repo = state.repo(&dataset_id)?;
-    let mut metadata = repo.load_dataset_config().await?;
-    ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    let root = normalize_upload_root(&query.root)?;
-    repo.safe_relative_root(&root)?;
-    let mut written_files = 0usize;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?
-    {
-        if field.name() != Some("files") {
-            continue;
-        }
-        let Some(file_name) = field.file_name().map(str::to_string) else {
-            continue;
-        };
-        let relative_path = upload_relative_path(&root, &file_name)?;
-        let path = repo.image_path(&relative_path)?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|source| {
-                labello_storage::StorageError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        tokio::fs::write(&path, bytes).await.map_err(|source| {
-            labello_storage::StorageError::Io {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        written_files += 1;
-    }
-    if written_files == 0 {
-        return Err(ApiError::BadRequest(
-            "upload contained no files".to_string(),
-        ));
-    }
-    if !metadata.image_roots.contains(&root) {
-        metadata.image_roots.push(root);
-        metadata.updated_at = labello_domain::now();
-        repo.save_dataset(&metadata).await?;
-    }
-    let report = if query.ingest {
-        repo.ingest_images().await?
-    } else {
-        labello_storage::IngestReport::default()
-    };
-    let report = storage_ingest_to_client(report);
-    tracing::info!(
-        event = "upload.completed",
-        dataset_id = %dataset_id,
-        actor_user_id = %actor.user_id,
-        written_files,
-        ingest_requested = query.ingest,
-        new_images = report.new_images,
-        "image upload completed"
-    );
-    Ok(Json(report))
-}
-
 async fn create_snapshot(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
@@ -1024,60 +810,6 @@ async fn list_images(
     }))
 }
 
-fn storage_ingest_to_client(report: labello_storage::IngestReport) -> labello_client::IngestReport {
-    labello_client::IngestReport {
-        discovered_files: report.discovered_files,
-        new_images: report.new_images,
-        duplicate_files: report
-            .duplicate_files
-            .into_iter()
-            .take(MAX_INGEST_REPORT_DETAILS)
-            .map(|duplicate| labello_client::DuplicateImage {
-                image_id: duplicate.image_id,
-                canonical_path: duplicate.canonical_path,
-                duplicate_path: duplicate.duplicate_path,
-                blake3: duplicate.blake3,
-            })
-            .collect(),
-        changed_paths: report
-            .changed_paths
-            .into_iter()
-            .take(MAX_INGEST_REPORT_DETAILS)
-            .map(|changed| labello_client::ChangedPath {
-                relative_path: changed.relative_path,
-                previous_blake3: changed.previous_blake3,
-                current_blake3: changed.current_blake3,
-            })
-            .collect(),
-        unreadable_files: report
-            .unreadable_files
-            .into_iter()
-            .take(MAX_INGEST_REPORT_DETAILS)
-            .collect(),
-    }
-}
-
-fn normalize_upload_root(root: &str) -> ApiResult<String> {
-    let root = root.trim().trim_matches('/').to_string();
-    if root.is_empty() {
-        Err(ApiError::BadRequest(
-            "upload root cannot be empty".to_string(),
-        ))
-    } else {
-        Ok(root)
-    }
-}
-
-fn upload_relative_path(root: &str, file_name: &str) -> ApiResult<String> {
-    let file_name = file_name.trim().trim_matches('/').replace('\\', "/");
-    if file_name.is_empty() {
-        return Err(ApiError::BadRequest(
-            "upload file name is empty".to_string(),
-        ));
-    }
-    Ok(format!("{root}/{file_name}"))
-}
-
 async fn list_tasks(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
@@ -1151,117 +883,6 @@ async fn add_prelabel_config(
     metadata.updated_at = labello_domain::now();
     repo.save_dataset(&metadata).await?;
     Ok(Json(config))
-}
-
-pub(crate) fn validate_payload(
-    metadata: &DatasetMetadata,
-    image_id: &ImageId,
-    payload: &EventPayload,
-) -> ApiResult<()> {
-    match payload {
-        EventPayload::AnnotationVersionCreated { annotation, .. } => {
-            if matches!(
-                annotation.source,
-                AnnotationSource::ReviewerCorrection { .. }
-            ) {
-                return Err(ApiError::BadRequest(
-                    "reviewer correction provenance is created by the correction endpoint only"
-                        .to_string(),
-                ));
-            }
-            let record = metadata
-                .images
-                .get(image_id)
-                .ok_or_else(|| ApiError::NotFound(format!("image {image_id}")))?;
-            let task = metadata.task(&annotation.task_id).ok_or_else(|| {
-                ApiError::BadRequest(format!("unknown task {}", annotation.task_id))
-            })?;
-            annotation
-                .validate_for_task(task, record.dimensions())
-                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-            if matches!(
-                annotation.source,
-                AnnotationSource::PrelabelSuggestion { .. }
-            ) {
-                annotation
-                    .geometry
-                    .validate()
-                    .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-            }
-        }
-        EventPayload::TaskStateChanged { task_state } => {
-            if metadata.task(&task_state.task_id).is_none() {
-                return Err(ApiError::BadRequest(format!(
-                    "unknown task {}",
-                    task_state.task_id
-                )));
-            }
-            if !metadata.images.contains_key(image_id) {
-                return Err(ApiError::NotFound(format!("image {image_id}")));
-            }
-        }
-        EventPayload::AnnotationDeleted { .. }
-        | EventPayload::ReviewRecorded { .. }
-        | EventPayload::ReviewerCorrectionRecorded { .. }
-        | EventPayload::AdjudicationRecorded { .. }
-        | EventPayload::AssignmentUpdated { .. } => {}
-    }
-    Ok(())
-}
-
-pub(crate) fn required_role_for_payload(
-    actor: &Actor,
-    payload: &EventPayload,
-) -> ApiResult<DatasetRole> {
-    match payload {
-        EventPayload::AnnotationVersionCreated { annotation, .. } => {
-            if annotation.author_user_id != actor.user_id {
-                return Err(ApiError::Unauthorized(
-                    "cannot create annotations for another user".to_string(),
-                ));
-            }
-            Ok(DatasetRole::Annotator)
-        }
-        EventPayload::AnnotationDeleted { .. } => Ok(DatasetRole::Annotator),
-        EventPayload::TaskStateChanged { task_state } => {
-            if task_state
-                .assigned_to
-                .as_ref()
-                .is_some_and(|user_id| user_id != &actor.user_id)
-                || task_state
-                    .completed_by
-                    .as_ref()
-                    .is_some_and(|user_id| user_id != &actor.user_id)
-            {
-                return Err(ApiError::Unauthorized(
-                    "cannot submit task state for another user".to_string(),
-                ));
-            }
-            Ok(DatasetRole::Annotator)
-        }
-        EventPayload::ReviewRecorded { review } => {
-            if review.reviewer_user_id != actor.user_id {
-                return Err(ApiError::Unauthorized(
-                    "cannot record reviews for another user".to_string(),
-                ));
-            }
-            Ok(DatasetRole::Reviewer)
-        }
-        EventPayload::ReviewerCorrectionRecorded { .. } => Err(ApiError::BadRequest(
-            "reviewer correction events are created by the correction endpoint only".to_string(),
-        )),
-        EventPayload::AdjudicationRecorded { adjudication } => {
-            if adjudication.adjudicator_user_id != actor.user_id {
-                return Err(ApiError::Unauthorized(
-                    "cannot record adjudications for another user".to_string(),
-                ));
-            }
-            Ok(DatasetRole::Adjudicator)
-        }
-        EventPayload::AssignmentUpdated { .. } => Err(ApiError::BadRequest(
-            "assignment events are created by assignment endpoints only".to_string(),
-        )),
-    }
 }
 
 fn sanitize_dataset(mut metadata: DatasetMetadata, actor: &Actor) -> DatasetMetadata {
@@ -1445,34 +1066,5 @@ mod report_tests {
         assert!(validate_enabled_task(&task).is_err());
         task.enabled = false;
         assert!(validate_enabled_task(&task).is_ok());
-    }
-
-    #[test]
-    fn caps_ingest_report_details() {
-        let report = labello_storage::IngestReport {
-            duplicate_files: (0..150)
-                .map(|index| labello_storage::DuplicateImage {
-                    image_id: ImageId::from(format!("img_{index}")),
-                    canonical_path: format!("images/{index}.png"),
-                    duplicate_path: format!("dupes/{index}.png"),
-                    blake3: format!("hash_{index}"),
-                })
-                .collect(),
-            changed_paths: (0..150)
-                .map(|index| labello_storage::ChangedPath {
-                    relative_path: format!("images/{index}.png"),
-                    previous_blake3: format!("old_{index}"),
-                    current_blake3: format!("new_{index}"),
-                })
-                .collect(),
-            unreadable_files: (0..150).map(|index| format!("bad/{index}.png")).collect(),
-            ..Default::default()
-        };
-
-        let report = storage_ingest_to_client(report);
-
-        assert_eq!(report.duplicate_files.len(), MAX_INGEST_REPORT_DETAILS);
-        assert_eq!(report.changed_paths.len(), MAX_INGEST_REPORT_DETAILS);
-        assert_eq!(report.unreadable_files.len(), MAX_INGEST_REPORT_DETAILS);
     }
 }

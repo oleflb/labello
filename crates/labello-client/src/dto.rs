@@ -276,6 +276,8 @@ pub struct OfflineSyncEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use labello_domain::{DatasetId, OfflineSyncRequest, SCHEMA_VERSION, UserId};
+
     use super::*;
 
     #[test]
@@ -323,5 +325,67 @@ mod tests {
         .unwrap();
 
         assert!(request.excluded_image_ids.is_empty());
+    }
+
+    #[test]
+    fn offline_bundle_request_preserves_v2_defaults_and_casing() {
+        let request: OfflineBundleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(request, OfflineBundleRequest::default());
+        assert_eq!(request.limit, 25);
+        assert!(!request.include_image_bytes);
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "limit": 25,
+                "includeImageBytes": false
+            })
+        );
+    }
+
+    #[test]
+    fn image_explorer_query_preserves_v2_defaults() {
+        let query: ImageExplorerQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(query.page, 1);
+        assert_eq!(query.page_size, 25);
+        assert_eq!(query.search, None);
+        assert_eq!(query.status, None);
+        assert_eq!(query.task_id, None);
+        assert_eq!(query.class_id, None);
+        assert_eq!(
+            serde_json::to_value(query).unwrap(),
+            serde_json::json!({
+                "page": 1,
+                "pageSize": 25,
+                "search": null,
+                "status": null,
+                "taskId": null,
+                "classId": null
+            })
+        );
+    }
+
+    #[test]
+    fn offline_sync_envelope_keeps_v2_schema_version_and_casing() {
+        let envelope = OfflineSyncEnvelope {
+            request: OfflineSyncRequest::new(
+                DatasetId::from("ds_1"),
+                UserId::from("user_1"),
+                Vec::new(),
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            serde_json::json!({
+                "request": {
+                    "schemaVersion": SCHEMA_VERSION,
+                    "datasetId": "ds_1",
+                    "userId": "user_1",
+                    "fragments": []
+                }
+            })
+        );
     }
 }

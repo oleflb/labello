@@ -641,8 +641,8 @@ fn extract_image_count_hint(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use labello_domain::{
-        Actor, DatasetId, DatasetMetadata, DatasetRole, EventPayload, ImageId, TaskId, TaskState,
-        UserId, now,
+        Actor, DatasetId, DatasetMetadata, DatasetRole, EventPayload, ImageId, ImageRecord,
+        ImagesIndex, TaskId, TaskState, UserId, now,
     };
 
     use super::*;
@@ -869,6 +869,146 @@ mod tests {
                 .unwrap(),
             recovered
         );
+    }
+
+    #[tokio::test]
+    async fn load_rebuilds_an_absent_state_cache_from_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_recovery");
+        let task_id = TaskId::from("task_1");
+        repo.append_payload(
+            &image_id,
+            &Actor {
+                user_id: UserId::from("user_1"),
+                role: DatasetRole::Annotator,
+            },
+            EventPayload::TaskStateChanged {
+                task_state: TaskState::new(task_id.clone(), now()),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_file(repo.state_path(&image_id))
+            .await
+            .unwrap();
+
+        let recovered = repo.load_image_state(&image_id).await.unwrap();
+
+        assert_eq!(recovered.current_sequence, 1);
+        assert!(recovered.task_states.contains_key(&task_id));
+        assert_eq!(
+            read_json::<ImageState>(&repo.state_path(&image_id))
+                .await
+                .unwrap(),
+            recovered
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_replays_events_and_omits_images_auth_and_keybindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        repo.initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+        let image_id = ImageId::from("img_1");
+        repo.save_images_index(&ImagesIndex {
+            schema_version: SCHEMA_VERSION,
+            image_count: 1,
+            images_by_hash: BTreeMap::from([(
+                "hash".to_string(),
+                ImageRecord {
+                    image_id: image_id.clone(),
+                    blake3: "hash".to_string(),
+                    canonical_path: "images/one.png".to_string(),
+                    known_paths: vec!["images/one.png".to_string()],
+                    duplicate_paths: Vec::new(),
+                    file_name: "one.png".to_string(),
+                    byte_size: 11,
+                    width: 1,
+                    height: 1,
+                    media_type: "image/png".to_string(),
+                },
+            )]),
+        })
+        .await
+        .unwrap();
+        let task_id = TaskId::from("task_1");
+        repo.append_payload(
+            &image_id,
+            &Actor {
+                user_id: UserId::from("user_1"),
+                role: DatasetRole::Annotator,
+            },
+            EventPayload::TaskStateChanged {
+                task_state: TaskState::new(task_id.clone(), now()),
+            },
+        )
+        .await
+        .unwrap();
+
+        write_json_atomic(
+            &repo.state_path(&image_id),
+            &ImageState::new(image_id.clone()),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(temp.path().join("images/one.png"), b"image bytes")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(temp.path().join("users/user_1"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            temp.path().join("users/user_1/keybindings.toml"),
+            b"secret binding",
+        )
+        .await
+        .unwrap();
+        tokio::fs::create_dir_all(temp.path().join(".labello-server"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            temp.path().join(".labello-server/auth.json"),
+            b"secret auth state",
+        )
+        .await
+        .unwrap();
+
+        let snapshot = repo.create_snapshot().await.unwrap();
+
+        assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
+        assert!(!snapshot.includes_image_bytes);
+        assert!(
+            snapshot
+                .files
+                .iter()
+                .all(|file| !file.path.starts_with("images/")
+                    && !file.path.starts_with("users/")
+                    && !file.path.starts_with(".labello-server/"))
+        );
+        let state_path = format!("annotations/{image_id}/state.json");
+        let snapshotted_state: ImageState = serde_json::from_slice(
+            &repo
+                .snapshot_file(&snapshot.snapshot_id, &state_path)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshotted_state.current_sequence, 1);
+        assert!(snapshotted_state.task_states.contains_key(&task_id));
     }
 
     #[test]

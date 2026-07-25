@@ -742,6 +742,158 @@ async fn offline_sync_is_authenticated_and_bound_to_caller() {
 }
 
 #[tokio::test]
+async fn ordinary_event_ingresses_reject_server_owned_payloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    let png = png_bytes(2, 2);
+    let image_id = ImageId::from_blake3_hex(blake3::hash(&png).to_hex().as_ref());
+    upload_test_image(&app, "server-owned.png", &png).await;
+    let assignment = claim_assignment(&app, "admin", "annotation").await;
+    let timestamp = labello_domain::now().to_rfc3339();
+    let query = format!(
+        "assignmentId={}&imageId={}&taskId={}&kind=annotation",
+        assignment["assignmentId"].as_str().unwrap(),
+        image_id,
+        urlencoding::encode(assignment["taskId"].as_str().unwrap())
+    );
+    let annotation = json!({
+        "annotationId": "ann_server_owned",
+        "version": 2,
+        "taskId": "bounding_box:pixel",
+        "classId": "pixel",
+        "type": "bounding_box",
+        "source": {
+            "source": "reviewer_correction",
+            "correction_id": "cor_server_owned"
+        },
+        "geometry": {
+            "type": "bounding_box",
+            "geometry": { "x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5 }
+        },
+        "authorUserId": "admin",
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+        "deleted": false
+    });
+    let payloads = [
+        (
+            "assignment_updated",
+            json!({
+                "kind": "assignment_updated",
+                "assignment": assignment
+            }),
+        ),
+        (
+            "reviewer_correction_recorded",
+            json!({
+                "kind": "reviewer_correction_recorded",
+                "correction": {
+                    "correctionId": "cor_server_owned",
+                    "assignmentId": "asg_server_owned",
+                    "annotationId": "ann_server_owned",
+                    "previousVersion": 1,
+                    "correctedVersion": 2,
+                    "taskId": "bounding_box:pixel",
+                    "reviewerUserId": "admin",
+                    "timestamp": timestamp,
+                    "reason": null
+                },
+                "annotation": annotation,
+                "review": {
+                    "reviewId": "rev_server_owned",
+                    "target": {
+                        "targetType": "annotation_version",
+                        "annotation_id": "ann_server_owned",
+                        "version": 2
+                    },
+                    "reviewerUserId": "admin",
+                    "decision": "rejected",
+                    "timestamp": timestamp,
+                    "comment": null
+                },
+                "task_state": {
+                    "taskId": "bounding_box:pixel",
+                    "status": "completed",
+                    "outcome": "reviewer_corrected",
+                    "assignedTo": null,
+                    "completedBy": "admin",
+                    "completedAt": timestamp,
+                    "updatedAt": timestamp
+                },
+                "assignments": []
+            }),
+        ),
+    ];
+
+    for (event_type, payload) in payloads {
+        let ingresses = [
+            (
+                "direct append",
+                format!("/datasets/ds/images/{image_id}/events?{query}"),
+                json!({ "payload": payload }),
+            ),
+            (
+                "annotation batch",
+                format!("/datasets/ds/images/{image_id}/annotation-batch?{query}"),
+                json!({ "payloads": [payload], "complete": false }),
+            ),
+            (
+                "admin repair",
+                format!("/datasets/ds/images/{image_id}/admin/events"),
+                json!({ "payload": payload }),
+            ),
+            (
+                "offline sync",
+                "/datasets/ds/offline-sync".to_string(),
+                json!({
+                    "schemaVersion": 2,
+                    "datasetId": "ds",
+                    "userId": "admin",
+                    "fragments": [{
+                        "imageId": image_id,
+                        "baseSequence": 0,
+                        "events": [{
+                            "schemaVersion": 2,
+                            "eventSequence": 1,
+                            "eventId": "evt_server_owned",
+                            "imageId": image_id,
+                            "type": event_type,
+                            "actorUserId": "admin",
+                            "actorRole": "data_admin",
+                            "timestamp": timestamp,
+                            "payload": payload
+                        }]
+                    }]
+                }),
+            ),
+        ];
+
+        for (ingress, uri, body) in ingresses {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-test-user-id", "admin")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{ingress} accepted {event_type}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn config_endpoints_do_not_parse_image_index() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

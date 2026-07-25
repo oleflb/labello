@@ -578,7 +578,7 @@ impl LabelloApp {
                                 .selected_task_id
                                 .as_ref()
                                 .map(|task_id| {
-                                    crate::persistence::reviewed_object_prefix(
+                                    crate::review_sequence::reviewed_object_prefix(
                                         self.current_state.as_ref().expect("state was applied"),
                                         task_id,
                                         &self.config.user_id,
@@ -1898,7 +1898,7 @@ impl LabelloApp {
                 .selected_task_id
                 .as_ref()
                 .map(|task_id| {
-                    crate::persistence::reviewed_object_prefix(
+                    crate::review_sequence::reviewed_object_prefix(
                         &loaded.state,
                         task_id,
                         &self.config.user_id,
