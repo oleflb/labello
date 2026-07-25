@@ -14,8 +14,20 @@ pub enum ApiError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
+    #[error("unprocessable entity: {0}")]
+    Unprocessable(String),
 
     #[error("invalid id: {0}")]
     InvalidId(#[from] labello_domain::IdValidationError),
@@ -92,7 +104,11 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::InvalidId(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Storage(labello_storage::StorageError::NotFound(_)) => StatusCode::NOT_FOUND,
             ApiError::Storage(labello_storage::StorageError::AlreadyExists(_)) => {
                 StatusCode::CONFLICT
@@ -129,7 +145,11 @@ impl ApiError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized(_) => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::PayloadTooLarge(_) => "payload_too_large",
+            Self::Unprocessable(_) => "unprocessable_entity",
             Self::InvalidId(_) => "invalid_id",
             Self::Storage(error) => error.kind(),
             Self::Http(_) => "http_client",

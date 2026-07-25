@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use eframe::egui;
 use labello_client::{
-    AuthOptions, CorrectionRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, IngestJob,
-    SessionInfo, SnapshotFile,
+    AuthOptions, CancelImportResult, CommitImportResult, CorrectionRequest, CreateImportRequest,
+    DatasetSummary, DatasetUser, ImageExplorerQuery, ImportCapabilities, ImportJob, ImportPlan,
+    IngestJob, SessionInfo, SnapshotFile, UpdateImportPlanRequest,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationId, Assignment, AssignmentId, AssignmentKind, DatasetId,
@@ -19,6 +20,17 @@ pub(crate) enum ReviewPhase {
     FullImage,
 }
 
+#[derive(Debug)]
+pub(crate) enum MigrationAction {
+    SaveSkeleton(labello_client::SaveMigrationSkeletonRequest),
+    Exclude(labello_client::ExcludeMigrationTargetRequest),
+    Reopen(labello_client::ReopenMigrationTargetRequest),
+    StartPass(labello_client::StartMigrationPassRequest),
+    Keep(labello_client::KeepMigrationTargetRequest),
+    Confirm(labello_client::ConfirmMigrationRequest),
+    Review(labello_client::ReviewMigrationRequest),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RequestIdentity {
     pub auth_epoch: u64,
@@ -27,8 +39,63 @@ pub(crate) struct RequestIdentity {
     pub dataset_id: Option<DatasetId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportRequestIdentity {
+    pub auth_epoch: u64,
+    pub import_epoch: u64,
+    pub request_id: u64,
+    pub import_id: Option<labello_domain::ImportId>,
+}
+
 #[derive(Debug)]
 pub(crate) enum UiMessage {
+    ImportCapabilitiesLoaded {
+        request: ImportRequestIdentity,
+        result: Result<ImportCapabilities, String>,
+    },
+    ImportJobLoaded {
+        request: ImportRequestIdentity,
+        result: Box<Result<ImportJob, String>>,
+    },
+    #[cfg(target_arch = "wasm32")]
+    ImportBrowserFilesSelected {
+        request: ImportRequestIdentity,
+        result: Result<Vec<crate::import_flow::BrowserImportFile>, String>,
+    },
+    ImportFilesRegistered {
+        request: ImportRequestIdentity,
+        result: Result<labello_client::RegisterImportFilesResult, String>,
+    },
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    ImportChunkUploaded {
+        request: ImportRequestIdentity,
+        file_id: String,
+        result: Result<crate::import_flow::RawImportChunkResponse, String>,
+    },
+    ImportSealed {
+        request: ImportRequestIdentity,
+        result: Result<labello_client::SealImportResult, String>,
+    },
+    ImportPlanUpdated {
+        request: ImportRequestIdentity,
+        result: Box<Result<ImportPlan, String>>,
+    },
+    ImportDiagnosticsLoaded {
+        request: ImportRequestIdentity,
+        result: Result<labello_client::ImportDiagnosticsPage, String>,
+    },
+    ImportCommitted {
+        request: ImportRequestIdentity,
+        result: Result<CommitImportResult, String>,
+    },
+    ImportCancelled {
+        request: ImportRequestIdentity,
+        result: Result<CancelImportResult, String>,
+    },
+    MigrationFinished {
+        request: RequestIdentity,
+        result: Box<Result<labello_client::ManualMigrationCommandResult, String>>,
+    },
     AuthOptionsLoaded {
         request: RequestIdentity,
         result: Result<AuthOptions, String>,
@@ -171,6 +238,66 @@ pub(crate) enum UiMessage {
 }
 
 pub(crate) enum UiCommand {
+    ImportCapabilities {
+        request: ImportRequestIdentity,
+    },
+    CreateImport {
+        request: ImportRequestIdentity,
+        body: CreateImportRequest,
+        idempotency_key: String,
+    },
+    GetImport {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+    },
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    RegisterImportFiles {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: labello_client::RegisterImportFilesRequest,
+        idempotency_key: String,
+    },
+    SealImport {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: labello_client::SealImportRequest,
+        idempotency_key: String,
+    },
+    PreflightImport {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: labello_client::StartImportPreflightRequest,
+        idempotency_key: String,
+    },
+    UpdateImportPlan {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: UpdateImportPlanRequest,
+        idempotency_key: String,
+    },
+    ImportDiagnostics {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        query: labello_client::ImportDiagnosticsQuery,
+    },
+    CommitImport {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: labello_client::CommitImportRequest,
+        idempotency_key: String,
+    },
+    CancelImport {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        idempotency_key: String,
+    },
+    Migration {
+        request: RequestIdentity,
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        action: MigrationAction,
+        idempotency_key: String,
+    },
     AuthOptions {
         request: RequestIdentity,
     },
@@ -334,6 +461,16 @@ pub(crate) enum UiCommand {
 impl UiCommand {
     pub(crate) fn request(&self) -> &RequestIdentity {
         match self {
+            Self::ImportCapabilities { .. }
+            | Self::CreateImport { .. }
+            | Self::GetImport { .. }
+            | Self::RegisterImportFiles { .. }
+            | Self::SealImport { .. }
+            | Self::PreflightImport { .. }
+            | Self::UpdateImportPlan { .. }
+            | Self::ImportDiagnostics { .. }
+            | Self::CommitImport { .. }
+            | Self::CancelImport { .. } => panic!("import commands use import_request"),
             Self::AuthOptions { request }
             | Self::Session { request }
             | Self::LocalAdminLogin { request }
@@ -362,7 +499,24 @@ impl UiCommand {
             | Self::ReleaseAssignment { request, .. }
             | Self::Review { request, .. }
             | Self::Correction { request, .. }
-            | Self::Adjudication { request, .. } => request,
+            | Self::Adjudication { request, .. }
+            | Self::Migration { request, .. } => request,
+        }
+    }
+
+    pub(crate) fn import_request(&self) -> Option<&ImportRequestIdentity> {
+        match self {
+            Self::ImportCapabilities { request }
+            | Self::CreateImport { request, .. }
+            | Self::GetImport { request, .. }
+            | Self::RegisterImportFiles { request, .. }
+            | Self::SealImport { request, .. }
+            | Self::PreflightImport { request, .. }
+            | Self::UpdateImportPlan { request, .. }
+            | Self::ImportDiagnostics { request, .. }
+            | Self::CommitImport { request, .. }
+            | Self::CancelImport { request, .. } => Some(request),
+            _ => None,
         }
     }
 }
@@ -370,6 +524,17 @@ impl UiCommand {
 impl UiMessage {
     pub(crate) fn request(&self) -> Option<&RequestIdentity> {
         match self {
+            Self::ImportCapabilitiesLoaded { .. }
+            | Self::ImportJobLoaded { .. }
+            | Self::ImportFilesRegistered { .. }
+            | Self::ImportChunkUploaded { .. }
+            | Self::ImportSealed { .. }
+            | Self::ImportPlanUpdated { .. }
+            | Self::ImportDiagnosticsLoaded { .. }
+            | Self::ImportCommitted { .. }
+            | Self::ImportCancelled { .. } => None,
+            #[cfg(target_arch = "wasm32")]
+            Self::ImportBrowserFilesSelected { .. } => None,
             Self::AuthOptionsLoaded { request, .. }
             | Self::SessionLoaded { request, .. }
             | Self::LogoutFinished { request, .. }
@@ -396,10 +561,28 @@ impl UiMessage {
             | Self::IngestJobLoaded { request, .. }
             | Self::StatsLoaded { request, .. }
             | Self::KeybindingsSaved { request, .. }
+            | Self::MigrationFinished { request, .. }
             | Self::RequestFailed { request, .. } => Some(request),
             Self::PersistenceFinished(_)
             | Self::FolderUploadProgress { .. }
             | Self::FolderUploadFinished { .. } => None,
+        }
+    }
+
+    pub(crate) fn import_request(&self) -> Option<&ImportRequestIdentity> {
+        match self {
+            Self::ImportCapabilitiesLoaded { request, .. }
+            | Self::ImportJobLoaded { request, .. }
+            | Self::ImportFilesRegistered { request, .. }
+            | Self::ImportChunkUploaded { request, .. }
+            | Self::ImportSealed { request, .. }
+            | Self::ImportPlanUpdated { request, .. }
+            | Self::ImportDiagnosticsLoaded { request, .. }
+            | Self::ImportCommitted { request, .. }
+            | Self::ImportCancelled { request, .. } => Some(request),
+            #[cfg(target_arch = "wasm32")]
+            Self::ImportBrowserFilesSelected { request, .. } => Some(request),
+            _ => None,
         }
     }
 }

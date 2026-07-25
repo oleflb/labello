@@ -40,11 +40,54 @@ localAdminLogin = true
 # clientId = "your-github-client-id"
 # clientSecret = "your-github-client-secret"
 # redirectUri = "https://api.example.com/auth/github/callback"
+
+# [import]
+# enabled = true
+# retainRawSource = false
+# failedRetentionHours = 24
+# successfulMetadataRetentionDays = 30
+
+# [import.limits]
+# concurrentBuildJobs = 1
+# concurrentBrowserUploadJobs = 2
+# activeReservationsPerOwner = 2
+# browserSourceFiles = 25_000
+# browserSourceBytes = 21_474_836_480
+# serverSourceFiles = 50_000
+# totalSourceBytes = 107_374_182_400
+# selectedImages = 10_000
+# singleSourceFileBytes = 4_294_967_296
+# descriptorBytes = 16_777_216
+# uploadChunkBytes = 8_388_608
+# sourcePathBytes = 1_024
+# sourcePathDepth = 32
+# sourceComponentBytes = 255
+# selectedCategories = 100
+# selectedTasks = 200
+# coverageEntries = 2_000_000
+# annotationsTotal = 1_000_000
+# annotationsPerImage = 10_000
+# generatedFileBytesPerImage = 67_108_864
+# keypointsPerSkeleton = 512
+# yoloLineBytes = 1_048_576
+# yoloColumns = 4_096
+# structuredDataNesting = 64
+# decodedImagePixels = 50_000_000
+# decodedImageBytes = 536_870_912
+# stagedBytes = 268_435_456_000
+# diagnosticExamplesPerCode = 100
+
+# [[import.serverRoots]]
+# id = "curated-releases"
+# path = "/srv/labello-imports"
+# allowedOwners = ["admin"]
 ```
 
 The parser rejects unknown fields. Every uncommented field shown above is
-required. The `[githubOauth]` section is optional, but all three of its fields
-are required when present.
+required. The `[githubOauth]` and `[import]` sections are optional, but their
+documented fields are required when the corresponding section is present.
+`[import.limits]` is optional, and each field within it independently defaults
+to the value shown above.
 
 ## Top-Level Settings
 
@@ -68,6 +111,16 @@ browserOrigins = ["https://label.example.com"]
 
 Use the exact hostname seen by the browser. `localhost` and `127.0.0.1` are
 different origins and different cookie hosts.
+
+Authenticated unsafe requests require the session-bound token returned as
+`csrfToken` by the login and `GET /me` responses. Send it in
+`x-csrf-token`. Browser mutations must also carry an `Origin` that exactly
+matches `browserOrigins`; token-bearing native clients may omit `Origin`.
+Local development login always requires a configured browser origin.
+
+Credentialed CORS preflights allow `content-type`, `x-csrf-token`,
+`idempotency-key`, `upload-offset`, `upload-length`, and `digest` for current
+and planned mutation protocols.
 
 ### Bootstrap Administrators
 
@@ -114,6 +167,92 @@ The browser application's public URL belongs in the GitHub OAuth App's
 homepage field. The callback must point to the API, not the browser client.
 Keep the browser and callback hostnames consistent throughout local cookie
 flows.
+
+## Dataset Import
+
+Dataset import is disabled when `[import]` is absent. Enabling it exposes the
+four version-one YOLO detection, YOLO pose, COCO instances, and COCO keypoints
+profiles only when the filesystem also provides Linux beneath-open and atomic
+no-replace publication guarantees. Startup fails if configured server roots do
+not exist, overlap the datasets root, overlap each other, or use duplicate or
+unsafe IDs.
+
+The complete example declares one `[[import.serverRoots]]` entry. For a
+browser-upload-only deployment, omit that array entry and set
+`serverRoots = []` inside `[import]`.
+
+| Setting | Description |
+| --- | --- |
+| `import.enabled` | Enables import capability probing and all supported profiles. |
+| `import.serverRoots` | Optional list of server-side source roots. Browser folder import remains independent of this list. |
+| `import.retainRawSource` | Retains copied/uploaded raw source after successful publication when `true`. |
+| `import.failedRetentionHours` | Retention period for failed or cancelled job metadata. |
+| `import.successfulMetadataRetentionDays` | Retention period for successful job metadata. |
+| `import.serverRoots[].id` | Safe opaque ID advertised to clients; paths are never advertised. |
+| `import.serverRoots[].path` | Existing source directory outside and non-overlapping with `datasetsRoot`. |
+| `import.serverRoots[].allowedOwners` | Bootstrap administrator user IDs allowed to see and select this root. An empty list allows any bootstrap administrator. Invalid user IDs fail startup. |
+
+### Import Limits
+
+The optional `[import.limits]` section controls every limit enforced by the
+storage import service. Omit the section to retain all storage defaults, or set
+only the fields that need to differ. Byte limits are literal bytes; the values
+below correspond to the binary-size defaults used by storage.
+
+| Setting | Default | Enforced limit |
+| --- | ---: | --- |
+| `import.limits.concurrentBuildJobs` | `1` | Concurrent preflight/build jobs for the server. |
+| `import.limits.concurrentBrowserUploadJobs` | `2` | Concurrent browser upload jobs for the server. |
+| `import.limits.activeReservationsPerOwner` | `2` | Active destination reservations per owner. |
+| `import.limits.browserSourceFiles` | `25_000` | Files registered by one browser source. |
+| `import.limits.browserSourceBytes` | `21_474_836_480` (20 GiB) | Total bytes registered by one browser source. |
+| `import.limits.serverSourceFiles` | `50_000` | Files copied from one server-directory source. |
+| `import.limits.totalSourceBytes` | `107_374_182_400` (100 GiB) | Total bytes in any source. |
+| `import.limits.selectedImages` | `10_000` | Images selected by preflight. |
+| `import.limits.singleSourceFileBytes` | `4_294_967_296` (4 GiB) | Bytes in one source file. |
+| `import.limits.descriptorBytes` | `16_777_216` (16 MiB) | Bytes read from one dataset descriptor. |
+| `import.limits.uploadChunkBytes` | `8_388_608` (8 MiB) | Bytes accepted in one browser upload chunk. |
+| `import.limits.sourcePathBytes` | `1_024` | Bytes in one normalized relative source path. |
+| `import.limits.sourcePathDepth` | `32` | Components in one relative source path. |
+| `import.limits.sourceComponentBytes` | `255` | Bytes in one source path component. |
+| `import.limits.selectedCategories` | `100` | Categories selected by preflight. |
+| `import.limits.selectedTasks` | `200` | Tasks generated by an import plan. |
+| `import.limits.coverageEntries` | `2_000_000` | Image-task coverage entries generated by an import plan. |
+| `import.limits.annotationsTotal` | `1_000_000` | Annotations generated by an import. |
+| `import.limits.annotationsPerImage` | `10_000` | Annotations generated for one image. |
+| `import.limits.generatedFileBytesPerImage` | `67_108_864` (64 MiB) | Bytes in a generated event log or state file for one image. |
+| `import.limits.keypointsPerSkeleton` | `512` | Keypoints in one skeleton category. |
+| `import.limits.yoloLineBytes` | `1_048_576` (1 MiB) | Bytes in one YOLO annotation line. |
+| `import.limits.yoloColumns` | `4_096` | Columns in one YOLO annotation line. |
+| `import.limits.structuredDataNesting` | `64` | JSON or YAML nesting depth. |
+| `import.limits.decodedImagePixels` | `50_000_000` | Decoded pixels in one image. |
+| `import.limits.decodedImageBytes` | `536_870_912` (512 MiB) | Decoded image memory used by image validation. |
+| `import.limits.stagedBytes` | `268_435_456_000` (250 GiB) | Source, spool, and generated output bytes staged by one import. |
+| `import.limits.diagnosticExamplesPerCode` | `100` | Stored diagnostic examples for each diagnostic code. |
+
+Every limit must be greater than zero and fit the server platform's numeric
+types. Limits advertised through the client capability contract must also fit
+that contract without truncation. Startup rejects contradictory ceilings:
+browser bytes or a single file cannot exceed total source bytes; descriptors
+and upload chunks cannot exceed a single file; path component and depth limits
+cannot exceed the path byte limit; per-image annotations cannot exceed total
+annotations; YOLO columns cannot exceed line bytes; generated per-image files
+cannot exceed staged bytes; and total source bytes cannot exceed staged bytes.
+
+Server-root capability filtering is fail closed: only roots present in the
+loaded configuration and authorized for the current bootstrap administrator
+are advertised. The filesystem path is never returned by the API.
+
+COCO keypoint imports may explicitly pair one instances descriptor with one
+keypoints descriptor by assigning both the same release, split, and
+`pairingGroup`. Descriptor kinds are retained in the committed import manifest.
+Descriptors without a pairing group remain separate even when their numeric
+image, category, or annotation IDs match.
+
+Imports reserve and publish destinations under a process-local datasets-root
+mutation lock shared with normal dataset creation. Run only one server process
+per datasets root. Import staging under `.labello-server/imports` is private
+server state and is never listed as a dataset.
 
 ## Environment Variables
 

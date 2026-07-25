@@ -1,10 +1,14 @@
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AssignmentId, AssignmentKind, ClassId, CorrectionId,
-    DatasetId, DatasetRole, DatasetRoleAssignment, EventPayload, ImageId, ImageRecord,
-    ImbalanceConfig, LabelClass, OfflineSyncRequest, PrelabelConfig, PrelabelConfigId,
-    TaskDefinition, TaskId, TaskStatus, UserAccount, UserId,
+    DatasetId, DatasetRole, DatasetRoleAssignment, EventLogEntry, EventPayload, ImageId,
+    ImageRecord, ImbalanceConfig, LabelClass, PrelabelConfig, PrelabelConfigId, TaskDefinition,
+    TaskId, TaskStatus, UserAccount, UserId,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+pub use labello_domain::{
+    OfflineAnnotationSource, OfflineMutation, OfflineMutationFragment, OfflineSyncRequest,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,11 +17,23 @@ pub struct AuthOptions {
     pub local_admin_login: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub account: UserAccount,
     pub can_create_datasets: bool,
+    pub csrf_token: String,
+}
+
+impl std::fmt::Debug for SessionInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionInfo")
+            .field("account", &self.account)
+            .field("can_create_datasets", &self.can_create_datasets)
+            .field("csrf_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,18 +106,165 @@ pub struct AssignmentActionRequest {
     pub kind: AssignmentKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppendEventRequest {
     pub payload: EventPayload,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+impl Serialize for AppendEventRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            schema_version: u32,
+            payload: &'a EventPayload,
+        }
+
+        Wire {
+            schema_version: labello_domain::SCHEMA_VERSION,
+            payload: &self.payload,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AppendEventRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let (schema_version, mut object) =
+            mutation_request_parts(value).map_err(D::Error::custom)?;
+        let payload = object
+            .remove("payload")
+            .ok_or_else(|| D::Error::custom("event payload is missing"))?;
+        Ok(Self {
+            payload: deserialize_versioned_payload(payload, schema_version)
+                .map_err(D::Error::custom)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct AnnotationBatchRequest {
     pub payloads: Vec<EventPayload>,
-    #[serde(default)]
     pub complete: bool,
+}
+
+impl Serialize for AnnotationBatchRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            schema_version: u32,
+            payloads: &'a [EventPayload],
+            complete: bool,
+        }
+
+        Wire {
+            schema_version: labello_domain::SCHEMA_VERSION,
+            payloads: &self.payloads,
+            complete: self.complete,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnotationBatchRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let (schema_version, mut object) =
+            mutation_request_parts(value).map_err(D::Error::custom)?;
+        let payloads = object
+            .remove("payloads")
+            .ok_or_else(|| D::Error::custom("annotation payloads are missing"))?
+            .as_array()
+            .ok_or_else(|| D::Error::custom("annotation payloads must be an array"))?
+            .iter()
+            .cloned()
+            .map(|payload| deserialize_versioned_payload(payload, schema_version))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(D::Error::custom)?;
+        let complete = object
+            .remove("complete")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or("annotation batch complete must be a boolean")
+            })
+            .transpose()
+            .map_err(D::Error::custom)?
+            .unwrap_or(false);
+        Ok(Self { payloads, complete })
+    }
+}
+
+fn mutation_request_parts(
+    value: serde_json::Value,
+) -> Result<(Option<u32>, serde_json::Map<String, serde_json::Value>), String> {
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "mutation request must be an object".to_string())?;
+    let schema_version = object
+        .remove("schemaVersion")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "schemaVersion must be an unsigned 32-bit integer".to_string())
+        })
+        .transpose()?;
+    if let Some(schema_version) = schema_version {
+        labello_domain::validate_supported_schema_version(schema_version)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((schema_version, object))
+}
+
+fn deserialize_versioned_payload(
+    payload: serde_json::Value,
+    schema_version: Option<u32>,
+) -> Result<EventPayload, String> {
+    let schema_version = schema_version.unwrap_or_else(|| {
+        if payload
+            .get("annotation")
+            .and_then(|annotation| annotation.get("source"))
+            .is_some()
+        {
+            labello_domain::LEGACY_SCHEMA_VERSION
+        } else {
+            labello_domain::SCHEMA_VERSION
+        }
+    });
+    let event_type = payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "event payload kind is missing".to_string())?;
+    let event: EventLogEntry = serde_json::from_value(serde_json::json!({
+        "schemaVersion": schema_version,
+        "eventSequence": 0,
+        "eventId": "dto_event",
+        "imageId": "dto_image",
+        "type": event_type,
+        "actorUserId": "dto_user",
+        "actorRole": "annotator",
+        "timestamp": "1970-01-01T00:00:00Z",
+        "payload": payload,
+    }))
+    .map_err(|error| error.to_string())?;
+    event.validate_shape().map_err(|error| error.to_string())?;
+    Ok(event.payload)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -276,7 +439,10 @@ pub struct OfflineSyncEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use labello_domain::{DatasetId, OfflineSyncRequest, SCHEMA_VERSION, UserId};
+    use labello_domain::{
+        AnnotationOrigin, DatasetId, EventPayload, OfflineSyncRequest, RevisionSource,
+        SCHEMA_VERSION, UserId,
+    };
 
     use super::*;
 
@@ -328,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_bundle_request_preserves_v2_defaults_and_casing() {
+    fn offline_bundle_request_preserves_defaults_and_casing() {
         let request: OfflineBundleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
 
         assert_eq!(request, OfflineBundleRequest::default());
@@ -344,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn image_explorer_query_preserves_v2_defaults() {
+    fn image_explorer_query_preserves_defaults() {
         let query: ImageExplorerQuery = serde_json::from_value(serde_json::json!({})).unwrap();
 
         assert_eq!(query.page, 1);
@@ -367,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_sync_envelope_keeps_v2_schema_version_and_casing() {
+    fn offline_sync_envelope_keeps_current_schema_version_and_casing() {
         let envelope = OfflineSyncEnvelope {
             request: OfflineSyncRequest::new(
                 DatasetId::from("ds_1"),
@@ -387,5 +553,97 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn offline_sync_uses_bounded_mutations_without_event_authority_fields() {
+        let request = OfflineSyncRequest::new(
+            DatasetId::from("ds_1"),
+            UserId::from("user_1"),
+            vec![OfflineMutationFragment {
+                image_id: ImageId::from("img_1"),
+                base_sequence: 7,
+                mutations: vec![OfflineMutation::AnnotationDelete {
+                    annotation_id: AnnotationId::from("ann_1"),
+                    expected_version: 3,
+                    reason: None,
+                }],
+            }],
+        );
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["fragments"][0]["mutations"][0]["kind"],
+            "annotation_delete"
+        );
+        assert!(value["fragments"][0].get("events").is_none());
+        assert!(
+            value["fragments"][0]["mutations"][0]
+                .get("actorUserId")
+                .is_none()
+        );
+        assert!(
+            value["fragments"][0]["mutations"][0]
+                .get("timestamp")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mutation_dtos_emit_current_schema_version() {
+        let request = AnnotationBatchRequest {
+            payloads: Vec::new(),
+            complete: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "schemaVersion": SCHEMA_VERSION,
+                "payloads": [],
+                "complete": true,
+            })
+        );
+    }
+
+    #[test]
+    fn mutation_dtos_upcast_legacy_v2_annotations() {
+        let request: AppendEventRequest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2,
+            "payload": {
+                "kind": "annotation_version_created",
+                "annotation": {
+                    "annotationId": "ann_1",
+                    "version": 1,
+                    "taskId": "bounding_box:person",
+                    "classId": "person",
+                    "type": "bounding_box",
+                    "source": { "source": "human" },
+                    "geometry": {
+                        "type": "bounding_box",
+                        "geometry": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2 }
+                    },
+                    "authorUserId": "annotator",
+                    "createdAt": "2026-01-02T03:04:05Z",
+                    "updatedAt": "2026-01-02T03:04:05Z",
+                    "deleted": false
+                },
+                "previous_version": null,
+                "reason": null
+            }
+        }))
+        .unwrap();
+
+        let EventPayload::AnnotationVersionCreated { annotation, .. } = request.payload else {
+            panic!("unexpected payload")
+        };
+        assert!(matches!(
+            annotation.origin,
+            AnnotationOrigin::Native { legacy_v2: true }
+        ));
+        assert!(matches!(
+            annotation.revision_source,
+            RevisionSource::Human { .. }
+        ));
     }
 }

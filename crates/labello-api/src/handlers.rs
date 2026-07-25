@@ -27,12 +27,13 @@ use tracing::Span;
 use crate::{
     ApiState,
     auth::{
-        actor_from_headers, current_account, ensure_any_dataset_role, ensure_bootstrap_admin,
-        ensure_dataset_role, has_dataset_role, session_token,
+        actor_from_headers, ensure_any_dataset_role, ensure_bootstrap_admin, ensure_dataset_role,
+        has_dataset_role, session_token,
     },
     error::{ApiError, ApiResult},
 };
 
+mod imports;
 mod ingest;
 mod oauth_routes;
 mod workflow;
@@ -53,8 +54,22 @@ pub fn router(state: ApiState) -> Router {
             CorsLayer::new()
                 .allow_credentials(true)
                 .allow_origin(origins)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-                .allow_headers([header::CONTENT_TYPE])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::HeaderName::from_static(crate::csrf::HEADER),
+                    header::HeaderName::from_static("idempotency-key"),
+                    header::HeaderName::from_static("upload-offset"),
+                    header::HeaderName::from_static("upload-length"),
+                    header::HeaderName::from_static("digest"),
+                ])
                 .expose_headers([
                     header::HeaderName::from_static("x-image-width"),
                     header::HeaderName::from_static("x-image-height"),
@@ -108,6 +123,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/auth/local-admin", post(local_admin_login))
         .route("/auth/github/login", get(oauth_routes::github_login))
         .route("/auth/github/callback", get(oauth_routes::github_callback))
+        .merge(imports::routes(&state))
         .route("/datasets", get(list_datasets).post(create_dataset))
         .route("/datasets/{dataset_id}", get(get_dataset))
         .route("/datasets/{dataset_id}/users", get(list_dataset_users))
@@ -190,6 +206,34 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::apply_annotation_batch),
         )
         .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/skeleton",
+            post(workflow::save_migration_skeleton),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/exclude",
+            post(workflow::exclude_migration_target),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/reopen",
+            post(workflow::reopen_migration_target),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/passes",
+            post(workflow::start_migration_pass),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/keep",
+            post(workflow::keep_migration_target),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/confirm",
+            post(workflow::confirm_migration),
+        )
+        .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/review",
+            post(workflow::review_migration),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}/admin/events",
             post(workflow::append_admin_repair_event),
         )
@@ -226,6 +270,10 @@ pub fn router(state: ApiState) -> Router {
             "/datasets/{dataset_id}/prelabel-suggestions",
             post(workflow::prelabel_suggestions),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::csrf::enforce,
+        ))
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .with_state(state);
     app.layer(middleware)
@@ -250,7 +298,7 @@ async fn local_admin_login(
         .local_admin_user_id()
         .cloned()
         .ok_or_else(|| ApiError::NotFound("local admin login".to_string()))?;
-    require_configured_origin(&state, &headers)?;
+    crate::csrf::require_login_origin(&state, &headers)?;
     let timestamp = labello_domain::now();
     let account = if let Some(account) = state.server_store.user(&user_id)? {
         account
@@ -266,56 +314,55 @@ async fn local_admin_login(
                 updated_at: timestamp,
             })?
     };
-    let token = state.create_session(user_id)?;
-    let cookie = crate::session::session_cookie(&token, state.session_cookie_secure());
+    if let Some(token) = session_token(&headers) {
+        state.server_store.delete_session(&token)?;
+    }
+    let session = state.create_session(user_id)?;
+    let cookie = crate::session::session_cookie(&session.cookie, state.session_cookie_secure());
     tracing::info!(
         event = "auth.local_admin.completed",
         user_id = %account.user_id,
         "local administrator login completed"
     );
     Ok((
-        [(
-            header::SET_COOKIE,
-            HeaderValue::from_str(&cookie)
-                .map_err(|error| ApiError::Internal(error.to_string()))?,
-        )],
+        [
+            (
+                header::SET_COOKIE,
+                HeaderValue::from_str(&cookie)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
         Json(SessionInfo {
             can_create_datasets: state.is_bootstrap_admin(&account.user_id),
             account,
+            csrf_token: session.csrf,
         }),
     ))
 }
 
-fn require_configured_origin(state: &ApiState, headers: &HeaderMap) -> ApiResult<()> {
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    let Some(origin) = origins.next() else {
-        return Ok(());
-    };
-    if origins.next().is_some()
-        || origin.to_str().map_or(true, |origin| {
-            !state
-                .browser_origins()
-                .iter()
-                .any(|allowed| allowed == origin)
-        })
-    {
-        return Err(ApiError::Unauthorized("origin is not allowed".to_string()));
-    }
-    Ok(())
-}
-
-async fn me(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Json<SessionInfo>> {
-    let account = current_account(&state, &headers)?;
+async fn me(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {
+    let cookie_token = session_token(&headers)
+        .ok_or_else(|| ApiError::Unauthorized("login required".to_string()))?;
+    let session = state
+        .server_store
+        .session(&cookie_token)?
+        .ok_or_else(|| ApiError::Unauthorized("login required".to_string()))?;
+    let account = session.account;
     tracing::info!(
         event = "auth.completed",
         auth_mode = "session",
         user_id = %account.user_id,
         "authentication completed"
     );
-    Ok(Json(SessionInfo {
-        can_create_datasets: state.is_bootstrap_admin(&account.user_id),
-        account,
-    }))
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(SessionInfo {
+            can_create_datasets: state.is_bootstrap_admin(&account.user_id),
+            account,
+            csrf_token: session.csrf_token,
+        }),
+    ))
 }
 
 async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {
@@ -469,6 +516,21 @@ async fn create_dataset(
                 .to_string(),
         ));
     }
+    request.dataset_id.validate_path_segment()?;
+    if request.dataset_id.as_str() == ".labello-server" {
+        return Err(ApiError::BadRequest(
+            "dataset ID is reserved for server state".to_string(),
+        ));
+    }
+    let _mutation = state.lock_datasets_root_mutation().await;
+    if state
+        .import_destination_reserved(&request.dataset_id)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "dataset ID is reserved by an active import".to_string(),
+        ));
+    }
     let repo = state.repo(&request.dataset_id)?;
     let mut metadata = DatasetMetadata::new(
         request.dataset_id.clone(),
@@ -536,6 +598,9 @@ async fn list_datasets(
             }
         };
         if !file_type.is_dir() {
+            continue;
+        }
+        if entry.file_name() == ".labello-server" {
             continue;
         }
         let dataset_id = DatasetId::from(entry.file_name().to_string_lossy().to_string());
@@ -1052,6 +1117,7 @@ mod report_tests {
             skeleton: None,
             review: labello_domain::ReviewConfig::default(),
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         };
         assert!(validate_enabled_task(&task).is_err());

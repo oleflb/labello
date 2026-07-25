@@ -12,6 +12,10 @@ Labello currently supports:
 - object-level approval review and correction workflows;
 - dataset, task, class, tutorial, role, and keybinding administration;
 - filesystem image ingestion, duplicate detection, statistics, and snapshots;
+- atomic new-dataset import for explicit YOLO detection/pose and COCO
+  instances/keypoints ground-truth profiles;
+- guided box-to-skeleton migration with audited exclusions and replayed
+  progress;
 - loopback-only local administrator login and GitHub OAuth.
 
 The project is under active development. See [Current limitations](#current-limitations)
@@ -171,12 +175,27 @@ A bootstrap admin creates a dataset in the setup view. A data admin can then:
 4. Run ingestion to index images and detect duplicate content.
 5. Assign users to annotation, review, adjudication, or administration roles.
 
+A bootstrap administrator can also select `Import a dataset` in Setup when the
+server advertises import capability. Import accepts the four explicit profiles
+`ultralytics_yolo_detect_v1`, `ultralytics_yolo_pose_v1`,
+`coco_instances_gt_v1`, and `coco_keypoints_gt_v1`. It creates a new dataset
+only; it never merges into or replaces an existing dataset.
+
+Server-directory import is preferred for large sources. Browser folder import
+is resumable within the advertised limits, but selecting the folder again is
+required after reload when the browser does not preserve a directory handle.
+Sources are sealed, preflighted, mapped, rebuilt from generated event logs, and
+published only after verification. YOLO paths must be portable and relative to
+the sealed source; absolute YAML paths, URLs, and `download` directives are not
+followed.
+
 The server stores each dataset below `datasetsRoot`:
 
 ```text
 datasets/
   .labello-server/
     auth.json
+    imports/
   <dataset-id>/
     labello.dataset.toml
     labello.schema.json
@@ -188,12 +207,17 @@ datasets/
     users/<user-id>/
       keybindings.toml
     .labello/snapshots/
+    .labello/imports/<import-id>/
+      manifest.json
+      source-objects.jsonl
 ```
 
 Per-image `events.jsonl` files are the authoritative audit history;
 `state.json` can be rebuilt from them. Snapshots include dataset metadata and
 annotation history but not image bytes, authentication data, or user
-keybindings. Back up those separately.
+keybindings. Import manifests and canonical source-object audit records are
+included, but imported image bytes remain excluded. Back up image bytes and
+authentication state separately.
 
 ## Architecture
 
@@ -288,6 +312,10 @@ See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
   the native inspector is a development tool and its live mode omits
   browser-only functionality.
 - Ingest jobs and some caches are process-local and do not survive restarts.
+- Import format support is tested under configured limits, but official
+  COCO-scale operation remains a separate performance gate.
+- Import publication and assignment locking assume one server process per
+  datasets root.
 
 The broader product requirements and planned behavior are documented in
 [labello.md](labello.md). That document describes the target product and is

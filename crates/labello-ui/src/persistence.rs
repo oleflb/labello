@@ -2154,6 +2154,7 @@ mod tests {
                 canonical_path: "x".repeat(MAX_ADMIN_DRAFT_BYTES),
                 known_paths: Vec::new(),
                 duplicate_paths: Vec::new(),
+                source_memberships: None,
                 file_name: "image.png".to_string(),
                 byte_size: 1,
                 width: 1,

@@ -1,3 +1,4 @@
+use super::migration::{has_migration_final_review_by_user, migration_final_approval_count};
 use super::review::{has_task_review_by_user, task_approval_count};
 use super::*;
 
@@ -38,6 +39,19 @@ impl DatasetRepository {
                 .any(|assignment| assignment.assignment_id == *assignment_id)
             {
                 continue;
+            }
+            let status = state
+                .task_states
+                .get(task_id)
+                .map(|task_state| &task_state.status)
+                .unwrap_or(&TaskStatus::Pending);
+            let eligible = match &kind {
+                AssignmentKind::Annotation => state.assignment_eligible(task_id),
+                AssignmentKind::Review => status == &TaskStatus::Submitted,
+                AssignmentKind::Adjudication => status == &TaskStatus::AdjudicationRequired,
+            };
+            if !eligible {
+                return Ok(None);
             }
             return Ok(exact_active_assignment(
                 &state.assignments,
@@ -129,6 +143,13 @@ impl DatasetRepository {
                 .get(task_id)
                 .map(|state| state.status.clone())
                 .unwrap_or(TaskStatus::Pending);
+            if kind == AssignmentKind::Annotation && !state.assignment_eligible(task_id) {
+                if !payloads.is_empty() {
+                    self.append_payloads_unlocked(image_id, &actor, payloads)
+                        .await?;
+                }
+                continue;
+            }
             if kind == AssignmentKind::Annotation
                 && status == TaskStatus::InProgress
                 && payloads.iter().any(|payload| {
@@ -154,10 +175,17 @@ impl DatasetRepository {
                 });
             }
             if kind == AssignmentKind::Review {
-                let reviews = self.current_task_reviews(image_id, task_id).await?;
-                if has_task_review_by_user(&reviews, task_id, user_id)
-                    || task_approval_count(&reviews, task_id) >= task.review.required_reviews
-                {
+                let already_final = if task.manual_box_guide_migration.is_some() {
+                    let events = self.load_events(image_id).await?;
+                    has_migration_final_review_by_user(&events, task_id, user_id)
+                        || migration_final_approval_count(&events, task_id)
+                            >= task.review.required_reviews
+                } else {
+                    let reviews = self.current_task_reviews(image_id, task_id).await?;
+                    has_task_review_by_user(&reviews, task_id, user_id)
+                        || task_approval_count(&reviews, task_id) >= task.review.required_reviews
+                };
+                if already_final {
                     if !payloads.is_empty() {
                         self.append_payloads_unlocked(image_id, &actor, payloads)
                             .await?;

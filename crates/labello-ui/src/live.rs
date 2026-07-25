@@ -8,14 +8,23 @@ use labello_client::{
 use web_time::{Duration, Instant};
 
 use crate::app::{
-    AppView, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage, RequestIdentity, SaveStatus,
-    UiCommand, UiMessage,
+    AppView, ImportRequestIdentity, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage,
+    RequestIdentity, SaveStatus, UiCommand, UiMessage,
 };
 
 impl LabelloApp {
     pub(crate) fn rebuild_http_api(&mut self) {
         self.begin_auth_epoch();
-        match HttpLabelloApi::new(&self.config.api_base_url) {
+        self.begin_import_epoch();
+        self.import_flow = Default::default();
+        let api = HttpLabelloApi::new(&self.config.api_base_url).and_then(|api| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(application_url) = &self.config.application_url {
+                return api.with_origin(application_url);
+            }
+            Ok(api)
+        });
+        match api {
             Ok(api) => {
                 self.runtime.api = Some(Rc::new(api));
                 self.runtime.error = None;
@@ -35,6 +44,11 @@ impl LabelloApp {
                 break;
             };
             processed += 1;
+            if let Some(request) = message.import_request().cloned()
+                && !self.finish_import_request(&request)
+            {
+                continue;
+            }
             let requires_current_dataset = !matches!(&message, UiMessage::DatasetCreated { .. });
             if let Some(request) = message.request().cloned()
                 && !self.finish_request(&request, requires_current_dataset)
@@ -60,6 +74,266 @@ impl LabelloApp {
                 continue;
             }
             match message {
+                UiMessage::ImportCapabilitiesLoaded { result, .. } => {
+                    self.import_flow.capabilities_loading = false;
+                    match result {
+                        Ok(capabilities) => {
+                            self.import_flow
+                                .normalize_capability_selection(&capabilities);
+                            self.import_flow.capabilities = Some(capabilities);
+                            self.import_flow.capabilities_error = None;
+                        }
+                        Err(error) => self.import_flow.capabilities_error = Some(error),
+                    }
+                }
+                UiMessage::ImportJobLoaded { result, .. } => {
+                    self.import_flow.busy = false;
+                    match *result {
+                        Ok(job) => {
+                            let job_changed = self
+                                .import_flow
+                                .job
+                                .as_ref()
+                                .is_none_or(|current| current.import_id != job.import_id);
+                            let recovered = job_changed
+                                && self.import_flow.recovery_import_id == job.import_id.as_str();
+                            if recovered {
+                                self.import_flow.pending_plan_request = None;
+                            }
+                            self.import_flow.hydrate_job_contract(&job);
+                            if recovered && job.recovery.is_none() {
+                                self.import_flow.recovery_contract_gap = true;
+                            }
+                            let load_diagnostics = job.lifecycle
+                                == labello_client::ImportLifecycle::AwaitingDecision
+                                && self.import_flow.diagnostics.is_empty();
+                            self.import_flow.recovery_import_id = job.import_id.to_string();
+                            self.import_flow.screen = crate::import_flow::import_screen(
+                                &job,
+                                self.import_flow.plan.as_ref(),
+                            );
+                            self.import_flow.error = None;
+                            let polling = matches!(
+                                job.lifecycle,
+                                labello_client::ImportLifecycle::Preflighting
+                                    | labello_client::ImportLifecycle::Building
+                                    | labello_client::ImportLifecycle::Verifying
+                                    | labello_client::ImportLifecycle::Committing
+                            );
+                            self.import_flow.poll_after =
+                                polling.then(|| Instant::now() + Duration::from_millis(500));
+                            self.import_flow.job = Some(job);
+                            if load_diagnostics {
+                                self.request_import_diagnostics(true);
+                            }
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                UiMessage::ImportBrowserFilesSelected { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(files) => self.register_selected_import_files(files),
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportFilesRegistered { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(registered) => {
+                            if let Some(job) = self.import_flow.job.as_mut() {
+                                job.lifecycle = labello_client::ImportLifecycle::Uploading;
+                                job.progress.registered_files = registered.registered_files;
+                                job.progress.total_files = registered.registered_files;
+                                job.progress.total_bytes = registered.registered_bytes;
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                for file in &registered.files {
+                                    if let Some(path) = self
+                                        .import_flow
+                                        .registered_paths
+                                        .iter_mut()
+                                        .find(|path| path.client_file_id == file.client_file_id)
+                                    {
+                                        path.file_id = file.file_id.clone();
+                                    }
+                                }
+                                self.import_flow.browser_uploads = registered.files;
+                                self.upload_next_import_chunk();
+                            }
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportChunkUploaded {
+                    file_id: _file_id,
+                    result,
+                    ..
+                } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(_chunk) => {
+                            #[cfg(target_arch = "wasm32")]
+                            if let Some(file) = self
+                                .import_flow
+                                .browser_uploads
+                                .iter_mut()
+                                .find(|file| file.file_id == _file_id)
+                            {
+                                file.accepted_bytes = _chunk.accepted_offset;
+                                file.complete = _chunk.complete;
+                            }
+                            if let Some(_job) = self.import_flow.job.as_mut() {
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    _job.progress.uploaded_files =
+                                        self.import_flow
+                                            .browser_uploads
+                                            .iter()
+                                            .filter(|file| file.complete)
+                                            .count() as u64;
+                                    _job.progress.accepted_bytes = self
+                                        .import_flow
+                                        .browser_uploads
+                                        .iter()
+                                        .map(|file| file.accepted_bytes)
+                                        .sum();
+                                }
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            self.upload_next_import_chunk();
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportSealed { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(sealed) => {
+                            if let Some(job) = self.import_flow.job.as_mut() {
+                                job.lifecycle = labello_client::ImportLifecycle::Sealed;
+                                job.source_fingerprint = Some(sealed.source_fingerprint);
+                                job.progress.total_files = sealed.files;
+                                job.progress.total_bytes = sealed.bytes;
+                            }
+                            self.request_preflight_import(false);
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportPlanUpdated { result, .. } => {
+                    self.import_flow.busy = false;
+                    match *result {
+                        Ok(plan) => {
+                            let requested = self.import_flow.pending_plan_request.take();
+                            if requested.as_ref() != plan.accepted_request.as_ref() {
+                                self.import_flow.plan = None;
+                                self.import_flow.accepted_plan_request = None;
+                                self.import_flow.error = Some(
+                                    "The server returned a plan for different mapping inputs. Save the current mappings again before commit."
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                            self.import_flow.accepted_plan_request = plan.accepted_request.clone();
+                            self.import_flow.screen = if plan.commit_ready {
+                                crate::import_flow::ImportScreen::Ready
+                            } else {
+                                crate::import_flow::ImportScreen::Preflight
+                            };
+                            if let Some(job) = self.import_flow.job.as_mut() {
+                                job.plan_hash = Some(plan.plan_hash.clone());
+                                job.preflight_report = Some(plan.report.clone());
+                            }
+                            self.import_flow.plan = Some(plan);
+                            self.import_flow.error = None;
+                        }
+                        Err(error) => {
+                            self.import_flow.pending_plan_request = None;
+                            self.import_flow.error = Some(error);
+                        }
+                    }
+                }
+                UiMessage::ImportDiagnosticsLoaded { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(page) => {
+                            self.import_flow.diagnostics.extend(page.diagnostics);
+                            self.import_flow.diagnostics_cursor = page.next_cursor;
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportCommitted { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(committed) => {
+                            if let Some(job) = self.import_flow.job.as_mut() {
+                                job.lifecycle = labello_client::ImportLifecycle::Succeeded;
+                                job.destination_dataset_id = committed.dataset_id;
+                                job.plan_hash = Some(committed.plan_hash);
+                            }
+                            self.import_flow.screen = crate::import_flow::ImportScreen::Success;
+                            self.runtime.notice = Some(if committed.recovered {
+                                "Recovered and completed the import".to_string()
+                            } else {
+                                "Dataset import completed".to_string()
+                            });
+                            self.request_dataset_list();
+                        }
+                        Err(error) => {
+                            self.import_flow.screen = crate::import_flow::ImportScreen::Failure;
+                            self.import_flow.error = Some(error);
+                        }
+                    }
+                }
+                UiMessage::ImportCancelled { result, .. } => {
+                    self.import_flow.busy = false;
+                    match result {
+                        Ok(cancelled) => {
+                            if let Some(job) = self.import_flow.job.as_mut() {
+                                job.lifecycle = cancelled.lifecycle;
+                            }
+                            self.import_flow.screen = crate::import_flow::ImportScreen::Failure;
+                            self.runtime.notice = Some("Import cancelled".to_string());
+                        }
+                        Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::MigrationFinished { result, .. } => {
+                    self.work.migration.busy = false;
+                    match *result {
+                        Ok(result) => {
+                            let completed = result.assignment.as_ref().is_some_and(|assignment| {
+                                assignment.status == labello_domain::AssignmentStatus::Completed
+                            });
+                            self.apply_state(result.image_state);
+                            self.work.migration.cursor = result.cursor;
+                            self.work.migration.progress = Some(result.progress);
+                            self.work.migration.active_pass_id =
+                                result.active_pass.map(|pass| pass.pass_id);
+                            if let Some(assignment) = result.assignment {
+                                self.assignment = Some(assignment);
+                            }
+                            self.work.migration.draft = None;
+                            self.work.migration.draft_group = None;
+                            self.work.migration.keypoint_index = 0;
+                            self.work.migration.full_image_confirmed = false;
+                            self.work.migration.error = None;
+                            if self.view == AppView::Review {
+                                self.work.migration.review_index =
+                                    self.canonical_migration_review_index();
+                            }
+                            if completed {
+                                self.clear_current_image();
+                                self.request_next_image();
+                            }
+                        }
+                        Err(error) => self.work.migration.error = Some(error),
+                    }
+                }
                 UiMessage::AuthOptionsLoaded { result, .. } => {
                     self.loading.session = false;
                     self.auth.options_checked = true;
@@ -87,6 +361,12 @@ impl LabelloApp {
                     match result {
                         Ok(session) => {
                             let account = session.account;
+                            if self.auth.account.as_ref().map(|current| &current.user_id)
+                                != Some(&account.user_id)
+                            {
+                                self.begin_import_epoch();
+                                self.import_flow = Default::default();
+                            }
                             self.config.user_id = account.user_id.clone();
                             self.work.keybindings = labello_domain::KeybindingSet::defaults_for(
                                 account.user_id.clone(),
@@ -98,6 +378,10 @@ impl LabelloApp {
                             self.request_dataset_list();
                         }
                         Err(error) => {
+                            if self.auth.account.is_some() {
+                                self.begin_import_epoch();
+                                self.import_flow = Default::default();
+                            }
                             self.auth.account = None;
                             self.auth.can_create_datasets = false;
                             self.datasets.summaries.clear();
@@ -763,6 +1047,186 @@ impl LabelloApp {
             return;
         };
         match command {
+            UiCommand::ImportCapabilities { request } => self.spawn_import_message(async move {
+                UiMessage::ImportCapabilitiesLoaded {
+                    request,
+                    result: api
+                        .import_capabilities()
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::CreateImport {
+                request,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportJobLoaded {
+                    request,
+                    result: Box::new(
+                        api.create_import(body, &idempotency_key)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    ),
+                }
+            }),
+            UiCommand::GetImport { request, import_id } => self.spawn_import_message(async move {
+                UiMessage::ImportJobLoaded {
+                    request,
+                    result: Box::new(
+                        api.get_import(&import_id)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    ),
+                }
+            }),
+            UiCommand::RegisterImportFiles {
+                request,
+                import_id,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportFilesRegistered {
+                    request,
+                    result: api
+                        .register_import_files(&import_id, body, &idempotency_key)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::SealImport {
+                request,
+                import_id,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportSealed {
+                    request,
+                    result: api
+                        .seal_import(&import_id, body, &idempotency_key)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::PreflightImport {
+                request,
+                import_id,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportJobLoaded {
+                    request,
+                    result: Box::new(
+                        api.preflight_import(&import_id, body, &idempotency_key)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    ),
+                }
+            }),
+            UiCommand::UpdateImportPlan {
+                request,
+                import_id,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportPlanUpdated {
+                    request,
+                    result: Box::new(
+                        api.update_import_plan(&import_id, body, &idempotency_key)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    ),
+                }
+            }),
+            UiCommand::ImportDiagnostics {
+                request,
+                import_id,
+                query,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportDiagnosticsLoaded {
+                    request,
+                    result: api
+                        .import_diagnostics(&import_id, query)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::CommitImport {
+                request,
+                import_id,
+                body,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportCommitted {
+                    request,
+                    result: api
+                        .commit_import(&import_id, body, &idempotency_key)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::CancelImport {
+                request,
+                import_id,
+                idempotency_key,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportCancelled {
+                    request,
+                    result: api
+                        .cancel_import(
+                            &import_id,
+                            labello_client::CancelImportRequest {
+                                reason: Some("cancelled by administrator".to_string()),
+                            },
+                            &idempotency_key,
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::Migration {
+                request,
+                dataset_id,
+                image_id,
+                action,
+                idempotency_key,
+            } => self.spawn_message(request.clone(), async move {
+                let result = match action {
+                    crate::app::MigrationAction::SaveSkeleton(body) => {
+                        api.save_migration_skeleton(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::Exclude(body) => {
+                        api.exclude_migration_target(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::Reopen(body) => {
+                        api.reopen_migration_target(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::StartPass(body) => {
+                        api.start_migration_pass(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::Keep(body) => {
+                        api.keep_migration_target(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::Confirm(body) => {
+                        api.confirm_migration(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::Review(body) => {
+                        api.review_migration(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                }
+                .map_err(|error| error.to_string());
+                UiMessage::MigrationFinished {
+                    request,
+                    result: Box::new(result),
+                }
+            }),
             UiCommand::AuthOptions { request } => self.spawn_message(request.clone(), async move {
                 UiMessage::AuthOptionsLoaded {
                     request,
@@ -1008,6 +1472,8 @@ impl LabelloApp {
     }
 
     fn clear_authenticated_state(&mut self) {
+        self.begin_import_epoch();
+        self.import_flow = Default::default();
         self.auth.account = None;
         self.auth.can_create_datasets = false;
         self.datasets.summaries.clear();
@@ -1148,9 +1614,11 @@ impl LabelloApp {
 
     pub(crate) fn queue_command(&mut self, command: UiCommand) -> bool {
         if self.runtime.commands.len() < 64 {
-            self.runtime
-                .active_requests
-                .insert(command.request().request_id);
+            let request_id = command
+                .import_request()
+                .map(|request| request.request_id)
+                .unwrap_or_else(|| command.request().request_id);
+            self.runtime.active_requests.insert(request_id);
             self.runtime.commands.push_back(command);
             true
         } else {
@@ -1163,10 +1631,32 @@ impl LabelloApp {
     }
 
     fn rollback_command(&mut self, command: &UiCommand, error: &str) {
-        self.runtime
-            .active_requests
-            .remove(&command.request().request_id);
+        let request_id = command
+            .import_request()
+            .map(|request| request.request_id)
+            .unwrap_or_else(|| command.request().request_id);
+        self.runtime.active_requests.remove(&request_id);
         match command {
+            UiCommand::ImportCapabilities { .. } => {
+                self.import_flow.capabilities_loading = false;
+                self.import_flow.capabilities_error = Some(error.to_string());
+            }
+            UiCommand::CreateImport { .. }
+            | UiCommand::GetImport { .. }
+            | UiCommand::RegisterImportFiles { .. }
+            | UiCommand::SealImport { .. }
+            | UiCommand::PreflightImport { .. }
+            | UiCommand::UpdateImportPlan { .. }
+            | UiCommand::ImportDiagnostics { .. }
+            | UiCommand::CommitImport { .. }
+            | UiCommand::CancelImport { .. } => {
+                self.import_flow.busy = false;
+                self.import_flow.error = Some(error.to_string());
+            }
+            UiCommand::Migration { .. } => {
+                self.work.migration.busy = false;
+                self.work.migration.error = Some(error.to_string());
+            }
             UiCommand::AuthOptions { .. } => {
                 self.loading.session = false;
                 self.auth.options_checked = true;
@@ -1268,6 +1758,51 @@ impl LabelloApp {
             request_id: self.next_operation(),
             dataset_id,
         }
+    }
+
+    pub(crate) fn import_request_identity(
+        &mut self,
+        import_id: Option<labello_domain::ImportId>,
+    ) -> ImportRequestIdentity {
+        ImportRequestIdentity {
+            auth_epoch: self.auth_epoch,
+            import_epoch: self.import_epoch,
+            request_id: self.next_operation(),
+            import_id,
+        }
+    }
+
+    pub(crate) fn begin_import_epoch(&mut self) {
+        self.import_epoch = self.import_epoch.wrapping_add(1);
+        let queued_import_requests = self
+            .runtime
+            .commands
+            .iter()
+            .filter_map(|command| command.import_request().map(|request| request.request_id))
+            .collect::<Vec<_>>();
+        self.runtime
+            .commands
+            .retain(|command| command.import_request().is_none());
+        for request_id in queued_import_requests {
+            self.runtime.active_requests.remove(&request_id);
+        }
+        self.import_flow.busy = false;
+        self.import_flow.poll_after = None;
+    }
+
+    fn finish_import_request(&mut self, request: &ImportRequestIdentity) -> bool {
+        let owner_matches = request.import_id.as_ref().is_none_or(|owner| {
+            self.import_flow
+                .job
+                .as_ref()
+                .is_none_or(|job| &job.import_id == owner)
+                || self.import_flow.recovery_import_id == owner.as_str()
+        });
+        let current = request.auth_epoch == self.auth_epoch
+            && request.import_epoch == self.import_epoch
+            && owner_matches;
+        let active = self.runtime.active_requests.remove(&request.request_id);
+        current && active
     }
 
     pub(crate) fn operation_identity(
@@ -1860,6 +2395,7 @@ impl LabelloApp {
 
     fn apply_loaded_image(&mut self, ctx: &egui::Context, loaded: LoadedImage) {
         let image_id = loaded.queued.image.image_id.clone();
+        self.work.migration = Default::default();
         self.assignment = Some(loaded.assignment);
         self.current = Some(loaded.queued);
         self.current_state = Some(loaded.state.clone());
@@ -1953,7 +2489,7 @@ impl LabelloApp {
         }
     }
 
-    fn apply_state(&mut self, state: labello_domain::ImageState) {
+    pub(crate) fn apply_state(&mut self, state: labello_domain::ImageState) {
         self.renew_assignment_from_state(&state);
         self.annotations = state.active_annotations().cloned().collect();
         self.persisted_annotations = self
@@ -2053,6 +2589,42 @@ impl LabelloApp {
                 ctx.request_repaint();
             }
         }
+    }
+
+    pub(crate) fn spawn_import_message<F>(&self, future: F)
+    where
+        F: Future<Output = UiMessage> + 'static,
+    {
+        let tx = self.runtime.tx.clone();
+        let repaint_ctx = self.runtime.repaint_ctx.clone();
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = tx.send(future.await);
+            if let Some(ctx) = repaint_ctx {
+                ctx.request_repaint();
+            }
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(spawn) = &self.runtime.native_task_spawner {
+                spawn(Box::pin(async move {
+                    let _ = tx.send(future.await);
+                    if let Some(ctx) = repaint_ctx {
+                        ctx.request_repaint();
+                    }
+                }));
+                return;
+            }
+        }
+        #[cfg(all(not(target_arch = "wasm32"), test))]
+        {
+            let _ = tx.send(poll_ready(future));
+            if let Some(ctx) = repaint_ctx {
+                ctx.request_repaint();
+            }
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(test)))]
+        drop(future);
     }
 }
 

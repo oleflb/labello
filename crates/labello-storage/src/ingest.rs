@@ -277,6 +277,7 @@ fn read_image_record_blocking(
         width,
         height,
         media_type,
+        source_memberships: None,
     };
     Ok((hash, record))
 }

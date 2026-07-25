@@ -8,6 +8,10 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn workspace_canvas(&mut self, ui: &mut egui::Ui) {
+        if self.manual_migration_active() {
+            self.migration_workspace_canvas(ui);
+            return;
+        }
         if let Some(current) = self.current.clone() {
             let texture = self.current_texture.clone();
             let mut annotations = self

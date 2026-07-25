@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdjudicationId, AnnotationId, AssignmentId, CorrectionId, ImageId, ReviewId, TaskId, Timestamp,
-    UserId,
+    AdjudicationId, AnnotationId, AssignmentId, CorrectionId, ImageId, MigrationHash,
+    ObjectGroupId, ReviewId, TaskId, Timestamp, UserId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -19,6 +19,15 @@ pub enum ReviewTarget {
     AnnotationVersion {
         annotation_id: AnnotationId,
         version: u32,
+    },
+    MigrationDisposition {
+        task_id: TaskId,
+        object_group_id: ObjectGroupId,
+        disposition_version: u32,
+    },
+    MigrationConfirmation {
+        task_id: TaskId,
+        confirmation_hash: MigrationHash,
     },
     Task {
         task_id: TaskId,

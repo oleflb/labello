@@ -19,20 +19,21 @@ use labello_client::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, ApiFuture, AppendEventRequest,
     AssignNextRequest, AssignmentActionRequest, AuthApi, AuthOptions, ClientError, ClientResult,
     CorrectionRequest, CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi,
-    ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestJobStatus, IngestReport,
-    KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest,
-    PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SessionInfo, SetDatasetRolesRequest,
-    SnapshotFile, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
+    ImageExplorerQuery, ImageFile, ImagePreview, ImportApi, IngestJob, IngestJobStatus,
+    IngestReport, KeybindingApi, OAuthCallbackRequest, OAuthLoginRequest, OfflineApi,
+    OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest, ReviewApi, SessionInfo,
+    SetDatasetRolesRequest, SnapshotFile, StatsApi, TaskApi, UpdateDatasetConfigRequest, UserApi,
 };
 use labello_domain::{
-    AdjudicationRecord, AnnotationGeometry, AnnotationType, Assignment, AssignmentId,
-    AssignmentKind, AssignmentStatus, BoundingBox, BrowserAcceleration, ClassId, DatasetId,
-    DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetSnapshot, DatasetStats,
-    EventLogEntry, EventPayload, ImageExplorerItem, ImageExplorerPage, ImageId, ImageRecord,
-    ImageState, KeybindingSet, KeypointAnnotation, KeypointSpec, KeypointState, LabelClass,
-    ModelSpec, NormalizedPoint, OfflineBundle, OfflineSyncRequest, OfflineSyncResult,
-    OutputProcessing, PrelabelConfig, PrelabelConfigId, PrelabelExecution, PrelabelSuggestion,
-    ReviewConfig, ReviewId, ReviewRecord, ReviewTarget, SCHEMA_VERSION, SkeletonGeometry,
+    AdjudicationRecord, AnnotationGeometry, AnnotationOrigin, AnnotationType, Assignment,
+    AssignmentId, AssignmentKind, AssignmentStatus, BoundingBox, BrowserAcceleration, ClassId,
+    DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetSnapshot, DatasetStats,
+    EventId, EventLogEntry, EventPayload, HumanRevisionKind, ImageExplorerItem, ImageExplorerPage,
+    ImageId, ImageRecord, ImageState, ImportId, KeybindingSet, KeypointAnnotation, KeypointSpec,
+    KeypointState, LabelClass, MigrationDispositionStatus, MigrationExclusion, ModelSpec,
+    NormalizedPoint, OfflineBundle, OfflineSyncRequest, OfflineSyncResult, OutputProcessing,
+    PrelabelConfig, PrelabelConfigId, PrelabelExecution, PrelabelSuggestion, ReviewConfig,
+    ReviewId, ReviewRecord, ReviewTarget, RevisionSource, SCHEMA_VERSION, SkeletonGeometry,
     SkeletonSpec, SnapshotFileEntry, TaskDefinition, TaskId, TaskStatus, TutorialContent,
     UserAccount, UserId,
 };
@@ -155,6 +156,644 @@ fn setup_only_offers_dataset_creation_to_permitted_accounts() {
     harness.state_mut().auth.can_create_datasets = true;
     harness.step();
     assert!(harness.query_by_label("Create a dataset").is_some());
+}
+
+#[test]
+fn setup_import_blocks_mapping_when_real_category_contract_is_absent() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api.clone());
+    harness.set_size(egui::vec2(1180.0, 2600.0));
+    step_until(&mut harness, 12, |app| {
+        app.import_flow.capabilities.is_some() && !app.datasets.summaries.is_empty()
+    });
+
+    click(&mut harness, "Import a dataset");
+    {
+        let flow = &mut harness.state_mut().import_flow;
+        flow.open = true;
+        flow.destination_id = "imported".to_string();
+        flow.destination_name = "Imported dataset".to_string();
+        flow.transport = labello_client::ImportTransport::ServerDirectory;
+        flow.server_root_id = "staging".to_string();
+        flow.server_relative_path = "release-1".to_string();
+        flow.ground_truth = true;
+        flow.exhaustive = true;
+        flow.coverage_scope = "person".to_string();
+        flow.provenance = "curated benchmark".to_string();
+    }
+    harness.step();
+    click(&mut harness, "Register import");
+    step_until(&mut harness, 8, |app| app.import_flow.job.is_some());
+    assert_eq!(api.counts().create_import, 1);
+    assert!(harness.query_by_label("Source configuration").is_some());
+
+    harness.state_mut().import_flow.descriptors[0].descriptor_file_id =
+        "annotations/descriptor.json".to_string();
+    harness.state_mut().import_flow.descriptors[0].image_root_file_id =
+        "images/example.jpg".to_string();
+    harness.step();
+    click(&mut harness, "Seal source and run preflight");
+    step_until(&mut harness, 12, |app| {
+        app.import_flow
+            .job
+            .as_ref()
+            .is_some_and(|job| job.preflight_report.is_some())
+            && !app.import_flow.busy
+    });
+    assert_eq!(api.counts().seal_import, 1);
+    assert_eq!(api.counts().preflight_import, 1);
+    assert!(harness.query_by_label("Preflight summary").is_some());
+    assert!(
+        harness
+            .query_by_label("Category and task mapping")
+            .is_some()
+    );
+
+    assert!(
+        harness
+            .query_by_label("This API contract reports only a category count, not the discovered category keys, IDs, names, or skeleton schemas required for a valid plan. Mapping and commit are disabled; Labello will not guess sparse source IDs.")
+            .is_some()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Save mappings and re-run preflight"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert_eq!(api.counts().update_import_plan, 0);
+    assert_eq!(api.counts().commit_import, 0);
+}
+
+#[test]
+fn import_capability_is_bootstrap_admin_gated_and_stale_epochs_are_ignored() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 12, |app| {
+        app.import_flow.capabilities.is_some()
+    });
+    harness.state_mut().auth.can_create_datasets = false;
+    harness.step();
+    assert!(harness.query_by_label("Import a dataset").is_none());
+
+    let app = harness.state_mut();
+    app.auth.can_create_datasets = true;
+    let request = app.import_request_identity(None);
+    app.runtime.active_requests.insert(request.request_id);
+    app.begin_import_epoch();
+    app.runtime
+        .tx
+        .send(UiMessage::ImportCapabilitiesLoaded {
+            request,
+            result: Err("stale import response".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.import_flow.capabilities_error.is_none());
+}
+
+#[test]
+fn endpoint_and_session_identity_changes_clear_import_state() {
+    let mut endpoint_app = LabelloApp::default();
+    endpoint_app.import_flow.open = true;
+    endpoint_app.import_flow.destination_id = "stale-import".to_string();
+    endpoint_app.config.api_base_url = "http://127.0.0.1:8089".to_string();
+
+    endpoint_app.rebuild_http_api();
+
+    assert!(!endpoint_app.import_flow.open);
+    assert!(endpoint_app.import_flow.destination_id.is_empty());
+
+    let mut session_app = LabelloApp::default();
+    session_app.auth.account = Some(UserAccount {
+        user_id: UserId::from("old-user"),
+        display_name: "Old user".to_string(),
+        github_user_id: None,
+        github_login: None,
+        created_at: now(),
+        updated_at: now(),
+    });
+    session_app.import_flow.open = true;
+    session_app.import_flow.destination_id = "stale-import".to_string();
+    let request = test_request(&session_app, 81_001, None);
+    session_app.auth.active_session_request_id = Some(request.request_id);
+    session_app
+        .runtime
+        .active_requests
+        .insert(request.request_id);
+    session_app
+        .runtime
+        .tx
+        .send(UiMessage::SessionLoaded {
+            request,
+            result: Ok(SessionInfo {
+                account: UserAccount {
+                    user_id: UserId::from("new-user"),
+                    display_name: "New user".to_string(),
+                    github_user_id: None,
+                    github_login: None,
+                    created_at: now(),
+                    updated_at: now(),
+                },
+                can_create_datasets: true,
+                csrf_token: "test-token".to_string(),
+            }),
+        })
+        .unwrap();
+
+    session_app.process_messages(&egui::Context::default());
+
+    assert!(!session_app.import_flow.open);
+    assert!(session_app.import_flow.destination_id.is_empty());
+}
+
+#[test]
+fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
+    let api = Rc::new(SpyApi::new());
+    let mut recovered = test_import_job(
+        DatasetId::from("recovered"),
+        "Recovered dataset".to_string(),
+        labello_client::ImportProfile::CocoInstancesGtV1,
+        labello_client::ImportTransport::ServerDirectory,
+    );
+    recovered.import_id = ImportId::from("imp_recovered");
+    recovered.lifecycle = labello_client::ImportLifecycle::AwaitingDecision;
+    recovered.source_fingerprint = Some("source-recovered".to_string());
+    recovered.plan_hash = Some("plan-recovered".to_string());
+    recovered.preflight_report = Some(test_import_report());
+    let recovered_plan = contract_import_plan(recovered.import_id.clone());
+    recovered.recovery = Some(labello_client::ImportRecoveryState {
+        attestations: labello_client::ImportAttestations {
+            ground_truth: true,
+            exhaustive: true,
+            coverage_scope: vec!["person".to_string()],
+            provenance: "curated release".to_string(),
+        },
+        server_root_id: Some("staging".to_string()),
+        source: Some(labello_client::ImportSourceConfiguration {
+            source_namespace: "release".to_string(),
+            descriptors: vec![
+                labello_client::ImportDescriptorSelection {
+                    descriptor_file_id: "file-instances".to_string(),
+                    kind: labello_client::ImportDescriptorKind::CocoInstances,
+                    release: "v1".to_string(),
+                    split: "train".to_string(),
+                    image_root_file_id: Some("file-image".to_string()),
+                    pairing_group: Some("people".to_string()),
+                },
+                labello_client::ImportDescriptorSelection {
+                    descriptor_file_id: "file-keypoints".to_string(),
+                    kind: labello_client::ImportDescriptorKind::CocoKeypoints,
+                    release: "v1".to_string(),
+                    split: "train".to_string(),
+                    image_root_file_id: Some("file-image".to_string()),
+                    pairing_group: Some("people".to_string()),
+                },
+            ],
+            selected_splits: vec!["train".to_string()],
+            selected_category_keys: Vec::new(),
+        }),
+        registered_files: vec![labello_client::RegisteredImportFile {
+            client_file_id: "client-instances".to_string(),
+            file_id: "file-instances".to_string(),
+            byte_size: 100,
+            accepted_bytes: 100,
+            complete: true,
+        }],
+        accepted_plan: Some(recovered_plan.clone()),
+    });
+    api.set_import_job(recovered.clone());
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| {
+        app.import_flow.capabilities.is_some()
+    });
+    {
+        let flow = &mut harness.state_mut().import_flow;
+        flow.open = true;
+        flow.job = Some(test_import_job(
+            DatasetId::from("old"),
+            "Old dataset".to_string(),
+            labello_client::ImportProfile::CocoInstancesGtV1,
+            labello_client::ImportTransport::BrowserFolder,
+        ));
+        flow.plan = Some(labello_client::ImportPlan {
+            import_id: ImportId::from("imp_test"),
+            source_fingerprint: "old-source".to_string(),
+            plan_hash: "old-plan".to_string(),
+            commit_ready: true,
+            blocking_diagnostic_codes: Vec::new(),
+            required_acknowledgement_codes: Vec::new(),
+            report: test_import_report(),
+            source_categories: Vec::new(),
+            accepted_request: None,
+        });
+        flow.registered_paths
+            .push(crate::import_flow::RegisteredImportPath {
+                client_file_id: "old-client".to_string(),
+                file_id: "old-file".to_string(),
+                relative_path: "old/descriptor.json".to_string(),
+            });
+        flow.diagnostics.push(Default::default());
+        flow.recovery_import_id = "imp_recovered".to_string();
+    }
+
+    harness.state_mut().request_import_recovery();
+    assert!(harness.state().import_flow.job.is_none());
+    assert!(harness.state().import_flow.plan.is_none());
+    assert!(harness.state().import_flow.registered_paths.is_empty());
+    assert!(harness.state().import_flow.diagnostics.is_empty());
+    harness.step();
+    step_until(&mut harness, 8, |app| {
+        app.import_flow
+            .job
+            .as_ref()
+            .is_some_and(|job| job.import_id == recovered.import_id)
+    });
+    let flow = &harness.state().import_flow;
+    assert_eq!(flow.plan.as_ref(), Some(&recovered_plan));
+    assert!(!flow.recovery_contract_gap);
+    assert_eq!(flow.profile, recovered.profile);
+    assert_eq!(flow.transport, recovered.transport);
+    assert_eq!(
+        flow.destination_id,
+        recovered.destination_dataset_id.as_str()
+    );
+    assert_eq!(flow.descriptors.len(), 2);
+    assert_eq!(flow.categories.len(), 1);
+    assert_eq!(flow.categories[0].source_category_id, "17");
+    assert_eq!(
+        flow.categories[0]
+            .source_skeleton
+            .as_ref()
+            .unwrap()
+            .keypoints[0]
+            .name,
+        "nose"
+    );
+    assert_eq!(
+        flow.accepted_plan_request.as_ref(),
+        recovered_plan.accepted_request.as_ref()
+    );
+    assert!(harness.query_by_label("Restart import setup").is_none());
+}
+
+#[test]
+fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api.clone());
+    harness.set_size(egui::vec2(1180.0, 2600.0));
+    step_until(&mut harness, 12, |app| {
+        app.import_flow.capabilities.is_some()
+    });
+    let job = test_import_job(
+        DatasetId::from("imported"),
+        "Imported".to_string(),
+        labello_client::ImportProfile::CocoInstancesGtV1,
+        labello_client::ImportTransport::ServerDirectory,
+    );
+    api.set_import_job(job.clone());
+    {
+        let flow = &mut harness.state_mut().import_flow;
+        flow.open = true;
+        flow.job = Some(job);
+        flow.screen = crate::import_flow::ImportScreen::Preflight;
+        flow.job.as_mut().unwrap().preflight_report = Some(test_import_report());
+        flow.categories = vec![contract_import_category()];
+    }
+    harness.step();
+    harness.state_mut().request_update_import_plan();
+    harness.state_mut().import_flow.categories[0].class_name = "Changed while saving".to_string();
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.import_flow.busy);
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert_eq!(
+        api.last_import_plan_request().unwrap().category_mappings[0].class_name,
+        "Person"
+    );
+
+    api.fail_next_import_plan();
+    harness.state_mut().request_update_import_plan();
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.import_flow.busy);
+    assert!(harness.state().import_flow.plan.is_none());
+    assert!(
+        harness
+            .state()
+            .import_flow
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("import plan failed"))
+    );
+}
+
+#[test]
+fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = live_harness(api.clone());
+    step_until(&mut harness, 12, |app| {
+        app.import_flow.capabilities.is_some()
+    });
+    let mut job = test_import_job(
+        DatasetId::from("imported"),
+        "Imported".to_string(),
+        labello_client::ImportProfile::CocoInstancesGtV1,
+        labello_client::ImportTransport::ServerDirectory,
+    );
+    job.preflight_report = Some(test_import_report());
+    api.set_import_job(job.clone());
+    {
+        let flow = &mut harness.state_mut().import_flow;
+        flow.open = true;
+        flow.job = Some(job);
+        flow.screen = crate::import_flow::ImportScreen::Preflight;
+        flow.categories = vec![contract_import_category()];
+        flow.geometry_policy = labello_client::ImportGeometryPolicy::ManualBoxGuideV1;
+        flow.workflow_intent = labello_client::ImportWorkflowIntent::RequireApproval;
+        flow.keypoint_names = "nose,left_eye".to_string();
+    }
+
+    harness.state_mut().request_update_import_plan();
+    harness.step();
+    step_until(&mut harness, 8, |app| {
+        app.import_flow.plan.is_some() && !app.import_flow.busy
+    });
+
+    let request = api.last_import_plan_request().unwrap();
+    assert_eq!(request.task_mappings.len(), 2);
+    assert!(request.task_mappings.iter().all(|mapping| {
+        mapping.task.review.workflow == labello_domain::ReviewWorkflow::Approval
+            && mapping.task.review.required_reviews == 1
+    }));
+    assert!(
+        request.skeleton_mappings[0]
+            .source_keypoint_names
+            .is_empty()
+    );
+    assert!(harness.state().import_flow.error.is_none());
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    for (width, height) in [(1440.0, 900.0), (390.0, 667.0), (390.0, 320.0)] {
+        let mut source = Harness::builder()
+            .with_size(egui::vec2(width, height))
+            .build_eframe(|ctx| {
+                inspector_presets::build(InspectorPreset::ImportSource, &ctx.egui_ctx)
+            });
+        source.step();
+        assert!(source.query_by_label("Import dataset").is_some());
+        assert!(source.query_by_label("Import profile").is_some());
+        assert_visible_controls_clamped(&source, width, height);
+
+        let mut migration = Harness::builder()
+            .with_size(egui::vec2(width, height))
+            .build_eframe(|ctx| {
+                inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
+            });
+        migration.step();
+        assert!(migration.query_by_label("Annotation canvas").is_some());
+        if width >= 600.0 {
+            assert!(migration.query_by_label("Canonical guide").is_some());
+            assert!(migration.query_by_label("Exclusion reason").is_some());
+        }
+        assert_visible_controls_clamped(&migration, width, height);
+    }
+
+    let mut full_image = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::MigrationFullImage, &ctx.egui_ctx)
+        });
+    full_image.step();
+    assert!(
+        full_image
+            .query_by_label("Full-image confirmation")
+            .is_some()
+    );
+    assert!(
+        full_image
+            .query_by_label(
+                "I checked every canonical guide, skeleton or exclusion, and the full image"
+            )
+            .is_some()
+    );
+    assert!(full_image.query_by_label("Start correction pass").is_some());
+
+    let mut deleted = Harness::builder()
+        .with_size(egui::vec2(390.0, 667.0))
+        .build_eframe(|ctx| {
+            let mut app =
+                inspector_presets::build(InspectorPreset::MigrationGuideDeleted, &ctx.egui_ctx);
+            app.drawer = Some(Drawer::Inspector);
+            app
+        });
+    deleted.step();
+    assert!(
+        deleted
+            .query_by_label("Deleted guide tombstone | Status: Pending")
+            .is_some()
+    );
+    assert!(deleted.query_by_label("Reload assignment state").is_some());
+    assert_label_inside(
+        &deleted,
+        "The canonical guide is deleted or unavailable. Skeleton editing and keep/reopen actions are disabled; record an exclusion or reload after the guide is repaired.",
+        390.0,
+        667.0,
+    );
+    assert_visible_controls_clamped(&deleted, 390.0, 667.0);
+
+    let mut partial = Harness::builder()
+        .with_size(egui::vec2(1180.0, 2600.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportPartialCategories, &ctx.egui_ctx)
+        });
+    partial.step();
+    assert!(
+        partial
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Save mappings and re-run preflight"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(partial.query_by_label("Keypoint envelope").is_none());
+    assert!(partial.query_by_label("Box-relative template").is_none());
+
+    let mut descriptors = Harness::builder()
+        .with_size(egui::vec2(1180.0, 1400.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportMultipleDescriptors, &ctx.egui_ctx)
+        });
+    descriptors.step();
+    assert_eq!(
+        descriptors
+            .query_all_by_role_and_label(egui::accesskit::Role::ComboBox, "Descriptor kind")
+            .count(),
+        2
+    );
+
+    let mut recovery = Harness::builder()
+        .with_size(egui::vec2(800.0, 900.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportRecoveryBlocked, &ctx.egui_ctx)
+        });
+    recovery.step();
+    assert!(recovery.query_by_label("Restart import setup").is_some());
+    assert!(
+        recovery
+            .query_by_label("This recovered job does not include its attestations, source descriptors, category identities/schema, or accepted mapping request in the current API contract. Unsafe continuation is disabled.")
+            .is_some()
+    );
+
+    let mut annotated = Harness::builder()
+        .with_size(egui::vec2(1440.0, 1000.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::MigrationAnnotatedEdit, &ctx.egui_ctx)
+        });
+    annotated.step();
+    assert!(
+        annotated
+            .query_by_label("Redraw annotated skeleton")
+            .is_some()
+    );
+    assert!(annotated.query_by_label("Reopen excluded target").is_none());
+    assert!(
+        annotated
+            .query_by_label("Focus current box (guide v1)")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    let image_id = app.current.as_ref().unwrap().image.image_id.clone();
+    api.set_image_state(app.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 1000.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+
+    api.fail_next_migration();
+    harness
+        .state_mut()
+        .request_exclude_migration_target(labello_domain::ObjectGroupId::from("group-left"));
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.migration.busy);
+    assert!(
+        harness
+            .state()
+            .migration
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("migration command failed")),
+        "counts={:?} migration_error={:?} runtime_error={:?}",
+        api.counts(),
+        harness.state().migration.error,
+        harness.state().runtime.error,
+    );
+    assert!(matches!(
+        harness.state().migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-left")
+    ));
+
+    harness
+        .state_mut()
+        .request_exclude_migration_target(labello_domain::ObjectGroupId::from("group-left"));
+    harness.step();
+    step_until(&mut harness, 8, |app| {
+        matches!(
+            app.migration.cursor,
+            Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+                if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
+        )
+    });
+    assert_eq!(api.counts().migration_commands, 2);
+
+    let durable = api.image_state(&image_id);
+    let mut reloaded =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    reloaded.current_state = Some(durable.clone());
+    reloaded.annotations = durable.active_annotations().cloned().collect();
+    reloaded.migration = Default::default();
+    let mut reload_harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 1000.0))
+        .build_eframe(|_| reloaded);
+    reload_harness.step();
+    assert!(matches!(
+        reload_harness.state().migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
+    ));
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn assignment_reload_discards_stale_manual_cursor_pass_and_local_draft() {
+    use crate::app::LoadedImage;
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    let loaded = LoadedImage {
+        assignment: app.assignment.clone().unwrap(),
+        queued: app.current.clone().unwrap(),
+        annotations: app.annotations.clone(),
+        state: app.current_state.clone().unwrap(),
+        color_image: None,
+    };
+    app.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
+    app.migration.active_pass_id = Some(labello_domain::MigrationPassId::from("stale-pass"));
+    app.migration.draft =
+        Some(crate::manual_migration::ManualMigrationState::empty_skeleton(["stale".to_string()]));
+    app.migration.draft_group = Some(labello_domain::ObjectGroupId::from("stale-group"));
+    app.migration.error = Some("stale failure".to_string());
+    let operation_id = 77_001;
+    let request = test_request(&app, operation_id, Some("demo"));
+    app.active_load_id = Some(operation_id);
+    app.runtime.active_requests.insert(operation_id);
+    app.runtime
+        .tx
+        .send(UiMessage::ImageLoaded {
+            request,
+            operation_id,
+            assignment: Some(loaded.assignment.clone()),
+            result: Box::new(Ok(Some(loaded))),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert!(app.migration.cursor.is_none());
+    assert!(app.migration.active_pass_id.is_none());
+    assert!(app.migration.draft.is_none());
+    assert!(app.migration.draft_group.is_none());
+    assert!(app.migration.error.is_none());
+    app.sync_manual_migration();
+    assert!(matches!(
+        app.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-left")
+    ));
 }
 
 #[test]
@@ -517,6 +1156,7 @@ fn replacement_session_request_ignores_the_stale_result() {
             result: Ok(SessionInfo {
                 account: account.clone(),
                 can_create_datasets: true,
+                csrf_token: "stale-csrf-token".to_string(),
             }),
         })
         .unwrap();
@@ -535,6 +1175,7 @@ fn replacement_session_request_ignores_the_stale_result() {
             result: Ok(SessionInfo {
                 account: account.clone(),
                 can_create_datasets: true,
+                csrf_token: "active-csrf-token".to_string(),
             }),
         })
         .unwrap();
@@ -4126,6 +4767,8 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
     step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
 
     let annotation_id = harness.state().annotations[0].annotation_id.clone();
+    let origin = harness.state().annotations[0].origin.clone();
+    let object_group_id = harness.state().annotations[0].object_group_id.clone();
     harness.state_mut().edit_bbox(BoundingBoxEdit {
         annotation_id: annotation_id.clone(),
         bounding_box: BoundingBox {
@@ -4136,6 +4779,25 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
         },
     });
     assert_eq!(harness.state().annotations[0].version, 2);
+    assert_eq!(harness.state().annotations[0].origin, origin);
+    assert_eq!(
+        harness.state().annotations[0].object_group_id,
+        object_group_id
+    );
+    assert!(matches!(
+        harness.state().annotations[0].revision_source,
+        RevisionSource::Human {
+            action: HumanRevisionKind::Edited
+        }
+    ));
+    assert_eq!(
+        harness.state().annotations[0].author_user_id,
+        UserId::from("admin")
+    );
+    assert!(matches!(
+        origin,
+        AnnotationOrigin::Native { legacy_v2: false }
+    ));
     harness.state_mut().autosave();
     step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
 

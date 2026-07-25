@@ -10,24 +10,26 @@ use std::{future::Future, pin::Pin};
 use eframe::egui::{self, TextureHandle};
 use labello_client::{AuthOptions, DatasetSummary, DatasetUser, ImageExplorerQuery, LabelloApi};
 use labello_domain::{
-    AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, Assignment, AssignmentKind,
+    AnnotationGeometry, AnnotationId, AnnotationOrigin, AnnotationType, Assignment, AssignmentKind,
     BoundingBox, ClassId, DatasetId, DatasetMetadata, DatasetRole, DatasetRoleAssignment,
-    DatasetSnapshot, DatasetStats, ImageExplorerPage, ImageId, ImageRecord, ImageState,
-    KeybindingSet, KeypointAnnotation, KeypointState, LabelClass, NormalizedPoint,
-    PrelabelSuggestion, SkeletonGeometry, TaskDefinition, TaskId, TaskStatus, TutorialContent,
-    UserAccount, UserId,
+    DatasetSnapshot, DatasetStats, HumanRevisionKind, ImageExplorerPage, ImageId, ImageRecord,
+    ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass, NormalizedPoint,
+    PrelabelSuggestion, RevisionSource, SkeletonGeometry, TaskDefinition, TaskId, TaskStatus,
+    TutorialContent, UserAccount, UserId,
 };
 use web_time::{Duration, Instant};
 
 use crate::{
     canvas::CanvasState,
+    import_flow::ImportFlowState,
+    manual_migration::ManualMigrationState,
     queue::{ImageQueue, QueuedImage},
     theme,
 };
 
 pub(crate) use crate::live_protocol::{
-    FolderUploadProgress, LoadedAdmin, LoadedDataset, LoadedImage, RequestIdentity, ReviewPhase,
-    UiCommand, UiMessage,
+    FolderUploadProgress, ImportRequestIdentity, LoadedAdmin, LoadedDataset, LoadedImage,
+    MigrationAction, RequestIdentity, ReviewPhase, UiCommand, UiMessage,
 };
 
 pub const IMAGE_QUEUE_SIZE: usize = 2;
@@ -135,6 +137,7 @@ pub(crate) struct RuntimeState {
     pub storage_error: Option<String>,
     pub notice: Option<String>,
     pub persistence: crate::persistence::PersistenceState,
+    pub import_chunk_uploader: Option<crate::import_flow::RawImportChunkUploader>,
     #[cfg(not(target_arch = "wasm32"))]
     pub native_task_spawner: Option<NativeTaskSpawner>,
 }
@@ -156,6 +159,7 @@ impl RuntimeState {
             storage_error: None,
             notice: None,
             persistence: Default::default(),
+            import_chunk_uploader: None,
             #[cfg(not(target_arch = "wasm32"))]
             native_task_spawner: None,
         }
@@ -252,6 +256,7 @@ pub(crate) struct SetupState {
     pub create_dataset_id: String,
     pub create_dataset_name: String,
     pub started: bool,
+    pub show_create: bool,
 }
 
 pub(crate) struct AuthState {
@@ -345,6 +350,7 @@ pub struct WorkState {
     pub(crate) active_operation_id: Option<u64>,
     pub(crate) one_shot_excluded_image_id: Option<ImageId>,
     pub(crate) next_demo_image_index: usize,
+    pub(crate) migration: ManualMigrationState,
 }
 
 #[derive(Default)]
@@ -404,6 +410,7 @@ pub struct LabelloApp {
     pub(crate) runtime: RuntimeState,
     pub(crate) loading: LoadingState,
     pub(crate) setup: SetupState,
+    pub(crate) import_flow: ImportFlowState,
     pub(crate) auth: AuthState,
     pub(crate) datasets: DatasetState,
     pub(crate) admin_tools: AdminToolsState,
@@ -411,6 +418,7 @@ pub struct LabelloApp {
     pub(crate) view: AppView,
     pub(crate) auth_epoch: u64,
     pub(crate) workspace_epoch: u64,
+    pub(crate) import_epoch: u64,
     pub(crate) theme_applied: bool,
 }
 
@@ -455,6 +463,7 @@ impl LabelloApp {
             skeleton: None,
             review: labello_domain::ReviewConfig::default(),
             prelabel_config_ids: vec![],
+            manual_box_guide_migration: None,
             enabled: true,
         }];
         let mut queue = ImageQueue::new(config.queue_size);
@@ -467,6 +476,7 @@ impl LabelloApp {
             create_dataset_id: config.dataset_id.to_string(),
             create_dataset_name: "Demo Dataset".to_string(),
             started: true,
+            show_create: false,
         };
         let work = WorkState {
             classes,
@@ -510,11 +520,13 @@ impl LabelloApp {
             active_operation_id: None,
             one_shot_excluded_image_id: None,
             next_demo_image_index: config.queue_size.clamp(1, IMAGE_QUEUE_SIZE) + 2,
+            migration: ManualMigrationState::default(),
         };
         Self {
             runtime: RuntimeState::new(),
             loading: LoadingState::default(),
             setup,
+            import_flow: ImportFlowState::default(),
             auth: AuthState {
                 account: None,
                 can_create_datasets: false,
@@ -534,6 +546,7 @@ impl LabelloApp {
             view: AppView::Annotate,
             auth_epoch: 0,
             workspace_epoch: 0,
+            import_epoch: 0,
             config,
             theme_applied: false,
         }
@@ -551,6 +564,13 @@ impl LabelloApp {
         app.queue.clear();
         app.rebuild_http_api();
         app
+    }
+
+    pub fn set_import_chunk_uploader(
+        &mut self,
+        uploader: crate::import_flow::RawImportChunkUploader,
+    ) {
+        self.runtime.import_chunk_uploader = Some(uploader);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1173,10 +1193,14 @@ impl LabelloApp {
         self.annotations.push(labello_domain::AnnotationVersion {
             annotation_id: annotation_id.clone(),
             version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
             task_id,
             class_id,
             annotation_type: AnnotationType::BoundingBox,
-            source: AnnotationSource::Human,
+            revision_source: RevisionSource::Human {
+                action: HumanRevisionKind::Authored,
+            },
             geometry: AnnotationGeometry::BoundingBox(bbox),
             author_user_id: user_id,
             created_at: timestamp,
@@ -1206,6 +1230,7 @@ impl LabelloApp {
         if *current == edit.bounding_box {
             return;
         }
+        let user_id = self.config.user_id.clone();
         self.record_edit();
         let annotation = &mut self.annotations[index];
         let AnnotationGeometry::BoundingBox(current) = &mut annotation.geometry else {
@@ -1215,6 +1240,10 @@ impl LabelloApp {
         annotation.updated_at = labello_domain::now();
         if persisted {
             annotation.version = persisted_version.unwrap_or(annotation.version) + 1;
+            annotation.revision_source = RevisionSource::Human {
+                action: HumanRevisionKind::Edited,
+            };
+            annotation.author_user_id = user_id;
             self.modified_annotations.insert(annotation_id);
         }
         self.mark_edited();
@@ -1299,10 +1328,14 @@ impl LabelloApp {
             .push(labello_domain::AnnotationVersion {
                 annotation_id: annotation_id.clone(),
                 version: 1,
+                object_group_id: None,
+                origin: AnnotationOrigin::native(),
                 task_id: task.task_id,
                 class_id,
                 annotation_type: AnnotationType::Skeleton,
-                source: AnnotationSource::Human,
+                revision_source: RevisionSource::Human {
+                    action: HumanRevisionKind::Authored,
+                },
                 geometry: AnnotationGeometry::Skeleton(SkeletonGeometry { keypoints }),
                 author_user_id,
                 created_at: timestamp,
@@ -1376,13 +1409,15 @@ impl LabelloApp {
         self.annotations.push(labello_domain::AnnotationVersion {
             annotation_id: annotation_id.clone(),
             version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
             task_id: suggestion.task_id.clone(),
             class_id: suggestion.class_id.clone(),
             annotation_type: match suggestion.geometry {
                 AnnotationGeometry::BoundingBox(_) => AnnotationType::BoundingBox,
                 AnnotationGeometry::Skeleton(_) => AnnotationType::Skeleton,
             },
-            source: AnnotationSource::PrelabelSuggestion {
+            revision_source: RevisionSource::PrelabelSuggestion {
                 config_id: suggestion.config_id.clone(),
                 model_id: "browser-local-or-server".to_string(),
                 confidence: suggestion.confidence,
@@ -1677,6 +1712,31 @@ impl LabelloApp {
 
     pub(crate) fn trigger_user_action(&mut self, action: labello_domain::UserAction) {
         use labello_domain::UserAction;
+        if self.manual_migration_active() {
+            match action {
+                UserAction::ToggleKeypointHidden => {
+                    self.work.migration.next_hidden = !self.work.migration.next_hidden;
+                    return;
+                }
+                UserAction::MarkKeypointAbsent => {
+                    self.skip_migration_keypoint();
+                    return;
+                }
+                UserAction::NextImage
+                | UserAction::PreviousImage
+                | UserAction::UndoEdit
+                | UserAction::RedoEdit
+                | UserAction::SaveAnnotations
+                | UserAction::DeleteAnnotation
+                | UserAction::SelectPreviousObject
+                | UserAction::SelectNextObject
+                | UserAction::SelectPreviousPrelabel
+                | UserAction::SelectNextPrelabel
+                | UserAction::AcceptPrelabel
+                | UserAction::DiscardPrelabel => return,
+                _ => {}
+            }
+        }
         let ready = (self.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
@@ -1937,10 +1997,12 @@ impl eframe::App for LabelloApp {
             self.request_prefetch();
         }
         self.sync_review_selection();
+        self.sync_manual_migration();
         self.start_next_persistence_command();
         self.start_setup_load();
         self.refresh_stats_if_due();
         self.refresh_ingest_if_due();
+        self.refresh_import_if_due();
         self.autosave_if_due();
         self.handle_shortcuts(ui.ctx());
         let viewport = ui.available_size();
@@ -2034,6 +2096,7 @@ fn demo_image(index: usize) -> QueuedImage {
         canonical_path: format!("images/demo_{index}.jpg"),
         known_paths: vec![format!("images/demo_{index}.jpg")],
         duplicate_paths: vec![],
+        source_memberships: None,
         file_name: format!("demo_{index}.jpg"),
         byte_size: 1024,
         width: 1280,

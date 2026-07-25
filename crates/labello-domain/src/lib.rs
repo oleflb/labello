@@ -12,6 +12,7 @@ pub mod error;
 pub mod event;
 pub mod geometry;
 pub mod ids;
+pub mod import;
 pub mod keybindings;
 pub mod migration;
 pub mod offline;
@@ -31,6 +32,7 @@ pub use error::*;
 pub use event::*;
 pub use geometry::*;
 pub use ids::*;
+pub use import::*;
 pub use keybindings::*;
 pub use migration::*;
 pub use offline::*;
@@ -42,7 +44,8 @@ pub use stats::*;
 pub use task::*;
 pub use user::*;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const LEGACY_SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
 
@@ -52,3 +55,5 @@ pub fn now() -> Timestamp {
 
 #[cfg(test)]
 mod v2_contract_tests;
+#[cfg(test)]
+mod v3_import_tests;

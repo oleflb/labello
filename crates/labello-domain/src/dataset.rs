@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClassId, DatasetId, DatasetRoleAssignment, ImageDimensions, ImageId, LabelClass,
+    ClassId, DatasetId, DatasetRoleAssignment, ImageDimensions, ImageId, ImportId, LabelClass,
     MigrationRecord, PrelabelConfig, SCHEMA_VERSION, TaskDefinition, TaskId, TaskStatus, Timestamp,
 };
 
@@ -130,6 +130,8 @@ pub struct ImageRecord {
     pub width: u32,
     pub height: u32,
     pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_memberships: Option<Vec<String>>,
 }
 
 impl ImageRecord {
@@ -185,6 +187,16 @@ pub struct DatasetSnapshot {
     pub includes_image_bytes: bool,
     pub total_bytes: u64,
     pub files: Vec<SnapshotFileEntry>,
+    #[serde(default)]
+    pub imports: Vec<SnapshotImportEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotImportEntry {
+    pub import_id: ImportId,
+    pub manifest_path: String,
+    pub source_objects_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -1,7 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{ClassId, PrelabelConfigId, TaskId, Timestamp, UserId};
+use crate::{
+    ClassId, DomainError, DomainResult, ManualBoxGuideMigration, MigrationCardinality,
+    MigrationSequence, PrelabelConfigId, TaskId, Timestamp, UserId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -112,12 +115,42 @@ pub struct TaskDefinition {
     pub skeleton: Option<SkeletonSpec>,
     pub review: ReviewConfig,
     pub prelabel_config_ids: Vec<PrelabelConfigId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_box_guide_migration: Option<ManualBoxGuideMigration>,
     pub enabled: bool,
 }
 
 impl TaskDefinition {
     pub fn allows_class(&self, class_id: &ClassId) -> bool {
         self.class_ids.iter().any(|candidate| candidate == class_id)
+    }
+
+    pub fn validate_manual_migration(&self, guide: &TaskDefinition) -> DomainResult<()> {
+        let Some(config) = &self.manual_box_guide_migration else {
+            return Ok(());
+        };
+        let valid = self.annotation_type == AnnotationType::Skeleton
+            && guide.annotation_type == AnnotationType::BoundingBox
+            && config.guide_task_id == guide.task_id
+            && self.task_id != guide.task_id
+            && self.class_ids.len() == 1
+            && self.class_ids == guide.class_ids
+            && config.cardinality == MigrationCardinality::ExactlyOne
+            && config.sequence == MigrationSequence::ImportedSpatialOrderV1
+            && config.allow_exclusion
+            && matches!(
+                self.review.workflow,
+                ReviewWorkflow::None | ReviewWorkflow::Approval
+            )
+            && !self.review.allow_reviewer_corrections;
+        if valid {
+            Ok(())
+        } else {
+            Err(DomainError::InvalidMigration(format!(
+                "task {} has an invalid manual box-guide migration configuration",
+                self.task_id
+            )))
+        }
     }
 }
 
@@ -136,6 +169,7 @@ pub enum TaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum TaskOutcome {
     AnnotationCompleted,
+    ImportedGroundTruth,
     Approved,
     ReviewerCorrected,
     Adjudicated,

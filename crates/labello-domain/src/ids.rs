@@ -99,6 +99,9 @@ id_type!(AdjudicationId);
 id_type!(AssignmentId);
 id_type!(EventId);
 id_type!(PrelabelConfigId);
+id_type!(ImportId);
+id_type!(ObjectGroupId);
+id_type!(MigrationPassId);
 
 impl ImageId {
     pub fn from_blake3_hex(hash: &str) -> Self {

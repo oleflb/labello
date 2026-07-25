@@ -7,7 +7,8 @@ use std::{
 use labello_client::IngestJob;
 use labello_domain::{DatasetId, IdValidationError, UserId};
 use labello_storage::DatasetRepository;
-use tokio::sync::RwLock;
+use labello_storage::ImportService;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use url::Url;
 
 use crate::{GithubOAuthConfig, error::ApiResult, session::ServerStore};
@@ -22,6 +23,10 @@ pub struct ApiState {
     pub(crate) server_store: ServerStore,
     ingest_jobs: Arc<RwLock<BTreeMap<String, IngestJob>>>,
     repositories: Arc<Mutex<BTreeMap<DatasetId, Arc<DatasetRepository>>>>,
+    import_service: Option<Arc<ImportService>>,
+    import_root_owners: Arc<BTreeMap<String, BTreeSet<UserId>>>,
+    datasets_root_mutation: Arc<AsyncMutex<()>>,
+    import_commands: Arc<AsyncMutex<()>>,
     pub github_oauth: Option<GithubOAuthConfig>,
     pub(crate) github_oauth_endpoints: crate::oauth::GithubOAuthEndpoints,
     pub http: reqwest::Client,
@@ -39,6 +44,10 @@ impl ApiState {
             session_cookie_secure: true,
             ingest_jobs: Arc::new(RwLock::new(BTreeMap::new())),
             repositories: Arc::new(Mutex::new(BTreeMap::new())),
+            import_service: None,
+            import_root_owners: Arc::new(BTreeMap::new()),
+            datasets_root_mutation: Arc::new(AsyncMutex::new(())),
+            import_commands: Arc::new(AsyncMutex::new(())),
             github_oauth: None,
             github_oauth_endpoints: crate::oauth::GithubOAuthEndpoints::default(),
             http: reqwest::Client::new(),
@@ -89,13 +98,70 @@ impl ApiState {
         self.session_cookie_secure
     }
 
-    pub(crate) fn create_session(&self, user_id: UserId) -> ApiResult<String> {
+    pub(crate) fn create_session(
+        &self,
+        user_id: UserId,
+    ) -> ApiResult<crate::session::SessionTokens> {
         self.server_store.create_session(user_id)
     }
 
     pub fn with_github_oauth(mut self, config: GithubOAuthConfig) -> Self {
         self.github_oauth = Some(config);
         self
+    }
+
+    pub fn with_import_service(mut self, service: ImportService) -> Self {
+        self.import_service = Some(Arc::new(service));
+        self
+    }
+
+    /// Configures the actor visibility policy for import roots advertised by the API.
+    /// An empty owner set makes a root visible to every bootstrap administrator.
+    pub fn with_import_root_owners(
+        mut self,
+        roots: impl IntoIterator<Item = (String, BTreeSet<UserId>)>,
+    ) -> Self {
+        self.import_root_owners = Arc::new(roots.into_iter().collect());
+        self
+    }
+
+    pub(crate) fn import_service(&self) -> Option<&Arc<ImportService>> {
+        self.import_service.as_ref()
+    }
+
+    pub(crate) fn visible_import_roots(&self, user_id: &UserId) -> BTreeSet<&str> {
+        self.import_root_owners
+            .iter()
+            .filter(|(_, owners)| owners.is_empty() || owners.contains(user_id))
+            .map(|(root_id, _)| root_id.as_str())
+            .collect()
+    }
+
+    pub fn import_root_visible_to(&self, root_id: &str, user_id: &UserId) -> bool {
+        self.import_root_owners
+            .get(root_id)
+            .is_some_and(|owners| owners.is_empty() || owners.contains(user_id))
+    }
+
+    pub(crate) async fn lock_datasets_root_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.datasets_root_mutation.lock().await
+    }
+
+    pub(crate) async fn lock_import_commands(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.import_commands.lock().await
+    }
+
+    pub(crate) async fn import_destination_reserved(
+        &self,
+        dataset_id: &DatasetId,
+    ) -> Result<bool, labello_storage::StorageError> {
+        let path = self
+            .datasets_root
+            .join(".labello-server/imports/reservations")
+            .join(format!("{}.json", dataset_id.as_str()));
+        tokio::fs::try_exists(&path)
+            .await
+            .map_err(|source| labello_storage::StorageError::Io { path, source })
     }
 
     #[cfg(test)]

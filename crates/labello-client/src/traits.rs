@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin};
 
 use labello_domain::{
     AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetSnapshot, DatasetStats,
-    EventLogEntry, EventPayload, ImageExplorerPage, ImageId, ImageRecord, ImageState,
+    EventLogEntry, EventPayload, ImageExplorerPage, ImageId, ImageRecord, ImageState, ImportId,
     KeybindingSet, OfflineBundle, OfflineSyncRequest, OfflineSyncResult, PrelabelConfig,
     PrelabelSuggestion, ReviewRecord, TaskDefinition, UserAccount, UserId,
 };
@@ -67,6 +67,130 @@ pub trait DatasetApi {
             ))
         })
     }
+}
+
+pub trait ImportApi {
+    fn import_capabilities<'a>(&'a self) -> ApiFuture<'a, crate::ImportCapabilities>;
+
+    fn create_import<'a>(
+        &'a self,
+        request: crate::CreateImportRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ImportJob>;
+
+    fn get_import<'a>(&'a self, import_id: &'a ImportId) -> ApiFuture<'a, crate::ImportJob>;
+
+    fn register_import_files<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::RegisterImportFilesRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::RegisterImportFilesResult>;
+
+    fn upload_import_chunk<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        file_id: &'a str,
+        upload: crate::ImportChunkUpload,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ImportChunkResult>;
+
+    fn seal_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::SealImportRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::SealImportResult>;
+
+    fn preflight_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::StartImportPreflightRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ImportJob>;
+
+    fn update_import_plan<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::UpdateImportPlanRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ImportPlan>;
+
+    fn import_diagnostics<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        query: crate::ImportDiagnosticsQuery,
+    ) -> ApiFuture<'a, crate::ImportDiagnosticsPage>;
+
+    fn commit_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::CommitImportRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::CommitImportResult>;
+
+    fn cancel_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::CancelImportRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::CancelImportResult>;
+
+    fn save_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::SaveMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn exclude_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::ExcludeMigrationTargetRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn reopen_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::ReopenMigrationTargetRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn start_migration_pass<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::StartMigrationPassRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn keep_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::KeepMigrationTargetRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn confirm_migration<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::ConfirmMigrationRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn review_migration<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::ReviewMigrationRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
 }
 
 pub trait TaskApi {
@@ -306,6 +430,10 @@ pub trait PrelabelApi {
 }
 
 pub trait AuthApi {
+    fn csrf_token(&self) -> Option<String> {
+        None
+    }
+
     fn auth_options<'a>(&'a self) -> ApiFuture<'a, AuthOptions> {
         Box::pin(async {
             Ok(AuthOptions {
@@ -350,6 +478,7 @@ pub trait UserApi {
 
 pub trait LabelloApi:
     DatasetApi
+    + ImportApi
     + TaskApi
     + ImageApi
     + AnnotationApi
@@ -366,6 +495,7 @@ pub trait LabelloApi:
 
 impl<T> LabelloApi for T where
     T: DatasetApi
+        + ImportApi
         + TaskApi
         + ImageApi
         + AnnotationApi

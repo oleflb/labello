@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use labello_domain::{
     AdjudicationRecord, Assignment, DatasetId, DatasetMetadata, DatasetStats, EventLogEntry,
-    EventPayload, ImageId, ImageRecord, ImageState, KeybindingSet, OfflineBundle,
+    EventPayload, ImageId, ImageRecord, ImageState, ImportId, KeybindingSet, OfflineBundle,
     OfflineSyncRequest, OfflineSyncResult, PrelabelConfig, PrelabelSuggestion, ReviewRecord,
     TaskDefinition, UserAccount, UserId,
 };
@@ -11,10 +11,10 @@ use crate::{
     AdjudicationApi, AnnotationApi, AnnotationBatchRequest, AppendEventRequest, AssignNextRequest,
     AssignmentActionRequest, AuthApi, AuthOptions, ClientError, CorrectionRequest,
     CreateDatasetRequest, DatasetApi, DatasetSummary, DatasetUser, ImageApi, ImageFile,
-    ImagePreview, IngestJob, IngestJobStatus, IngestReport, KeybindingApi, OAuthCallbackRequest,
-    OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi, PrelabelSuggestionRequest,
-    ReviewApi, SessionInfo, SetDatasetRolesRequest, StatsApi, TaskApi, UpdateDatasetConfigRequest,
-    UserApi,
+    ImagePreview, ImportApi, IngestJob, IngestJobStatus, IngestReport, KeybindingApi,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineApi, OfflineBundleRequest, PrelabelApi,
+    PrelabelSuggestionRequest, ReviewApi, SessionInfo, SetDatasetRolesRequest, StatsApi, TaskApi,
+    UpdateDatasetConfigRequest, UserApi,
 };
 
 #[derive(Clone, Default)]
@@ -163,6 +163,185 @@ impl DatasetApi for DemoLabelloApi {
     }
 }
 
+impl ImportApi for DemoLabelloApi {
+    fn import_capabilities<'a>(&'a self) -> crate::ApiFuture<'a, crate::ImportCapabilities> {
+        Box::pin(async {
+            Ok(crate::ImportCapabilities {
+                available: false,
+                unavailable_reason: Some(
+                    "dataset import is unavailable in the demo backend".to_string(),
+                ),
+                ..Default::default()
+            })
+        })
+    }
+
+    fn create_import<'a>(
+        &'a self,
+        _request: crate::CreateImportRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ImportJob> {
+        import_unavailable()
+    }
+
+    fn get_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+    ) -> crate::ApiFuture<'a, crate::ImportJob> {
+        import_unavailable()
+    }
+
+    fn register_import_files<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::RegisterImportFilesRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::RegisterImportFilesResult> {
+        import_unavailable()
+    }
+
+    fn upload_import_chunk<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _file_id: &'a str,
+        _upload: crate::ImportChunkUpload,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ImportChunkResult> {
+        import_unavailable()
+    }
+
+    fn seal_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::SealImportRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::SealImportResult> {
+        import_unavailable()
+    }
+
+    fn preflight_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::StartImportPreflightRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ImportJob> {
+        import_unavailable()
+    }
+
+    fn update_import_plan<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::UpdateImportPlanRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ImportPlan> {
+        import_unavailable()
+    }
+
+    fn import_diagnostics<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _query: crate::ImportDiagnosticsQuery,
+    ) -> crate::ApiFuture<'a, crate::ImportDiagnosticsPage> {
+        import_unavailable()
+    }
+
+    fn commit_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::CommitImportRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::CommitImportResult> {
+        import_unavailable()
+    }
+
+    fn cancel_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::CancelImportRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::CancelImportResult> {
+        import_unavailable()
+    }
+
+    fn save_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::SaveMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn exclude_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::ExcludeMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn reopen_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::ReopenMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn start_migration_pass<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::StartMigrationPassRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn keep_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::KeepMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn confirm_migration<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::ConfirmMigrationRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn review_migration<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::ReviewMigrationRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+}
+
+fn import_unavailable<'a, T>() -> crate::ApiFuture<'a, T> {
+    Box::pin(async {
+        Err(ClientError::Demo(
+            "dataset import is unavailable in the demo backend".to_string(),
+        ))
+    })
+}
+
 impl TaskApi for DemoLabelloApi {
     fn list_tasks<'a>(
         &'a self,
@@ -261,6 +440,7 @@ impl ImageApi for DemoLabelloApi {
                 width: 1,
                 height: 1,
                 media_type: "image/png".to_string(),
+                source_memberships: None,
             })
         })
     }
@@ -420,6 +600,7 @@ impl OfflineApi for DemoLabelloApi {
                 roles: Vec::new(),
                 tasks: dataset.tasks,
                 images: Vec::new(),
+                import_manifests: Vec::new(),
             })
         })
     }
@@ -572,6 +753,7 @@ impl AuthApi for DemoLabelloApi {
             Ok(SessionInfo {
                 account,
                 can_create_datasets: true,
+                csrf_token: "demo-csrf-token".to_string(),
             })
         })
     }
@@ -665,6 +847,19 @@ mod tests {
         assert!(matches!(
             api.local_admin_login().await,
             Err(ClientError::Api { status: 401, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dataset_import_is_capability_gated_and_unavailable() {
+        let api = DemoLabelloApi::new();
+
+        let capabilities = api.import_capabilities().await.unwrap();
+        assert!(!capabilities.available);
+        assert!(capabilities.unavailable_reason.is_some());
+        assert!(matches!(
+            api.get_import(&ImportId::from("imp_1")).await,
+            Err(ClientError::Demo(message)) if message.contains("unavailable")
         ));
     }
 }

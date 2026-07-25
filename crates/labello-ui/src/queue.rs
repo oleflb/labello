@@ -181,6 +181,7 @@ mod tests {
                 canonical_path: format!("images/{id}.png"),
                 known_paths: vec![],
                 duplicate_paths: vec![],
+                source_memberships: None,
                 file_name: format!("{id}.png"),
                 byte_size: 4,
                 width: 10,

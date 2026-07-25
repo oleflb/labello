@@ -7,8 +7,8 @@ use std::{
 use std::sync::Arc;
 
 use labello_domain::{
-    ClassStats, DatasetStats, ImageState, ReviewDecision, ReviewTarget, TaskId, TaskOutcome,
-    TaskStats, TaskStatus,
+    ClassStats, DatasetStats, ImageState, ImportCoverage, MigrationDispositionStatus,
+    ReviewDecision, ReviewTarget, RevisionSource, TaskId, TaskOutcome, TaskStats, TaskStatus,
 };
 
 use tokio::sync::Mutex;
@@ -147,6 +147,41 @@ impl DatasetRepository {
                     continue;
                 }
                 let task_stats = stats.per_task.entry(task.task_id.clone()).or_default();
+                if let Some(coverage) = state.import_coverage.get(&task.task_id) {
+                    match coverage {
+                        ImportCoverage::Complete => stats.import_coverage.complete += 1,
+                        ImportCoverage::VerifiedEmpty => {
+                            stats.import_coverage.verified_empty += 1;
+                        }
+                        ImportCoverage::Incomplete => stats.import_coverage.incomplete += 1,
+                        ImportCoverage::Excluded => stats.import_coverage.excluded += 1,
+                    }
+                }
+                if let Some(target_set) = state.migration_target_sets.get(&task.task_id) {
+                    stats.migration.expected += target_set.targets.len();
+                    task_stats.migration.expected += target_set.targets.len();
+                    for target in &target_set.targets {
+                        match &state.migration_dispositions[&task.task_id][&target.object_group_id]
+                            .status
+                        {
+                            MigrationDispositionStatus::Annotated { .. } => {
+                                stats.migration.annotated += 1;
+                                task_stats.migration.annotated += 1;
+                            }
+                            MigrationDispositionStatus::Excluded { .. } => {
+                                stats.migration.excluded += 1;
+                                task_stats.migration.excluded += 1;
+                            }
+                            MigrationDispositionStatus::Pending => {
+                                stats.migration.pending += 1;
+                                task_stats.migration.pending += 1;
+                            }
+                        }
+                    }
+                }
+                if !state.included_in_completion_denominator(&task.task_id) {
+                    continue;
+                }
                 match state
                     .task_states
                     .get(&task.task_id)
@@ -214,13 +249,23 @@ impl DatasetRepository {
                 }
             }
             for annotation in state.active_annotations() {
+                stats.provenance.record_annotation(annotation);
                 stats
+                    .per_task
+                    .entry(annotation.task_id.clone())
+                    .or_default()
+                    .provenance
+                    .record_annotation(annotation);
+                let class_stats = stats
                     .per_class
                     .entry(annotation.class_id.clone())
-                    .or_default()
-                    .annotations += 1;
-                let day = annotation.created_at.date_naive().to_string();
-                throughput.entry(day).or_default().0 += 1;
+                    .or_default();
+                class_stats.annotations += 1;
+                class_stats.provenance.record_annotation(annotation);
+                if matches!(annotation.revision_source, RevisionSource::Human { .. }) {
+                    let day = annotation.created_at.date_naive().to_string();
+                    throughput.entry(day).or_default().0 += 1;
+                }
             }
             for review in &state.reviews {
                 let day = review.timestamp.date_naive().to_string();
@@ -290,10 +335,13 @@ mod tests {
     };
 
     use labello_domain::{
-        Actor, AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, Assignment,
+        Actor, AnnotationGeometry, AnnotationId, AnnotationOrigin, AnnotationType, Assignment,
         AssignmentId, AssignmentKind, AssignmentStatus, BoundingBox, ClassId, DatasetId,
-        DatasetMetadata, DatasetRole, EventPayload, ImageId, ImageRecord, ImageState, ImagesIndex,
-        ReviewId, ReviewRecord, SCHEMA_VERSION, TaskId, TaskOutcome, TaskState, UserId, now,
+        DatasetMetadata, DatasetRole, EventPayload, HumanRevisionKind, ImageId, ImageRecord,
+        ImageState, ImagesIndex, ImportCoverage, ImportGeometryProvenance, ImportId,
+        ImportTaskInitialization, ImportedOrigin, ReviewConfig, ReviewId, ReviewRecord,
+        ReviewWorkflow, RevisionSource, SCHEMA_VERSION, SourceProfile, TaskDefinition, TaskId,
+        TaskOutcome, TaskState, TutorialContent, UserId, now,
     };
 
     use super::*;
@@ -347,6 +395,7 @@ mod tests {
             width: 2,
             height: 2,
             media_type: "image/png".to_string(),
+            source_memberships: None,
         };
         repository
             .save_images_index(&ImagesIndex {
@@ -372,10 +421,14 @@ mod tests {
                     annotation: labello_domain::AnnotationVersion {
                         annotation_id: AnnotationId::from("ann_1"),
                         version: 1,
+                        object_group_id: None,
+                        origin: AnnotationOrigin::native(),
                         task_id: TaskId::from("boxes"),
                         class_id: ClassId::from("person"),
                         annotation_type: AnnotationType::BoundingBox,
-                        source: AnnotationSource::Human,
+                        revision_source: RevisionSource::Human {
+                            action: HumanRevisionKind::Authored,
+                        },
                         geometry: AnnotationGeometry::BoundingBox(BoundingBox {
                             x: 0.1,
                             y: 0.1,
@@ -393,10 +446,157 @@ mod tests {
             )
             .await
             .unwrap();
+        repository
+            .append_payload(
+                &ImageId::from("img_1"),
+                &Actor {
+                    user_id: UserId::from("admin"),
+                    role: DatasetRole::DataAdmin,
+                },
+                EventPayload::AnnotationVersionCreated {
+                    annotation: labello_domain::AnnotationVersion {
+                        annotation_id: AnnotationId::from("ann_imported"),
+                        version: 1,
+                        object_group_id: None,
+                        origin: AnnotationOrigin::Imported {
+                            imported: ImportedOrigin {
+                                import_id: ImportId::from("imp_1"),
+                                source_profile: SourceProfile {
+                                    profile_id: "fixture".to_string(),
+                                    profile_version: 1,
+                                },
+                                source_namespace: "fixture".to_string(),
+                                source_object_key: "fixture:1".to_string(),
+                                geometry_provenance: ImportGeometryProvenance::Direct,
+                            },
+                        },
+                        task_id: TaskId::from("boxes"),
+                        class_id: ClassId::from("person"),
+                        annotation_type: AnnotationType::BoundingBox,
+                        revision_source: RevisionSource::Import {
+                            import_id: ImportId::from("imp_1"),
+                        },
+                        geometry: AnnotationGeometry::BoundingBox(BoundingBox {
+                            x: 0.4,
+                            y: 0.4,
+                            width: 0.2,
+                            height: 0.2,
+                        }),
+                        author_user_id: UserId::from("admin"),
+                        created_at: now(),
+                        updated_at: now(),
+                        deleted: false,
+                    },
+                    previous_version: None,
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap();
 
         let stats = repository.dataset_stats().await.unwrap();
-        assert_eq!(stats.per_class[&ClassId::from("person")].annotations, 1);
+        assert_eq!(stats.per_class[&ClassId::from("person")].annotations, 2);
+        assert_eq!(stats.provenance.human_authored_annotations, 1);
+        assert_eq!(
+            stats.per_task[&TaskId::from("boxes")]
+                .provenance
+                .human_authored_annotations,
+            1
+        );
+        assert_eq!(
+            stats
+                .throughput
+                .iter()
+                .map(|point| point.annotations)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            stats.per_class[&ClassId::from("person")]
+                .provenance
+                .human_authored_annotations,
+            1
+        );
         assert_eq!(repository.stats_scan_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn excluded_import_coverage_is_reported_but_omitted_from_completion_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = DatasetRepository::new(temp.path());
+        let task_id = TaskId::from("boxes");
+        let mut metadata = DatasetMetadata::new(DatasetId::from("ds"), "Dataset", now());
+        metadata.tasks.push(TaskDefinition {
+            task_id: task_id.clone(),
+            name: "Boxes".to_string(),
+            annotation_type: AnnotationType::BoundingBox,
+            class_ids: vec![ClassId::from("person")],
+            instructions: TutorialContent {
+                title: "Boxes".to_string(),
+                example_text: "Draw boxes".to_string(),
+                example_images: Vec::new(),
+            },
+            skeleton: None,
+            review: ReviewConfig {
+                required_reviews: 1,
+                workflow: ReviewWorkflow::None,
+                allow_reviewer_corrections: false,
+                agreement_threshold: None,
+            },
+            prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
+            enabled: true,
+        });
+        repository.initialize(metadata).await.unwrap();
+        let image_id = ImageId::from("img_1");
+        repository
+            .save_images_index(&ImagesIndex {
+                schema_version: SCHEMA_VERSION,
+                image_count: 1,
+                images_by_hash: BTreeMap::from([(
+                    "hash".to_string(),
+                    ImageRecord {
+                        image_id: image_id.clone(),
+                        blake3: "hash".to_string(),
+                        canonical_path: "images/one.png".to_string(),
+                        known_paths: vec!["images/one.png".to_string()],
+                        duplicate_paths: Vec::new(),
+                        file_name: "one.png".to_string(),
+                        byte_size: 1,
+                        width: 1,
+                        height: 1,
+                        media_type: "image/png".to_string(),
+                        source_memberships: None,
+                    },
+                )]),
+            })
+            .await
+            .unwrap();
+        repository
+            .append_payload(
+                &image_id,
+                &Actor {
+                    user_id: UserId::from("admin"),
+                    role: DatasetRole::DataAdmin,
+                },
+                EventPayload::ImportInitialized {
+                    import_id: ImportId::from("imp_1"),
+                    annotations: Vec::new(),
+                    task_initializations: vec![ImportTaskInitialization {
+                        task_id: task_id.clone(),
+                        coverage: ImportCoverage::Excluded,
+                        initial_state: TaskState::new(task_id.clone(), now()),
+                    }],
+                    migration_target_sets: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let stats = repository.dataset_stats().await.unwrap();
+        assert_eq!(stats.import_coverage.excluded, 1);
+        assert_eq!(stats.pending_tasks, 0);
+        assert_eq!(stats.per_task[&task_id].pending, 0);
     }
 
     #[tokio::test]
@@ -449,6 +649,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     media_type: "image/png".to_string(),
+                    source_memberships: None,
                 };
                 (image.blake3.clone(), image)
             })
@@ -501,6 +702,7 @@ mod tests {
             width: 2,
             height: 2,
             media_type: "image/png".to_string(),
+            source_memberships: None,
         };
         repository
             .save_images_index(&ImagesIndex {

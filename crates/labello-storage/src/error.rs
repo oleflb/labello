@@ -60,6 +60,9 @@ pub enum StorageError {
 
     #[error("background storage task failed: {0}")]
     BackgroundTask(String),
+
+    #[error("dataset import error ({code}): {message}")]
+    Import { code: String, message: String },
 }
 
 impl StorageError {
@@ -79,6 +82,7 @@ impl StorageError {
             Self::InvalidCorrection(_) => "storage_invalid_correction",
             Self::AssignmentConflict(_) => "storage_assignment_conflict",
             Self::BackgroundTask(_) => "storage_background_task",
+            Self::Import { .. } => "storage_import",
         }
     }
 
@@ -89,6 +93,7 @@ impl StorageError {
             Self::TomlDecode { source, .. } => Some(source.message().to_string()),
             Self::TomlEncode { source, .. } => Some(source.to_string()),
             Self::Image { source, .. } => Some(source.to_string()),
+            Self::Import { code, .. } => Some(code.clone()),
             _ => None,
         }
     }

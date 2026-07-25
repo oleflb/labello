@@ -15,12 +15,17 @@ mime_guess.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile.workspace = true

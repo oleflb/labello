@@ -2,12 +2,13 @@ use labello_domain::{KeybindingSet, UserId};
 
 use crate::{
     DatasetRepository, StorageResult,
-    fstoml::{read_toml, write_toml_atomic},
+    fstoml::{read_current_toml, write_toml_atomic},
     paths,
 };
 
 impl DatasetRepository {
     pub async fn load_keybindings(&self, user_id: &UserId) -> StorageResult<KeybindingSet> {
+        self.ensure_artifact_migration().await?;
         let path = self.keybindings_path(user_id);
         if tokio::fs::try_exists(&path)
             .await
@@ -16,8 +17,7 @@ impl DatasetRepository {
                 source,
             })?
         {
-            let mut keybindings: KeybindingSet = read_toml(&path).await?;
-            labello_domain::validate_schema_version(keybindings.schema_version)?;
+            let mut keybindings: KeybindingSet = read_current_toml(&path).await?;
             keybindings.normalize();
             keybindings.validate()?;
             Ok(keybindings)
@@ -27,6 +27,7 @@ impl DatasetRepository {
     }
 
     pub async fn save_keybindings(&self, keybindings: &KeybindingSet) -> StorageResult<()> {
+        self.ensure_artifact_migration().await?;
         let mut keybindings = keybindings.clone();
         labello_domain::validate_schema_version(keybindings.schema_version)?;
         keybindings.validate()?;

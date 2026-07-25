@@ -24,8 +24,9 @@ pub(crate) fn reviewed_object_prefix(state: &ImageState, task_id: &TaskId, user:
 #[cfg(test)]
 mod tests {
     use labello_domain::{
-        AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, AnnotationVersion,
-        ClassId, ImageId, ReviewDecision, ReviewId, ReviewRecord,
+        AnnotationGeometry, AnnotationId, AnnotationOrigin, AnnotationType, AnnotationVersion,
+        ClassId, HumanRevisionKind, ImageId, ReviewDecision, ReviewId, ReviewRecord,
+        RevisionSource,
     };
 
     use super::*;
@@ -37,10 +38,14 @@ mod tests {
             let annotation = AnnotationVersion {
                 annotation_id: AnnotationId::from(id),
                 version: 1,
+                object_group_id: None,
+                origin: AnnotationOrigin::native(),
                 task_id: TaskId::from("task-a"),
                 class_id: ClassId::from("class"),
                 annotation_type: AnnotationType::BoundingBox,
-                source: AnnotationSource::Human,
+                revision_source: RevisionSource::Human {
+                    action: HumanRevisionKind::Authored,
+                },
                 geometry: AnnotationGeometry::BoundingBox(labello_domain::BoundingBox {
                     x: 0.1,
                     y: 0.1,

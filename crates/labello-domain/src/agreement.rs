@@ -57,8 +57,9 @@ pub fn requires_independent_agreement(task: &TaskDefinition) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, BoundingBox, ClassId,
-        ReviewConfig, ReviewWorkflow, TaskId, TutorialContent, UserId, now,
+        AnnotationGeometry, AnnotationId, AnnotationOrigin, AnnotationType, BoundingBox, ClassId,
+        HumanRevisionKind, ReviewConfig, ReviewWorkflow, RevisionSource, TaskId, TutorialContent,
+        UserId, now,
     };
 
     use super::*;
@@ -86,15 +87,20 @@ mod tests {
                 }),
             },
             prelabel_config_ids: vec![],
+            manual_box_guide_migration: None,
             enabled: true,
         };
         let make = |id, x| AnnotationVersion {
             annotation_id: AnnotationId::from(id),
             version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
             task_id: task.task_id.clone(),
             class_id: ClassId::from("person"),
             annotation_type: AnnotationType::BoundingBox,
-            source: AnnotationSource::Human,
+            revision_source: RevisionSource::Human {
+                action: HumanRevisionKind::Authored,
+            },
             geometry: AnnotationGeometry::BoundingBox(BoundingBox {
                 x,
                 y: 0.0,

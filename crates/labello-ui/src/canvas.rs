@@ -131,7 +131,7 @@ enum ReviewViewTarget {
     #[default]
     Disabled,
     FullImage,
-    Annotation(AnnotationId),
+    Annotation(AnnotationId, u32),
 }
 
 impl CanvasState {
@@ -233,13 +233,19 @@ impl CanvasState {
     /// when object-by-object review is complete.
     pub fn set_review_focus(&mut self, annotation: Option<&AnnotationVersion>) {
         let target = annotation.map_or(ReviewViewTarget::FullImage, |annotation| {
-            ReviewViewTarget::Annotation(annotation.annotation_id.clone())
+            ReviewViewTarget::Annotation(annotation.annotation_id.clone(), annotation.version)
         });
         if self.review_target == target {
             return;
         }
         self.review_target = target;
         self.pending_review_view = Some(annotation.and_then(annotation_focus_rect));
+    }
+
+    pub(crate) fn focus_annotation(&mut self, annotation: &AnnotationVersion) {
+        self.review_target =
+            ReviewViewTarget::Annotation(annotation.annotation_id.clone(), annotation.version);
+        self.pending_review_view = Some(annotation_focus_rect(annotation));
     }
 
     /// Stop tracking review targets without changing the current view.
@@ -427,6 +433,37 @@ pub(crate) fn show_canvas_styled(
     prelabels: &[PrelabelSuggestion],
     annotation_color: Color32,
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
+    show_canvas_colored(
+        ui,
+        state,
+        texture,
+        annotations,
+        image_size,
+        bounding_box_tool,
+        selected_annotation,
+        interaction,
+        skeleton_edges,
+        prelabels,
+        annotation_color,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn show_canvas_colored(
+    ui: &mut Ui,
+    state: &mut CanvasState,
+    texture: Option<&egui::TextureHandle>,
+    annotations: &[AnnotationVersion],
+    image_size: [u32; 2],
+    bounding_box_tool: bool,
+    selected_annotation: Option<&AnnotationId>,
+    interaction: CanvasInteraction,
+    skeleton_edges: &[(String, String)],
+    prelabels: &[PrelabelSuggestion],
+    annotation_color: Color32,
+    annotation_colors: &std::collections::BTreeMap<AnnotationId, Color32>,
+) -> Option<CanvasAction<BoundingBoxEdit>> {
     let editable = interaction.editable;
     let available = ui.available_size().max(vec2(1.0, 1.0));
     let (viewport, _) = ui.allocate_exact_size(available, Sense::hover());
@@ -457,6 +494,7 @@ pub(crate) fn show_canvas_styled(
             skeleton_edges,
             prelabels,
             annotation_color,
+            annotation_colors,
         );
         return None;
     }
@@ -536,6 +574,7 @@ pub(crate) fn show_canvas_styled(
         skeleton_edges,
         prelabels,
         annotation_color,
+        annotation_colors,
     );
 
     let action = handle_annotation_pointer(
@@ -570,6 +609,7 @@ fn paint_canvas(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
     annotation_color: Color32,
+    annotation_colors: &std::collections::BTreeMap<AnnotationId, Color32>,
 ) {
     let painter = ui.painter_at(viewport);
     painter.rect_filled(
@@ -638,6 +678,10 @@ fn paint_canvas(
 
     for annotation in annotations.iter().filter(|annotation| !annotation.deleted) {
         let selected = selected_annotation == Some(&annotation.annotation_id);
+        let annotation_color = annotation_colors
+            .get(&annotation.annotation_id)
+            .copied()
+            .unwrap_or(annotation_color);
         match &annotation.geometry {
             AnnotationGeometry::BoundingBox(bbox) => {
                 let bbox = edit_preview
@@ -1646,13 +1690,17 @@ mod tests {
         AnnotationVersion {
             annotation_id: AnnotationId::from("ann_test"),
             version: 1,
+            object_group_id: None,
+            origin: labello_domain::AnnotationOrigin::native(),
             task_id: labello_domain::TaskId::from("task"),
             class_id: labello_domain::ClassId::from("class"),
             annotation_type: match &geometry {
                 AnnotationGeometry::BoundingBox(_) => labello_domain::AnnotationType::BoundingBox,
                 AnnotationGeometry::Skeleton(_) => labello_domain::AnnotationType::Skeleton,
             },
-            source: labello_domain::AnnotationSource::Human,
+            revision_source: labello_domain::RevisionSource::Human {
+                action: labello_domain::HumanRevisionKind::Authored,
+            },
             geometry,
             author_user_id: labello_domain::UserId::from("annotator"),
             created_at: labello_domain::now(),

@@ -33,8 +33,23 @@ impl LabelloApp {
                 .show(ui, |ui| self.connection_section(ui));
             if self.auth.can_create_datasets {
                 ui.add_space(theme::SPACE_3);
-                egui::CollapsingHeader::new("Create a dataset")
-                    .show(ui, |ui| self.create_dataset_section(ui));
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_sized(
+                            [ui.available_width().min(260.0), 44.0],
+                            egui::Button::selectable(self.setup.show_create, "Create a dataset"),
+                        )
+                        .clicked()
+                    {
+                        self.setup.show_create = !self.setup.show_create;
+                        self.import_flow.open = false;
+                    }
+                });
+                if self.setup.show_create {
+                    self.create_dataset_section(ui);
+                }
+                ui.add_space(theme::SPACE_2);
+                self.import_setup_section(ui);
             }
         } else {
             self.connection_section(ui);

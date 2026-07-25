@@ -225,6 +225,12 @@ impl LabelloApp {
         if !self.work_view() {
             return;
         }
+        if self.manual_migration_active() {
+            if layout != LayoutMode::Wide && ui.button("Migration controls").clicked() {
+                self.drawer = Some(Drawer::Inspector);
+            }
+            return;
+        }
         let ready = (self.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
@@ -327,6 +333,12 @@ impl LabelloApp {
     }
 
     pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
+        if self.manual_migration_active() {
+            if ui.button("Migration controls").clicked() {
+                self.drawer = Some(Drawer::Inspector);
+            }
+            return;
+        }
         let ready = (self.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
@@ -527,6 +539,10 @@ impl LabelloApp {
 
     pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         ui.heading(RichText::new("Inspector").color(theme::TEXT));
+        if self.manual_migration_active() {
+            self.manual_migration_actions(ui);
+            return;
+        }
         let active_count = self
             .annotations
             .iter()
@@ -998,7 +1014,7 @@ impl LabelloApp {
             let screen = ctx.content_rect();
             let compact = layout == LayoutMode::Compact;
             let width = if compact {
-                (screen.width() - 48.0).max(240.0)
+                (screen.width() - 96.0).max(240.0)
             } else {
                 308.0_f32.min(screen.width() - 48.0)
             };

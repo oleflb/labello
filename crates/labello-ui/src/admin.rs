@@ -1923,6 +1923,7 @@ fn workflow_task_for_class(class: &LabelClass, annotation_type: AnnotationType) 
         skeleton,
         review: ReviewConfig::default(),
         prelabel_config_ids: Vec::new(),
+        manual_box_guide_migration: None,
         enabled: true,
     }
 }
@@ -2271,6 +2272,7 @@ fn edit_tasks(
                 skeleton: None,
                 review: ReviewConfig::default(),
                 prelabel_config_ids: Vec::new(),
+                manual_box_guide_migration: None,
                 enabled: true,
             });
         }

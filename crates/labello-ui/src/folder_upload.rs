@@ -117,6 +117,12 @@ fn open_folder_picker(
         dataset_id: app.config.dataset_id.to_string(),
         root,
         request,
+        csrf_token: app
+            .runtime
+            .api
+            .as_ref()
+            .and_then(|api| api.csrf_token())
+            .ok_or_else(|| "folder upload requires an authenticated session".to_string())?,
     };
     type PickerCallback = Closure<dyn FnMut(web_sys::Event)>;
     let callback_holder = std::rc::Rc::new(std::cell::RefCell::new(None::<PickerCallback>));
@@ -187,6 +193,7 @@ struct UploadConfig {
     dataset_id: String,
     root: String,
     request: RequestIdentity,
+    csrf_token: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -324,7 +331,9 @@ async fn upload_batch(config: &UploadConfig, form: &web_sys::FormData) -> Result
     let url = upload_batch_url(&config.api_base_url, &config.dataset_id, &config.root);
     let init = request_init("POST");
     init.set_body(form);
-    fetch(&url, &init).await.map(|_| ())
+    fetch(&url, &init, Some(&config.csrf_token))
+        .await
+        .map(|_| ())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -335,7 +344,7 @@ async fn start_ingest_job(config: &UploadConfig) -> Result<String, String> {
         encode_component(&config.dataset_id),
     );
     let init = request_init("POST");
-    let response = fetch(&url, &init).await?;
+    let response = fetch(&url, &init, Some(&config.csrf_token)).await?;
     let value = wasm_bindgen_futures::JsFuture::from(response.json().map_err(js_error)?)
         .await
         .map_err(js_error)?;
@@ -388,7 +397,7 @@ async fn poll_ingest_job(config: &UploadConfig, job_id: &str) -> Result<IngestPo
         encode_component(job_id),
     );
     let init = request_init("GET");
-    let response = fetch(&url, &init).await?;
+    let response = fetch(&url, &init, None).await?;
     let value = wasm_bindgen_futures::JsFuture::from(response.json().map_err(js_error)?)
         .await
         .map_err(js_error)?;
@@ -409,11 +418,21 @@ fn request_init(method: &str) -> web_sys::RequestInit {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn fetch(url: &str, init: &web_sys::RequestInit) -> Result<web_sys::Response, String> {
+async fn fetch(
+    url: &str,
+    init: &web_sys::RequestInit,
+    csrf_token: Option<&str>,
+) -> Result<web_sys::Response, String> {
     use wasm_bindgen::JsCast;
 
     init.set_credentials(web_sys::RequestCredentials::Include);
     let request = web_sys::Request::new_with_str_and_init(url, init).map_err(js_error)?;
+    if let Some(token) = csrf_token {
+        request
+            .headers()
+            .set("x-csrf-token", token)
+            .map_err(js_error)?;
+    }
     let window = web_sys::window().ok_or_else(|| "missing browser window".to_string())?;
     let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
         .await

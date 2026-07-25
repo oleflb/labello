@@ -11,6 +11,9 @@ pub enum ClientError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("schema artifact error: {0}")]
+    SchemaArtifact(String),
+
     #[error("api error {status}: {message}")]
     Api { status: u16, message: String },
 

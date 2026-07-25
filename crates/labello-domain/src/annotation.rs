@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AnnotationGeometry, AnnotationId, AnnotationType, ClassId, CorrectionId, DomainError,
-    DomainResult, ImageDimensions, PrelabelConfigId, TaskDefinition, TaskId, Timestamp, UserId,
+    DomainResult, ImageDimensions, ImportId, ImportedOrigin, ObjectGroupId, PrelabelConfigId,
+    TaskDefinition, TaskId, Timestamp, UserId,
 };
 
 pub use crate::task::{TaskOutcome, TaskState, TaskStatus};
@@ -23,15 +24,111 @@ pub enum AnnotationSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "origin",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AnnotationOrigin {
+    Native { legacy_v2: bool },
+    Imported { imported: ImportedOrigin },
+}
+
+impl AnnotationOrigin {
+    pub fn native() -> Self {
+        Self::Native { legacy_v2: false }
+    }
+
+    pub fn legacy_v2() -> Self {
+        Self::Native { legacy_v2: true }
+    }
+
+    pub fn is_legacy_v2(&self) -> bool {
+        matches!(self, Self::Native { legacy_v2: true })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanRevisionKind {
+    Authored,
+    Edited,
+    AcceptedUnchanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RevisionSource {
+    Human {
+        action: HumanRevisionKind,
+    },
+    Import {
+        import_id: ImportId,
+    },
+    PrelabelSuggestion {
+        config_id: PrelabelConfigId,
+        model_id: String,
+        confidence: f32,
+    },
+    ReviewerCorrection {
+        correction_id: CorrectionId,
+    },
+}
+
+impl From<AnnotationSource> for RevisionSource {
+    fn from(source: AnnotationSource) -> Self {
+        match source {
+            AnnotationSource::Human => Self::Human {
+                action: HumanRevisionKind::Authored,
+            },
+            AnnotationSource::PrelabelSuggestion {
+                config_id,
+                model_id,
+                confidence,
+            } => Self::PrelabelSuggestion {
+                config_id,
+                model_id,
+                confidence,
+            },
+            AnnotationSource::ReviewerCorrection { correction_id } => {
+                Self::ReviewerCorrection { correction_id }
+            }
+        }
+    }
+}
+
+impl From<&RevisionSource> for AnnotationSource {
+    fn from(source: &RevisionSource) -> Self {
+        match source {
+            RevisionSource::Human { .. } | RevisionSource::Import { .. } => Self::Human,
+            RevisionSource::PrelabelSuggestion {
+                config_id,
+                model_id,
+                confidence,
+            } => Self::PrelabelSuggestion {
+                config_id: config_id.clone(),
+                model_id: model_id.clone(),
+                confidence: *confidence,
+            },
+            RevisionSource::ReviewerCorrection { correction_id } => Self::ReviewerCorrection {
+                correction_id: correction_id.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationVersion {
     pub annotation_id: AnnotationId,
     pub version: u32,
+    pub object_group_id: Option<ObjectGroupId>,
+    pub origin: AnnotationOrigin,
     pub task_id: TaskId,
     pub class_id: ClassId,
     #[serde(rename = "type")]
     pub annotation_type: AnnotationType,
-    pub source: AnnotationSource,
+    pub revision_source: RevisionSource,
     pub geometry: AnnotationGeometry,
     pub author_user_id: UserId,
     pub created_at: Timestamp,
@@ -40,6 +137,34 @@ pub struct AnnotationVersion {
 }
 
 impl AnnotationVersion {
+    pub fn native(
+        annotation_id: AnnotationId,
+        task_id: TaskId,
+        class_id: ClassId,
+        annotation_type: AnnotationType,
+        geometry: AnnotationGeometry,
+        author_user_id: UserId,
+        timestamp: Timestamp,
+    ) -> Self {
+        Self {
+            annotation_id,
+            version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
+            task_id,
+            class_id,
+            annotation_type,
+            revision_source: RevisionSource::Human {
+                action: HumanRevisionKind::Authored,
+            },
+            geometry,
+            author_user_id,
+            created_at: timestamp,
+            updated_at: timestamp,
+            deleted: false,
+        }
+    }
+
     pub fn validate_for_task(
         &self,
         task: &TaskDefinition,
@@ -195,6 +320,7 @@ mod tests {
             }),
             review: ReviewConfig::default(),
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         }
     }
@@ -203,10 +329,14 @@ mod tests {
         AnnotationVersion {
             annotation_id: AnnotationId::from("ann_1"),
             version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
             task_id: TaskId::from("skeleton:person"),
             class_id: ClassId::from("person"),
             annotation_type: AnnotationType::Skeleton,
-            source: AnnotationSource::Human,
+            revision_source: RevisionSource::Human {
+                action: HumanRevisionKind::Authored,
+            },
             geometry: AnnotationGeometry::Skeleton(SkeletonGeometry { keypoints }),
             author_user_id: UserId::from("annotator"),
             created_at: now(),

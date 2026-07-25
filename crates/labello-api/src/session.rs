@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -22,7 +23,7 @@ pub(crate) struct ServerStore {
     load_error: Arc<Option<String>>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct StoreData {
     users: BTreeMap<UserId, UserAccount>,
@@ -30,14 +31,16 @@ struct StoreData {
     oauth_flows: BTreeMap<String, OAuthFlowRecord>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionRecord {
     user_id: UserId,
     expires_at: Timestamp,
+    #[serde(default)]
+    csrf_token: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OAuthFlowRecord {
     cookie_hash: String,
@@ -50,6 +53,16 @@ pub(crate) struct OAuthFlow {
     pub cookie_token: String,
 }
 
+pub(crate) struct SessionTokens {
+    pub cookie: String,
+    pub csrf: String,
+}
+
+pub(crate) struct AuthenticatedSession {
+    pub account: UserAccount,
+    pub csrf_token: String,
+}
+
 impl ServerStore {
     pub(crate) fn new(datasets_root: &Path) -> Self {
         let path = datasets_root.join(".labello-server").join("auth.json");
@@ -60,7 +73,7 @@ impl ServerStore {
         } else {
             Ok(StoreData::default())
         };
-        let (data, load_error) = match loaded {
+        let (mut data, mut load_error) = match loaded {
             Ok(data) => (data, None),
             Err(error) => {
                 tracing::error!(
@@ -71,6 +84,21 @@ impl ServerStore {
                 (StoreData::default(), Some(error))
             }
         };
+        let mut migrated = false;
+        for session in data.sessions.values_mut() {
+            if session.csrf_token.is_empty() {
+                session.csrf_token = random_token();
+                migrated = true;
+            }
+        }
+        if migrated && let Err(error) = save_store(&path, &data) {
+            tracing::error!(
+                event = "auth.store.migration_failed",
+                error_kind = "persistence",
+                "could not migrate authentication store"
+            );
+            load_error = Some(error.to_string());
+        }
         Self {
             path: Arc::new(path),
             data: Arc::new(Mutex::new(data)),
@@ -100,40 +128,42 @@ impl ServerStore {
         Ok(self.lock().users.get(user_id).cloned())
     }
 
-    pub(crate) fn create_session(&self, user_id: UserId) -> ApiResult<String> {
+    pub(crate) fn create_session(&self, user_id: UserId) -> ApiResult<SessionTokens> {
         self.ensure_loaded()?;
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let cookie = random_token();
+        let csrf = random_token();
         let mut data = self.lock();
         prune(&mut data);
         data.sessions.insert(
-            token_hash(&token),
+            token_hash(&cookie),
             SessionRecord {
                 user_id,
                 expires_at: now() + chrono::Duration::days(SESSION_LIFETIME_DAYS),
+                csrf_token: csrf.clone(),
             },
         );
         self.save(&data)?;
-        Ok(token)
+        Ok(SessionTokens { cookie, csrf })
     }
 
-    pub(crate) fn session_user(&self, token: &str) -> ApiResult<Option<UserAccount>> {
+    pub(crate) fn session(&self, token: &str) -> ApiResult<Option<AuthenticatedSession>> {
         self.ensure_loaded()?;
         let mut data = self.lock();
         let before = data.sessions.len() + data.oauth_flows.len();
         prune(&mut data);
-        let user = data
-            .sessions
-            .get(&token_hash(token))
-            .and_then(|session| data.users.get(&session.user_id))
-            .cloned();
+        let session = data.sessions.get(&token_hash(token)).and_then(|session| {
+            data.users
+                .get(&session.user_id)
+                .cloned()
+                .map(|account| AuthenticatedSession {
+                    account,
+                    csrf_token: session.csrf_token.clone(),
+                })
+        });
         if before != data.sessions.len() + data.oauth_flows.len() {
             self.save(&data)?;
         }
-        Ok(user)
+        Ok(session)
     }
 
     pub(crate) fn delete_session(&self, token: &str) -> ApiResult<()> {
@@ -214,27 +244,71 @@ impl ServerStore {
     }
 
     fn save(&self, data: &StoreData) -> ApiResult<()> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| ApiError::Internal("auth store has no parent directory".to_string()))?;
-        fs::create_dir_all(parent).map_err(store_error)?;
-        let temporary = self.path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(data)?).map_err(store_error)?;
-        fs::rename(&temporary, self.path.as_ref()).map_err(store_error)
+        save_store(&self.path, data)
     }
+}
+
+fn save_store(path: &Path, data: &StoreData) -> ApiResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ApiError::Internal("auth store has no parent directory".to_string()))?;
+    fs::create_dir_all(parent).map_err(store_error)?;
+    restrict_directory(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).map_err(store_error)?;
+    restrict_file(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(data)?)
+        .map_err(store_error)?;
+    fs::rename(&temporary, path).map_err(store_error)
 }
 
 fn prune(data: &mut StoreData) {
     let timestamp = now();
     data.sessions
-        .retain(|_, session| session.expires_at > timestamp);
+        .retain(|_, session| session.expires_at > timestamp && !session.csrf_token.is_empty());
     data.oauth_flows
         .retain(|_, flow| flow.expires_at > timestamp);
 }
 
 fn token_hash(token: &str) -> String {
     blake3::hash(token.as_bytes()).to_hex().to_string()
+}
+
+fn random_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+#[cfg(unix)]
+fn restrict_directory(path: &Path) -> ApiResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(store_error)
+}
+
+#[cfg(not(unix))]
+fn restrict_directory(_path: &Path) -> ApiResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file(path: &Path) -> ApiResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(store_error)
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) -> ApiResult<()> {
+    Ok(())
 }
 
 fn store_error(error: std::io::Error) -> ApiError {

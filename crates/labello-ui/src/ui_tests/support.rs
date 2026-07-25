@@ -381,6 +381,38 @@ impl SpyApi {
         self.state.borrow_mut().fail_next_admin_save = true;
     }
 
+    pub(super) fn set_import_job(&self, job: labello_client::ImportJob) {
+        self.state.borrow_mut().import_job = Some(job);
+    }
+
+    pub(super) fn fail_next_import_plan(&self) {
+        self.state.borrow_mut().fail_next_import_plan = true;
+    }
+
+    #[cfg(feature = "inspector-presets")]
+    pub(super) fn fail_next_migration(&self) {
+        self.state.borrow_mut().fail_next_migration = true;
+    }
+
+    #[cfg(feature = "inspector-presets")]
+    pub(super) fn set_image_state(&self, state: ImageState) {
+        self.state
+            .borrow_mut()
+            .states
+            .insert(state.image_id.clone(), state);
+    }
+
+    #[cfg(feature = "inspector-presets")]
+    pub(super) fn image_state(&self, image_id: &ImageId) -> ImageState {
+        self.state.borrow().states[image_id].clone()
+    }
+
+    pub(super) fn last_import_plan_request(
+        &self,
+    ) -> Option<labello_client::UpdateImportPlanRequest> {
+        self.state.borrow().last_import_plan_request.clone()
+    }
+
     pub(super) fn fail_role_save_at(&self, call: usize) {
         self.state.borrow_mut().fail_role_save_at = Some(call);
     }
@@ -437,6 +469,16 @@ pub(super) struct CallCounts {
     pub(super) list_snapshots: usize,
     pub(super) create_snapshot: usize,
     pub(super) get_snapshot_file: usize,
+    pub(super) import_capabilities: usize,
+    pub(super) create_import: usize,
+    pub(super) register_import_files: usize,
+    pub(super) upload_import_chunk: usize,
+    pub(super) seal_import: usize,
+    pub(super) preflight_import: usize,
+    pub(super) update_import_plan: usize,
+    pub(super) commit_import: usize,
+    pub(super) cancel_import: usize,
+    pub(super) migration_commands: usize,
 }
 
 pub(super) struct SpyState {
@@ -462,6 +504,11 @@ pub(super) struct SpyState {
     pub(super) fail_next_admin_save: bool,
     pub(super) fail_role_save_at: Option<usize>,
     pub(super) last_correction: Option<CorrectionRequest>,
+    pub(super) import_job: Option<labello_client::ImportJob>,
+    pub(super) import_plan: Option<labello_client::ImportPlan>,
+    pub(super) fail_next_import_plan: bool,
+    pub(super) last_import_plan_request: Option<labello_client::UpdateImportPlanRequest>,
+    pub(super) fail_next_migration: bool,
 }
 
 impl SpyState {
@@ -575,6 +622,11 @@ impl SpyState {
             fail_next_admin_save: false,
             fail_role_save_at: None,
             last_correction: None,
+            import_job: None,
+            import_plan: None,
+            fail_next_import_plan: false,
+            last_import_plan_request: None,
+            fail_next_migration: false,
         }
     }
 
@@ -587,17 +639,706 @@ impl SpyState {
     }
 }
 
+impl ImportApi for SpyApi {
+    fn import_capabilities<'a>(&'a self) -> ApiFuture<'a, labello_client::ImportCapabilities> {
+        self.state.borrow_mut().counts.import_capabilities += 1;
+        ready(Ok(test_import_capabilities()))
+    }
+
+    fn create_import<'a>(
+        &'a self,
+        request: labello_client::CreateImportRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ImportJob> {
+        let mut state = self.state.borrow_mut();
+        state.counts.create_import += 1;
+        let job = test_import_job(
+            request.destination_dataset_id,
+            request.destination_name,
+            request.profile,
+            match request.source {
+                labello_client::ImportSourceSelection::BrowserFolder => {
+                    labello_client::ImportTransport::BrowserFolder
+                }
+                labello_client::ImportSourceSelection::ServerDirectory { .. } => {
+                    labello_client::ImportTransport::ServerDirectory
+                }
+            },
+        );
+        state.import_job = Some(job.clone());
+        ready(Ok(job))
+    }
+
+    fn get_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+    ) -> ApiFuture<'a, labello_client::ImportJob> {
+        ready(
+            self.state
+                .borrow()
+                .import_job
+                .clone()
+                .ok_or_else(|| ClientError::Demo("missing import".to_string())),
+        )
+    }
+
+    fn register_import_files<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        request: labello_client::RegisterImportFilesRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::RegisterImportFilesResult> {
+        self.state.borrow_mut().counts.register_import_files += 1;
+        let registered_bytes = request.files.iter().map(|file| file.byte_size).sum();
+        ready(Ok(labello_client::RegisterImportFilesResult {
+            registered_files: request.files.len() as u64,
+            registered_bytes,
+            files: request
+                .files
+                .into_iter()
+                .map(|file| labello_client::RegisteredImportFile {
+                    file_id: format!("file-{}", file.client_file_id),
+                    client_file_id: file.client_file_id,
+                    byte_size: file.byte_size,
+                    accepted_bytes: 0,
+                    complete: false,
+                })
+                .collect(),
+        }))
+    }
+
+    fn upload_import_chunk<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        file_id: &'a str,
+        upload: labello_client::ImportChunkUpload,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ImportChunkResult> {
+        self.state.borrow_mut().counts.upload_import_chunk += 1;
+        ready(Ok(labello_client::ImportChunkResult {
+            file_id: file_id.to_string(),
+            accepted_offset: upload.offset + upload.length,
+            complete: true,
+            file_blake3: Some(upload.digest),
+        }))
+    }
+
+    fn seal_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        _request: labello_client::SealImportRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::SealImportResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.seal_import += 1;
+        if let Some(job) = state.import_job.as_mut() {
+            job.lifecycle = labello_client::ImportLifecycle::Sealed;
+        }
+        ready(Ok(labello_client::SealImportResult {
+            import_id: import_id.clone(),
+            source_fingerprint: "source-test".to_string(),
+            files: 3,
+            bytes: 1024,
+        }))
+    }
+
+    fn preflight_import<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: labello_client::StartImportPreflightRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ImportJob> {
+        let mut state = self.state.borrow_mut();
+        state.counts.preflight_import += 1;
+        let mut job = state.import_job.clone().unwrap();
+        job.lifecycle = labello_client::ImportLifecycle::AwaitingDecision;
+        job.preflight_report = Some(test_import_report());
+        state.import_job = Some(job.clone());
+        ready(Ok(job))
+    }
+
+    fn update_import_plan<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: labello_client::UpdateImportPlanRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ImportPlan> {
+        let mut state = self.state.borrow_mut();
+        state.counts.update_import_plan += 1;
+        state.last_import_plan_request = Some(request.clone());
+        if std::mem::take(&mut state.fail_next_import_plan) {
+            return ready(Err(ClientError::Demo("import plan failed".to_string())));
+        }
+        if let Err(error) = validate_spy_import_plan(&request) {
+            return ready(Err(ClientError::Demo(error)));
+        }
+        let mut report = test_import_report();
+        report.source.categories = request.category_mappings.len() as u64;
+        report.output.classes = request
+            .category_mappings
+            .iter()
+            .filter(|category| category.selected)
+            .count() as u64;
+        report.output.tasks = request.task_mappings.len() as u64;
+        let plan = labello_client::ImportPlan {
+            import_id: import_id.clone(),
+            source_fingerprint: "source-test".to_string(),
+            plan_hash: "plan-test".to_string(),
+            commit_ready: true,
+            blocking_diagnostic_codes: Vec::new(),
+            required_acknowledgement_codes: Vec::new(),
+            report,
+            source_categories: Vec::new(),
+            accepted_request: Some(request.clone()),
+        };
+        state.import_plan = Some(plan.clone());
+        ready(Ok(plan))
+    }
+
+    fn import_diagnostics<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _query: labello_client::ImportDiagnosticsQuery,
+    ) -> ApiFuture<'a, labello_client::ImportDiagnosticsPage> {
+        ready(Ok(Default::default()))
+    }
+
+    fn commit_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: labello_client::CommitImportRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::CommitImportResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.commit_import += 1;
+        let dataset_id = state
+            .import_job
+            .as_ref()
+            .unwrap()
+            .destination_dataset_id
+            .clone();
+        state.import_job.as_mut().unwrap().lifecycle = labello_client::ImportLifecycle::Succeeded;
+        ready(Ok(labello_client::CommitImportResult {
+            import_id: import_id.clone(),
+            dataset_id,
+            plan_hash: request.plan_hash,
+            recovered: false,
+        }))
+    }
+
+    fn cancel_import<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        _request: labello_client::CancelImportRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::CancelImportResult> {
+        self.state.borrow_mut().counts.cancel_import += 1;
+        ready(Ok(labello_client::CancelImportResult {
+            import_id: import_id.clone(),
+            lifecycle: labello_client::ImportLifecycle::Cancelled,
+        }))
+    }
+
+    fn save_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::SaveMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+
+    fn exclude_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: labello_client::ExcludeMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        if std::mem::take(&mut state.fail_next_migration) {
+            return ready(Err(ClientError::Demo(
+                "migration command failed".to_string(),
+            )));
+        }
+        let image_state = state
+            .states
+            .get_mut(image_id)
+            .expect("migration test image state");
+        let task_id = image_state
+            .migration_target_sets
+            .iter()
+            .find(|(_, set)| {
+                set.targets
+                    .iter()
+                    .any(|target| target.object_group_id == request.target.object_group_id)
+            })
+            .map(|(task_id, _)| task_id.clone())
+            .expect("migration test target");
+        let disposition = image_state
+            .migration_dispositions
+            .get_mut(&task_id)
+            .unwrap()
+            .get_mut(&request.target.object_group_id)
+            .unwrap();
+        disposition.disposition_version += 1;
+        disposition.status = MigrationDispositionStatus::Excluded {
+            exclusion: MigrationExclusion {
+                reason: request.reason,
+                event_id: EventId::from(format!(
+                    "spy-exclusion-{}",
+                    disposition.disposition_version
+                )),
+                actor_user_id: UserId::from("admin"),
+                timestamp: now(),
+                note: request.note,
+            },
+        };
+        let image_state = image_state.clone();
+        let cursor = image_state
+            .migration_cursor(&task_id, request.pass_id.as_ref())
+            .ok();
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            progress: migration_progress(&image_state, &task_id),
+            image_state,
+            cursor,
+            active_pass: request.pass_id.and_then(|pass_id| {
+                state.states[image_id]
+                    .migration_passes
+                    .get(&pass_id)
+                    .cloned()
+            }),
+            confirmation: None,
+            assignment: None,
+            annotation_id: None,
+        }))
+    }
+
+    fn reopen_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::ReopenMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+
+    fn start_migration_pass<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::StartMigrationPassRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+
+    fn keep_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::KeepMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+
+    fn confirm_migration<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::ConfirmMigrationRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+
+    fn review_migration<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        _request: labello_client::ReviewMigrationRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        self.migration_result(dataset_id, image_id)
+    }
+}
+
+fn validate_spy_import_plan(
+    request: &labello_client::UpdateImportPlanRequest,
+) -> Result<(), String> {
+    let selected = request
+        .category_mappings
+        .iter()
+        .filter(|category| category.selected)
+        .map(|category| category.source_category_key.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected.is_empty() || request.task_mappings.is_empty() {
+        return Err(
+            "API validation: selected categories and task mappings are required".to_string(),
+        );
+    }
+    let mut task_types = BTreeSet::new();
+    for mapping in &request.task_mappings {
+        if !selected.contains(mapping.source_category_key.as_str())
+            || !task_types.insert((
+                mapping.source_category_key.as_str(),
+                mapping.task.annotation_type == AnnotationType::Skeleton,
+            ))
+        {
+            return Err(
+                "API validation: task category/type must be unique and selected".to_string(),
+            );
+        }
+        let review_valid = match mapping.workflow_intent {
+            labello_client::ImportWorkflowIntent::AuthoritativeGroundTruth => {
+                mapping.task.review.workflow == labello_domain::ReviewWorkflow::None
+                    && mapping.task.review.required_reviews == 0
+            }
+            labello_client::ImportWorkflowIntent::RequireApproval
+            | labello_client::ImportWorkflowIntent::SeedFutureAnnotation => {
+                mapping.task.review.workflow == labello_domain::ReviewWorkflow::Approval
+                    && mapping.task.review.required_reviews >= 1
+            }
+        } && !mapping.task.review.allow_reviewer_corrections
+            && mapping.task.review.agreement_threshold.is_none();
+        if !review_valid {
+            return Err("API validation: task review workflow does not match intent".to_string());
+        }
+    }
+    for mapping in &request.geometry_mappings {
+        let matching_task = request.task_mappings.iter().any(|task| {
+            task.source_category_key == mapping.source_category_key
+                && match task.task.annotation_type {
+                    AnnotationType::BoundingBox => {
+                        mapping.target_geometry == labello_client::ImportGeometryKind::BoundingBox
+                    }
+                    AnnotationType::Skeleton => {
+                        mapping.target_geometry == labello_client::ImportGeometryKind::Skeleton
+                    }
+                }
+        });
+        match mapping.policy {
+            labello_client::ImportGeometryPolicy::Direct
+                if mapping.source_geometry != mapping.target_geometry || !matching_task =>
+            {
+                return Err("API validation: direct geometry must match a task".to_string());
+            }
+            labello_client::ImportGeometryPolicy::ManualBoxGuideV1
+                if mapping.source_geometry != labello_client::ImportGeometryKind::BoundingBox
+                    || mapping.target_geometry != labello_client::ImportGeometryKind::Skeleton
+                    || !matching_task =>
+            {
+                return Err("API validation: manual geometry must map box to skeleton".to_string());
+            }
+            labello_client::ImportGeometryPolicy::KeypointEnvelopeV1
+                if mapping.source_geometry != labello_client::ImportGeometryKind::Skeleton
+                    || mapping.target_geometry
+                        != labello_client::ImportGeometryKind::BoundingBox
+                    || !matching_task
+                    || mapping.parameters.len() != 3
+                    || mapping.parameters.iter().any(|parameter| match parameter {
+                        labello_client::ImportMappingParameter::Scalar { value, .. } => {
+                            !value.is_finite() || *value < 0.0
+                        }
+                        labello_client::ImportMappingParameter::Boolean { .. } => false,
+                        labello_client::ImportMappingParameter::Point { .. } => true,
+                    }) =>
+            {
+                return Err("API validation: envelope parameters are invalid".to_string());
+            }
+            labello_client::ImportGeometryPolicy::BoxRelativeTemplateV1
+                if mapping.source_geometry != labello_client::ImportGeometryKind::BoundingBox
+                    || mapping.target_geometry != labello_client::ImportGeometryKind::Skeleton
+                    || !matching_task
+                    || mapping.parameters.is_empty()
+                    || mapping.parameters.iter().any(|parameter| match parameter {
+                        labello_client::ImportMappingParameter::Point { x, y, .. } => {
+                            !x.is_finite()
+                                || !y.is_finite()
+                                || !(0.0..=1.0).contains(x)
+                                || !(0.0..=1.0).contains(y)
+                        }
+                        _ => true,
+                    }) =>
+            {
+                return Err("API validation: template parameters are invalid".to_string());
+            }
+            labello_client::ImportGeometryPolicy::Omit if matching_task => {
+                return Err("API validation: omitted geometry cannot have a task".to_string());
+            }
+            _ => {}
+        }
+    }
+    if request.skeleton_mappings.iter().any(|mapping| {
+        request.geometry_mappings.iter().any(|geometry| {
+            geometry.source_category_key == mapping.source_category_key
+                && geometry.policy == labello_client::ImportGeometryPolicy::ManualBoxGuideV1
+        }) && !mapping.source_keypoint_names.is_empty()
+    }) {
+        return Err("API validation: manual mappings cannot declare source names".to_string());
+    }
+    if request
+        .geometry_mappings
+        .iter()
+        .filter(|mapping| mapping.policy == labello_client::ImportGeometryPolicy::ManualBoxGuideV1)
+        .count()
+        > 1
+    {
+        return Err("API validation: only one manual mapping is supported".to_string());
+    }
+    Ok(())
+}
+
+impl SpyApi {
+    fn migration_result<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        let image_state = state
+            .states
+            .get(image_id)
+            .cloned()
+            .unwrap_or_else(|| ImageState::new(image_id.clone()));
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            image_state,
+            cursor: None,
+            progress: Default::default(),
+            active_pass: None,
+            confirmation: None,
+            assignment: None,
+            annotation_id: None,
+        }))
+    }
+}
+
+fn test_import_capabilities() -> labello_client::ImportCapabilities {
+    labello_client::ImportCapabilities {
+        available: true,
+        profiles: vec![labello_client::ImportProfileCapability {
+            profile: labello_client::ImportProfile::CocoInstancesGtV1,
+            enabled: true,
+            display_name: "COCO instances".to_string(),
+            profile_version: 1,
+        }],
+        transports: vec![
+            labello_client::ImportTransportCapability {
+                transport: labello_client::ImportTransport::BrowserFolder,
+                enabled: true,
+                resumable: true,
+            },
+            labello_client::ImportTransportCapability {
+                transport: labello_client::ImportTransport::ServerDirectory,
+                enabled: true,
+                resumable: true,
+            },
+        ],
+        server_roots: vec![labello_client::ServerImportRoot {
+            root_id: "staging".to_string(),
+            display_name: "Staging datasets".to_string(),
+        }],
+        schema_version: SCHEMA_VERSION,
+        parser_version: "test-parser".to_string(),
+        tool_version: "test-tool".to_string(),
+        manual_box_guide_migration: true,
+        ..Default::default()
+    }
+}
+
+pub(super) fn test_import_job(
+    dataset_id: DatasetId,
+    name: String,
+    profile: labello_client::ImportProfile,
+    transport: labello_client::ImportTransport,
+) -> labello_client::ImportJob {
+    labello_client::ImportJob {
+        import_id: ImportId::from("imp_test"),
+        owner_user_id: UserId::from("admin"),
+        destination_dataset_id: dataset_id,
+        destination_name: name,
+        profile,
+        transport,
+        lifecycle: labello_client::ImportLifecycle::Registering,
+        progress: Default::default(),
+        failure: None,
+        source_fingerprint: None,
+        plan_hash: None,
+        preflight_report: None,
+        can_cancel: true,
+        created_at: now(),
+        updated_at: now(),
+        expires_at: None,
+        recovery: None,
+    }
+}
+
+pub(super) fn test_import_report() -> labello_client::ImportPreflightReport {
+    labello_client::ImportPreflightReport {
+        source_fingerprint: "source-test".to_string(),
+        source: labello_client::ImportSourceCounts {
+            files: 3,
+            images: 2,
+            objects: 4,
+            categories: 1,
+            ..Default::default()
+        },
+        output: labello_client::ImportOutputEstimate {
+            annotations: 4,
+            tasks: 1,
+            classes: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub(super) fn contract_import_category() -> crate::import_flow::ImportCategoryDraft {
+    crate::import_flow::ImportCategoryDraft {
+        selected: true,
+        source_category_key: "release:person:17".to_string(),
+        source_category_id: "17".to_string(),
+        source_name: "Person".to_string(),
+        class_id: "person".to_string(),
+        class_name: "Person".to_string(),
+        class_color: "#5eead4".to_string(),
+        bounding_box_task_id: "bounding_box:person".to_string(),
+        bounding_box_task_name: "Person bounding boxes".to_string(),
+        skeleton_task_id: "skeleton:person".to_string(),
+        skeleton_task_name: "Person skeletons".to_string(),
+        source_skeleton: Some(SkeletonSpec {
+            keypoints: vec![KeypointSpec {
+                name: "nose".to_string(),
+                required: false,
+            }],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: true,
+        }),
+        direct_geometry: vec![
+            labello_client::ImportGeometryKind::BoundingBox,
+            labello_client::ImportGeometryKind::Skeleton,
+        ],
+        geometry_mappings: Vec::new(),
+        task_mappings: Vec::new(),
+        skeleton_mappings: Vec::new(),
+        workflow_intent: labello_client::ImportWorkflowIntent::AuthoritativeGroundTruth,
+        target_keypoint_names: "nose".to_string(),
+    }
+}
+
+pub(super) fn contract_import_plan(import_id: ImportId) -> labello_client::ImportPlan {
+    let category = contract_import_category();
+    let category_mapping = labello_client::ImportCategoryMappingRequest {
+        source_category_key: category.source_category_key.clone(),
+        source_category_id: category.source_category_id.clone(),
+        class_id: ClassId::from(category.class_id.clone()),
+        class_name: category.class_name.clone(),
+        color: category.class_color.clone(),
+        selected: true,
+    };
+    let task_mapping = labello_client::ImportTaskMappingRequest {
+        source_category_key: category.source_category_key.clone(),
+        task: task(
+            &category.bounding_box_task_id,
+            &category.bounding_box_task_name,
+            Vec::new(),
+        ),
+        workflow_intent: labello_client::ImportWorkflowIntent::AuthoritativeGroundTruth,
+    };
+    let geometry_mapping = labello_client::ImportGeometryMappingRequest {
+        source_category_key: category.source_category_key.clone(),
+        source_geometry: labello_client::ImportGeometryKind::BoundingBox,
+        target_geometry: labello_client::ImportGeometryKind::BoundingBox,
+        policy: labello_client::ImportGeometryPolicy::Direct,
+        parameters: Vec::new(),
+    };
+    let request = labello_client::UpdateImportPlanRequest {
+        category_mappings: vec![category_mapping.clone()],
+        geometry_mappings: vec![geometry_mapping.clone()],
+        task_mappings: vec![task_mapping.clone()],
+        skeleton_mappings: Vec::new(),
+        compatibility: Default::default(),
+        acknowledgements: Vec::new(),
+    };
+    labello_client::ImportPlan {
+        import_id,
+        source_fingerprint: "source-recovered".to_string(),
+        plan_hash: "plan-recovered".to_string(),
+        commit_ready: true,
+        blocking_diagnostic_codes: Vec::new(),
+        required_acknowledgement_codes: Vec::new(),
+        report: test_import_report(),
+        source_categories: vec![labello_client::ImportSourceCategory {
+            source_category_key: category.source_category_key,
+            source_category_id: category.source_category_id,
+            source_name: category.source_name,
+            source_supercategory: Some("person".to_string()),
+            source_namespace: "release".to_string(),
+            direct_geometry: category.direct_geometry,
+            keypoint_schema: category.source_skeleton,
+            generated_category_mapping: category_mapping.clone(),
+            generated_task_mappings: vec![task_mapping.clone()],
+            current_category_mapping: category_mapping,
+            current_geometry_mappings: vec![geometry_mapping],
+            current_task_mappings: vec![task_mapping],
+            current_skeleton_mappings: Vec::new(),
+        }],
+        accepted_request: Some(request),
+    }
+}
+
+fn migration_progress(
+    state: &ImageState,
+    task_id: &TaskId,
+) -> labello_client::ManualMigrationProgress {
+    let dispositions = state
+        .migration_dispositions
+        .get(task_id)
+        .into_iter()
+        .flat_map(|values| values.values());
+    let mut progress = labello_client::ManualMigrationProgress::default();
+    for disposition in dispositions {
+        progress.expected += 1;
+        match disposition.status {
+            MigrationDispositionStatus::Pending => progress.pending += 1,
+            MigrationDispositionStatus::Annotated { .. } => progress.annotated += 1,
+            MigrationDispositionStatus::Excluded { .. } => progress.excluded += 1,
+        }
+    }
+    progress
+}
+
 impl DatasetApi for SpyApi {
     fn list_datasets<'a>(&'a self) -> ApiFuture<'a, Vec<DatasetSummary>> {
         let mut state = self.state.borrow_mut();
         state.counts.list_datasets += 1;
         let metadata = state.metadata.clone();
-        ready(Ok(vec![DatasetSummary {
+        let mut summaries = vec![DatasetSummary {
             dataset_id: metadata.dataset_id,
             name: metadata.name,
             roles: state.summary_roles.clone(),
             total_images: metadata.images.len(),
-        }]))
+        }];
+        if let Some(job) = state.import_job.as_ref().filter(|job| {
+            job.lifecycle == labello_client::ImportLifecycle::Succeeded
+                && !summaries
+                    .iter()
+                    .any(|summary| summary.dataset_id == job.destination_dataset_id)
+        }) {
+            summaries.push(DatasetSummary {
+                dataset_id: job.destination_dataset_id.clone(),
+                name: job.destination_name.clone(),
+                roles: vec![DatasetRole::DataAdmin],
+                total_images: job.progress.total_images as usize,
+            });
+        }
+        ready(Ok(summaries))
     }
 
     fn create_dataset<'a>(
@@ -1363,6 +2104,7 @@ impl OfflineApi for SpyApi {
             roles: vec![DatasetRole::Annotator],
             tasks: state.metadata.tasks.clone(),
             images: Vec::new(),
+            import_manifests: Vec::new(),
         }))
     }
 
@@ -1445,6 +2187,10 @@ impl PrelabelApi for SpyApi {
 }
 
 impl AuthApi for SpyApi {
+    fn csrf_token(&self) -> Option<String> {
+        Some("test-csrf-token".to_string())
+    }
+
     fn auth_options<'a>(&'a self) -> ApiFuture<'a, AuthOptions> {
         self.state.borrow_mut().counts.auth_options += 1;
         ready(Ok(AuthOptions {
@@ -1459,6 +2205,7 @@ impl AuthApi for SpyApi {
         ready(Ok(SessionInfo {
             account: state.users[0].account.clone(),
             can_create_datasets: true,
+            csrf_token: "test-csrf-token".to_string(),
         }))
     }
 
@@ -1490,6 +2237,7 @@ impl AuthApi for SpyApi {
             ready(Ok(SessionInfo {
                 account: state.users[0].account.clone(),
                 can_create_datasets: true,
+                csrf_token: "test-csrf-token".to_string(),
             }))
         }
     }
@@ -1558,6 +2306,7 @@ pub(super) fn image_record(
         canonical_path: format!("images/{file_name}"),
         known_paths: vec![format!("images/{file_name}")],
         duplicate_paths: Vec::new(),
+        source_memberships: None,
         file_name: file_name.to_string(),
         byte_size: 64,
         width,
@@ -1579,6 +2328,7 @@ pub(super) fn test_snapshot(dataset_id: DatasetId) -> DatasetSnapshot {
             byte_size: 32,
             blake3: "snapshot-hash".to_string(),
         }],
+        imports: Vec::new(),
     }
 }
 
@@ -1600,6 +2350,7 @@ pub(super) fn task(id: &str, name: &str, prelabel_configs: Vec<&str>) -> TaskDef
             .into_iter()
             .map(PrelabelConfigId::from)
             .collect(),
+        manual_box_guide_migration: None,
         enabled: true,
     }
 }
@@ -1624,10 +2375,14 @@ pub(super) fn seed_review_annotation(
     let annotation = labello_domain::AnnotationVersion {
         annotation_id: annotation_id.clone(),
         version: 1,
+        object_group_id: None,
+        origin: labello_domain::AnnotationOrigin::native(),
         task_id,
         class_id,
         annotation_type,
-        source: labello_domain::AnnotationSource::Human,
+        revision_source: labello_domain::RevisionSource::Human {
+            action: labello_domain::HumanRevisionKind::Authored,
+        },
         geometry,
         author_user_id: UserId::from("annotator"),
         created_at: timestamp,
@@ -1688,6 +2443,8 @@ pub(super) fn stats(total_images: usize) -> DatasetStats {
             rejected: 0,
             reviewer_corrected: 0,
             finalized: 1,
+            provenance: Default::default(),
+            migration: Default::default(),
         },
     );
     let mut per_class = BTreeMap::new();
@@ -1696,6 +2453,7 @@ pub(super) fn stats(total_images: usize) -> DatasetStats {
         labello_domain::ClassStats {
             annotations: 2,
             completed_tasks: 1,
+            provenance: Default::default(),
         },
     );
     DatasetStats {
@@ -1711,6 +2469,9 @@ pub(super) fn stats(total_images: usize) -> DatasetStats {
         per_task,
         per_class,
         throughput: Vec::new(),
+        provenance: Default::default(),
+        migration: Default::default(),
+        import_coverage: Default::default(),
     }
 }
 

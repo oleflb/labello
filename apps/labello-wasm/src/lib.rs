@@ -4,6 +4,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
+mod raw_import;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn start() {
     let mut logging = tracing_wasm::WASMLayerConfigBuilder::new();
@@ -49,7 +52,11 @@ async fn run() -> Result<(), JsValue> {
             options,
             Box::new(move |creation_context| {
                 labello_ui::theme::apply(&creation_context.egui_ctx);
-                Ok(Box::new(labello_ui::LabelloApp::live_http(config.clone())))
+                let mut app = labello_ui::LabelloApp::live_http(config.clone());
+                app.set_import_chunk_uploader(std::rc::Rc::new(|request| {
+                    Box::pin(raw_import::upload_chunk(request))
+                }));
+                Ok(Box::new(app))
             }),
         )
         .await?;

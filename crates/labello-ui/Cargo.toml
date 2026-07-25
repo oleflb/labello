@@ -9,6 +9,7 @@ repository.workspace = true
 inspector-presets = []
 
 [dependencies]
+blake3.workspace = true
 eframe.workspace = true
 egui.workspace = true
 labello-client = { path = "../labello-client" }

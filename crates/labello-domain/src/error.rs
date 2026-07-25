@@ -35,6 +35,15 @@ pub enum DomainError {
     #[error("reviewer correction {0} is internally inconsistent")]
     InvalidReviewerCorrection(String),
 
+    #[error("invalid import initialization: {0}")]
+    InvalidImport(String),
+
+    #[error("invalid migration state: {0}")]
+    InvalidMigration(String),
+
+    #[error("invalid versioned schema artifact: {0}")]
+    InvalidSchemaArtifact(String),
+
     #[error("reviewer correction {0} already exists")]
     DuplicateReviewerCorrection(String),
 

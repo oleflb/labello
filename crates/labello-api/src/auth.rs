@@ -40,7 +40,10 @@ pub(crate) fn session_token(headers: &HeaderMap) -> Option<String> {
 
 fn session_account(state: &ApiState, headers: &HeaderMap) -> ApiResult<Option<UserAccount>> {
     match session_token(headers) {
-        Some(token) => state.server_store.session_user(&token),
+        Some(token) => Ok(state
+            .server_store
+            .session(&token)?
+            .map(|session| session.account)),
         None => Ok(None),
     }
 }

@@ -43,6 +43,11 @@ impl DatasetRepository {
         let task = metadata.task(task_id).ok_or_else(|| {
             StorageError::InvalidAssignment(format!("task {task_id} does not exist"))
         })?;
+        if task.manual_box_guide_migration.is_some() {
+            return Err(StorageError::InvalidAssignment(
+                "manual migration reviews require the migration review workflow".to_string(),
+            ));
+        }
         if task.review.workflow != ReviewWorkflow::Approval {
             return Err(StorageError::InvalidAssignment(format!(
                 "approval reviews are not enabled for task {task_id}"
@@ -114,6 +119,41 @@ impl DatasetRepository {
                 if annotation.task_id != *task_id {
                     return Err(StorageError::InvalidAssignment(
                         "review target task does not match assignment task".to_string(),
+                    ));
+                }
+                false
+            }
+            ReviewTarget::MigrationDisposition {
+                task_id: reviewed_task_id,
+                object_group_id,
+                disposition_version,
+            } => {
+                let disposition = state
+                    .migration_dispositions
+                    .get(reviewed_task_id)
+                    .and_then(|dispositions| dispositions.get(object_group_id));
+                if reviewed_task_id != task_id
+                    || disposition.map(|value| value.disposition_version)
+                        != Some(*disposition_version)
+                {
+                    return Err(StorageError::InvalidAssignment(
+                        "migration disposition review target is stale or belongs to another task"
+                            .to_string(),
+                    ));
+                }
+                false
+            }
+            ReviewTarget::MigrationConfirmation {
+                task_id: reviewed_task_id,
+                confirmation_hash,
+            } => {
+                let confirmation = state.migration_confirmations.get(reviewed_task_id);
+                if reviewed_task_id != task_id
+                    || confirmation.map(|value| &value.confirmation_hash) != Some(confirmation_hash)
+                {
+                    return Err(StorageError::InvalidAssignment(
+                        "migration confirmation review target is stale or belongs to another task"
+                            .to_string(),
                     ));
                 }
                 false
@@ -317,10 +357,12 @@ impl DatasetRepository {
         let annotation = labello_domain::AnnotationVersion {
             annotation_id: current.annotation_id.clone(),
             version: current.version + 1,
+            object_group_id: current.object_group_id.clone(),
+            origin: current.origin.clone(),
             task_id: current.task_id.clone(),
             class_id: current.class_id.clone(),
             annotation_type: current.annotation_type.clone(),
-            source: AnnotationSource::ReviewerCorrection {
+            revision_source: RevisionSource::ReviewerCorrection {
                 correction_id: correction_id.clone(),
             },
             geometry,

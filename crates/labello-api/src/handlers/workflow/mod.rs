@@ -6,11 +6,14 @@ use axum::{
     response::IntoResponse,
 };
 use labello_client::{
-    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, CorrectionRequest,
-    OfflineBundleRequest, PrelabelSuggestionRequest,
+    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, ConfirmMigrationRequest,
+    CorrectionRequest, ExcludeMigrationTargetRequest, KeepMigrationTargetRequest,
+    ManualMigrationCommandResult, OfflineBundleRequest, PrelabelSuggestionRequest,
+    ReopenMigrationTargetRequest, ReviewMigrationRequest, SaveMigrationSkeletonRequest,
+    StartMigrationPassRequest,
 };
 use labello_domain::{
-    Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType,
+    Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType, Assignment,
     AssignmentKind, DatasetId, DatasetRole, EventPayload, ImageId, KeybindingSet,
     OfflineSyncRequest, PrelabelSuggestion, TaskOutcome, TaskState, TaskStatus,
 };
@@ -25,7 +28,7 @@ use crate::{
 mod event_policy;
 
 use event_policy::{
-    required_role_for_payload, validate_admin_repair_payload,
+    construct_annotation_mutation, required_role_for_payload, validate_admin_repair_payload,
     validate_annotation_assignment_payload, validate_assignment_request, validate_payload,
 };
 
@@ -321,13 +324,16 @@ pub(crate) async fn append_event(
     let metadata = repo.load_dataset().await?;
     let required_role = required_role_for_payload(&actor, &request.payload)?;
     ensure_dataset_role(&metadata, &actor, required_role.clone())?;
-    validate_payload(&metadata, &image_id, &request.payload)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Annotation)?;
-    validate_annotation_assignment_payload(
-        &repo.load_image_state(&image_id).await?,
-        &assignment.task_id,
-        &request.payload,
+    let image_state = repo.load_image_state(&image_id).await?;
+    validate_annotation_assignment_payload(&image_state, &assignment.task_id, &request.payload)?;
+    let payload = construct_annotation_mutation(
+        &actor,
+        &image_state,
+        labello_domain::now(),
+        request.payload,
     )?;
+    validate_payload(&metadata, &image_id, &payload)?;
     let (events, _) = repo
         .append_for_assignment(
             &actor.user_id,
@@ -337,7 +343,7 @@ pub(crate) async fn append_event(
                 task_id: &assignment.task_id,
                 kind: AssignmentKind::Annotation,
             },
-            vec![request.payload],
+            vec![payload],
             false,
         )
         .await?;
@@ -366,15 +372,49 @@ pub(crate) async fn apply_annotation_batch(
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::Annotator)?;
     validate_assignment_request(&assignment, &image_id, AssignmentKind::Annotation)?;
-    for payload in &request.payloads {
-        if required_role_for_payload(&actor, payload)? != DatasetRole::Annotator {
+    let mut image_state = repo.load_image_state(&image_id).await?;
+    let timestamp = labello_domain::now();
+    let mut payloads = Vec::with_capacity(request.payloads.len());
+    for payload in request.payloads {
+        if required_role_for_payload(&actor, &payload)? != DatasetRole::Annotator {
             return Err(ApiError::BadRequest(
                 "annotation batches only accept annotation mutations".to_string(),
             ));
         }
-        validate_payload(&metadata, &image_id, payload)?;
+        validate_annotation_assignment_payload(&image_state, &assignment.task_id, &payload)?;
+        let payload = construct_annotation_mutation(&actor, &image_state, timestamp, payload)?;
+        validate_payload(&metadata, &image_id, &payload)?;
+        let already_reflected = match &payload {
+            EventPayload::AnnotationVersionCreated {
+                annotation,
+                previous_version: None,
+                ..
+            } => image_state.current_annotation(&annotation.annotation_id) == Some(annotation),
+            EventPayload::AnnotationDeleted {
+                annotation_id,
+                version,
+                ..
+            } => image_state
+                .current_annotation(annotation_id)
+                .is_some_and(|annotation| annotation.version == *version && annotation.deleted),
+            _ => false,
+        };
+        if !already_reflected {
+            let event = labello_domain::EventLogEntry::new(
+                image_state.current_sequence + 1,
+                image_id.clone(),
+                actor.user_id.clone(),
+                DatasetRole::Annotator,
+                timestamp,
+                payload.clone(),
+            );
+            image_state
+                .apply_event(&event)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        }
+        payloads.push(payload);
     }
-    let mutation_count = request.payloads.len();
+    let mutation_count = payloads.len();
     let complete = request.complete;
     let image_state = repo
         .apply_annotation_batch(
@@ -385,7 +425,7 @@ pub(crate) async fn apply_annotation_batch(
                 task_id: &assignment.task_id,
                 kind: AssignmentKind::Annotation,
             },
-            request.payloads,
+            payloads,
             request.complete,
         )
         .await?;
@@ -400,6 +440,329 @@ pub(crate) async fn apply_annotation_batch(
     Ok(Json(image_state))
 }
 
+pub(crate) async fn save_migration_skeleton(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<SaveMigrationSkeletonRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let expected = storage_expectation(&request.target);
+    let result = repo
+        .save_migration_skeleton(
+            &actor.user_id,
+            migration_context(&assignment, &image_id),
+            request.pass_id.as_ref(),
+            &expected,
+            request.skeleton,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn exclude_migration_target(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<ExcludeMigrationTargetRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .exclude_migration_target(
+            &actor.user_id,
+            migration_context(&assignment, &image_id),
+            request.pass_id.as_ref(),
+            &storage_expectation(&request.target),
+            request.reason,
+            request.note,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn reopen_migration_target(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<ReopenMigrationTargetRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .reopen_migration_target(
+            &actor.user_id,
+            migration_context(&assignment, &image_id),
+            request.pass_id.as_ref(),
+            &storage_expectation(&request.target),
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn start_migration_pass(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<StartMigrationPassRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .start_migration_pass(
+            &actor.user_id,
+            AssignmentContext {
+                assignment_id: &assignment.assignment_id,
+                image_id: &image_id,
+                task_id: &request.task_id,
+                kind: AssignmentKind::Annotation,
+            },
+            &request.expected_target_set_hash,
+            &request.expected_state_hash,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn keep_migration_target(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<KeepMigrationTargetRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .keep_migration_target(
+            &actor.user_id,
+            migration_context(&assignment, &image_id),
+            &request.pass_id,
+            &storage_expectation(&request.target),
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn confirm_migration(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<ConfirmMigrationRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .confirm_and_submit_migration(
+            &actor.user_id,
+            AssignmentContext {
+                assignment_id: &assignment.assignment_id,
+                image_id: &image_id,
+                task_id: &request.task_id,
+                kind: AssignmentKind::Annotation,
+            },
+            &request.target_set_hash,
+            &request.state_hash,
+            &request.confirmation_hash,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn review_migration(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewMigrationRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Reviewer,
+    )
+    .await?;
+    let target = match request.target {
+        labello_client::MigrationReviewTarget::Disposition {
+            object_group_id,
+            disposition_version,
+        } => labello_storage::assignment::MigrationReviewTarget::Disposition {
+            object_group_id,
+            disposition_version,
+        },
+        labello_client::MigrationReviewTarget::Confirmation { confirmation_hash } => {
+            labello_storage::assignment::MigrationReviewTarget::Confirmation { confirmation_hash }
+        }
+    };
+    let result = repo
+        .review_migration(
+            &actor.user_id,
+            AssignmentContext {
+                assignment_id: &assignment.assignment_id,
+                image_id: &image_id,
+                task_id: &request.task_id,
+                kind: AssignmentKind::Review,
+            },
+            &target,
+            request.decision,
+            request.comment,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+async fn migration_assignment(
+    repo: &labello_storage::DatasetRepository,
+    image_id: &ImageId,
+    assignment_id: &labello_domain::AssignmentId,
+    actor: &Actor,
+    required_role: DatasetRole,
+) -> ApiResult<Assignment> {
+    image_id.validate_path_segment()?;
+    assignment_id.validate_path_segment()?;
+    let metadata = repo.load_dataset_config().await?;
+    ensure_dataset_role(&metadata, actor, required_role)?;
+    repo.load_image_record(image_id).await?;
+    repo.load_image_state(image_id)
+        .await?
+        .assignments
+        .into_iter()
+        .find(|assignment| assignment.assignment_id == *assignment_id)
+        .ok_or_else(|| ApiError::BadRequest("assignment does not exist".to_string()))
+}
+
+fn migration_context<'a>(
+    assignment: &'a Assignment,
+    image_id: &'a ImageId,
+) -> AssignmentContext<'a> {
+    AssignmentContext {
+        assignment_id: &assignment.assignment_id,
+        image_id,
+        task_id: &assignment.task_id,
+        kind: assignment.kind.clone(),
+    }
+}
+
+fn storage_expectation(
+    expected: &labello_client::MigrationTargetExpectation,
+) -> labello_storage::assignment::MigrationTargetExpectation {
+    labello_storage::assignment::MigrationTargetExpectation {
+        object_group_id: expected.object_group_id.clone(),
+        expected_guide_annotation_version: expected.expected_guide_annotation_version,
+        expected_guide_deleted: expected.expected_guide_deleted,
+        expected_disposition_version: expected.expected_disposition_version,
+        expected_skeleton_version: expected.expected_skeleton_version,
+    }
+}
+
+fn client_migration_result(
+    result: labello_storage::assignment::ManualMigrationCommandResult,
+) -> ManualMigrationCommandResult {
+    ManualMigrationCommandResult {
+        image_state: result.image_state,
+        cursor: Some(result.cursor),
+        progress: labello_client::ManualMigrationProgress {
+            expected: result.progress.expected,
+            annotated: result.progress.annotated,
+            excluded: result.progress.excluded,
+            pending: result.progress.pending,
+        },
+        active_pass: result.active_pass,
+        confirmation: result.confirmation,
+        assignment: result.assignment,
+        annotation_id: result.annotation_id,
+    }
+}
+
+fn migration_idempotency_key(headers: &HeaderMap) -> ApiResult<&str> {
+    let values = headers.get_all("idempotency-key");
+    let mut values = values.iter();
+    let key = values
+        .next()
+        .filter(|_| values.next().is_none())
+        .ok_or_else(|| {
+            ApiError::BadRequest("exactly one idempotency-key header is required".to_string())
+        })?
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("idempotency-key header is invalid".to_string()))?;
+    if key.is_empty()
+        || key.len() > 200
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b',' && byte != b';')
+    {
+        return Err(ApiError::BadRequest(
+            "idempotency-key must be 1-200 visible ASCII characters".to_string(),
+        ));
+    }
+    Ok(key)
+}
+
 pub(crate) async fn append_admin_repair_event(
     State(state): State<ApiState>,
     Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
@@ -411,17 +774,24 @@ pub(crate) async fn append_admin_repair_event(
     let repo = state.repo(&dataset_id)?;
     let metadata = repo.load_dataset().await?;
     ensure_dataset_role(&metadata, &actor, DatasetRole::DataAdmin)?;
-    validate_admin_repair_payload(&metadata, &image_id, &request.payload)?;
+    let mut image_state = repo.load_image_state(&image_id).await?;
+    validate_admin_repair_payload(&metadata, &image_id, &image_state, &request.payload)?;
+    let expected_sequence = image_state.current_sequence;
+    let timestamp = labello_domain::now();
+    let payload = construct_annotation_mutation(&actor, &image_state, timestamp, request.payload)?;
+    image_state
+        .apply_event(&labello_domain::EventLogEntry::new(
+            image_state.current_sequence + 1,
+            image_id.clone(),
+            actor.user_id.clone(),
+            DatasetRole::DataAdmin,
+            timestamp,
+            payload.clone(),
+        ))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     Ok(Json(
-        repo.append_payload(
-            &image_id,
-            &Actor {
-                user_id: actor.user_id,
-                role: DatasetRole::DataAdmin,
-            },
-            request.payload,
-        )
-        .await?,
+        repo.append_admin_repair_payload(&actor.user_id, &image_id, expected_sequence, payload)
+            .await?,
     ))
 }
 
@@ -604,8 +974,11 @@ pub(crate) async fn offline_sync(
     State(state): State<ApiState>,
     Path(dataset_id): Path<DatasetId>,
     headers: HeaderMap,
-    Json(request): Json<OfflineSyncRequest>,
+    Json(value): Json<serde_json::Value>,
 ) -> ApiResult<Json<labello_domain::OfflineSyncResult>> {
+    let request: OfflineSyncRequest =
+        labello_domain::deserialize_current_artifact(&serde_json::to_vec(&value)?)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let actor = actor_from_headers(&state, &headers)?;
     if request.dataset_id != dataset_id {
         return Err(ApiError::BadRequest(
@@ -619,20 +992,6 @@ pub(crate) async fn offline_sync(
     }
     for fragment in &request.fragments {
         fragment.image_id.validate_path_segment()?;
-        for event in &fragment.events {
-            event.image_id.validate_path_segment()?;
-            if event.actor_user_id != actor.user_id {
-                return Err(ApiError::Unauthorized(
-                    "offline events must belong to the authenticated user".to_string(),
-                ));
-            }
-            let required_role = required_role_for_payload(&actor, &event.payload)?;
-            if event.actor_role != required_role {
-                return Err(ApiError::Unauthorized(
-                    "offline event role does not match its payload".to_string(),
-                ));
-            }
-        }
     }
     let repo = state.repo(&dataset_id)?;
     let result = repo.sync_offline_events(request).await?;

@@ -49,6 +49,7 @@ impl LabelloApp {
         self.review_index = 0;
         self.review_rejected = false;
         self.correction_draft = None;
+        self.migration = Default::default();
         self.canvas.fit_view();
         self.active_load_id = None;
         self.active_prefetch_id = None;

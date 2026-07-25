@@ -1,12 +1,20 @@
 use std::collections::BTreeSet;
 
 use eframe::egui;
-use labello_client::{DatasetSummary, DatasetUser};
+use labello_client::{
+    DatasetSummary, DatasetUser, ImportCapabilities, ImportFailure, ImportJob, ImportLifecycle,
+    ImportPlan, ImportPreflightReport, ImportProfile, ImportProfileCapability, ImportProgress,
+    ImportProgressPhase, ImportSourceCounts, ImportTransport, ImportTransportCapability,
+};
 use labello_domain::{
-    AnnotationGeometry, AnnotationId, AnnotationSource, AnnotationType, AnnotationVersion,
+    AnnotationGeometry, AnnotationId, AnnotationOrigin, AnnotationType, AnnotationVersion,
     Assignment, AssignmentId, AssignmentKind, AssignmentStatus, BoundingBox, ClassId, ClassStats,
-    CorrectionId, DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetStats, ImageState,
-    TaskId, TaskStats, ThroughputPoint, UserAccount, UserId,
+    CorrectionId, DatasetMetadata, DatasetRole, DatasetRoleAssignment, DatasetStats,
+    HumanRevisionKind, ImageState, KeypointSpec, ManualBoxGuideMigration, MigrationCardinality,
+    MigrationDisposition, MigrationDispositionStatus, MigrationHashContext, MigrationPass,
+    MigrationPassId, MigrationSequence, MigrationTarget, MigrationTargetSetInitialization,
+    ObjectGroupId, RevisionSource, SkeletonSpec, TaskId, TaskStats, ThroughputPoint, UserAccount,
+    UserId, migration_target_set_hash,
 };
 
 use crate::app::{AppView, CorrectionDraft, LabelloApp, PendingTransition};
@@ -28,10 +36,26 @@ pub enum InspectorPreset {
     StatisticsFailure,
     AssignmentFailure,
     ImageFailure,
+    ImportSource,
+    ImportPreflight,
+    ImportReady,
+    ImportRunning,
+    ImportFailure,
+    ImportSuccess,
+    ImportMultipleDescriptors,
+    ImportPartialCategories,
+    ImportRecoveryBlocked,
+    MigrationObject,
+    MigrationExclusion,
+    MigrationPass,
+    MigrationFullImage,
+    MigrationReview,
+    MigrationAnnotatedEdit,
+    MigrationGuideDeleted,
 }
 
 impl InspectorPreset {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 31] = [
         Self::Annotation,
         Self::Setup,
         Self::Review,
@@ -47,6 +71,22 @@ impl InspectorPreset {
         Self::StatisticsFailure,
         Self::AssignmentFailure,
         Self::ImageFailure,
+        Self::ImportSource,
+        Self::ImportPreflight,
+        Self::ImportReady,
+        Self::ImportRunning,
+        Self::ImportFailure,
+        Self::ImportSuccess,
+        Self::ImportMultipleDescriptors,
+        Self::ImportPartialCategories,
+        Self::ImportRecoveryBlocked,
+        Self::MigrationObject,
+        Self::MigrationExclusion,
+        Self::MigrationPass,
+        Self::MigrationFullImage,
+        Self::MigrationReview,
+        Self::MigrationAnnotatedEdit,
+        Self::MigrationGuideDeleted,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -66,6 +106,22 @@ impl InspectorPreset {
             Self::StatisticsFailure => "statistics-failure",
             Self::AssignmentFailure => "assignment-failure",
             Self::ImageFailure => "image-failure",
+            Self::ImportSource => "import-source",
+            Self::ImportPreflight => "import-preflight",
+            Self::ImportReady => "import-ready",
+            Self::ImportRunning => "import-running",
+            Self::ImportFailure => "import-failure",
+            Self::ImportSuccess => "import-success",
+            Self::ImportMultipleDescriptors => "import-multiple-descriptors",
+            Self::ImportPartialCategories => "import-partial-categories",
+            Self::ImportRecoveryBlocked => "import-recovery-blocked",
+            Self::MigrationObject => "migration-object",
+            Self::MigrationExclusion => "migration-exclusion",
+            Self::MigrationPass => "migration-pass",
+            Self::MigrationFullImage => "migration-full-image",
+            Self::MigrationReview => "migration-review",
+            Self::MigrationAnnotatedEdit => "migration-annotated-edit",
+            Self::MigrationGuideDeleted => "migration-guide-deleted",
         }
     }
 
@@ -152,6 +208,532 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
             app.runtime.error = Some("The assignment preview could not be decoded".to_string());
             app
         }
+        InspectorPreset::ImportSource => import_preset(crate::import_flow::ImportScreen::Source),
+        InspectorPreset::ImportPreflight => {
+            import_preset(crate::import_flow::ImportScreen::Preflight)
+        }
+        InspectorPreset::ImportReady => import_preset(crate::import_flow::ImportScreen::Ready),
+        InspectorPreset::ImportRunning => import_preset(crate::import_flow::ImportScreen::Running),
+        InspectorPreset::ImportFailure => import_preset(crate::import_flow::ImportScreen::Failure),
+        InspectorPreset::ImportSuccess => import_preset(crate::import_flow::ImportScreen::Success),
+        InspectorPreset::ImportMultipleDescriptors => import_multiple_descriptors_preset(),
+        InspectorPreset::ImportPartialCategories => import_partial_categories_preset(),
+        InspectorPreset::ImportRecoveryBlocked => import_recovery_blocked_preset(),
+        InspectorPreset::MigrationObject => migration_preset(ctx, MigrationPreset::Object),
+        InspectorPreset::MigrationExclusion => migration_preset(ctx, MigrationPreset::Exclusion),
+        InspectorPreset::MigrationPass => migration_preset(ctx, MigrationPreset::Pass),
+        InspectorPreset::MigrationFullImage => migration_preset(ctx, MigrationPreset::FullImage),
+        InspectorPreset::MigrationReview => migration_preset(ctx, MigrationPreset::Review),
+        InspectorPreset::MigrationAnnotatedEdit => migration_preset(ctx, MigrationPreset::Pass),
+        InspectorPreset::MigrationGuideDeleted => migration_deleted_guide_preset(ctx),
+    }
+}
+
+fn import_multiple_descriptors_preset() -> LabelloApp {
+    let mut app = import_preset(crate::import_flow::ImportScreen::Configure);
+    app.import_flow.profile = ImportProfile::CocoKeypointsGtV1;
+    app.import_flow.registered_paths = vec![
+        crate::import_flow::RegisteredImportPath {
+            client_file_id: "browser-instances".to_string(),
+            file_id: "file-instances".to_string(),
+            relative_path: "release/annotations/instances_train.json".to_string(),
+        },
+        crate::import_flow::RegisteredImportPath {
+            client_file_id: "browser-keypoints".to_string(),
+            file_id: "file-keypoints".to_string(),
+            relative_path: "release/annotations/person_keypoints_train.json".to_string(),
+        },
+        crate::import_flow::RegisteredImportPath {
+            client_file_id: "browser-image".to_string(),
+            file_id: "file-image-root".to_string(),
+            relative_path: "release/train/frame-001.jpg".to_string(),
+        },
+    ];
+    app.import_flow.descriptors = vec![
+        crate::import_flow::ImportDescriptorDraft {
+            descriptor_file_id: "file-instances".to_string(),
+            kind: labello_client::ImportDescriptorKind::CocoInstances,
+            image_root_file_id: "file-image-root".to_string(),
+            pairing_group: "people-train".to_string(),
+            ..Default::default()
+        },
+        crate::import_flow::ImportDescriptorDraft {
+            descriptor_file_id: "file-keypoints".to_string(),
+            kind: labello_client::ImportDescriptorKind::CocoKeypoints,
+            image_root_file_id: "file-image-root".to_string(),
+            pairing_group: "people-train".to_string(),
+            ..Default::default()
+        },
+    ];
+    app
+}
+
+fn import_recovery_blocked_preset() -> LabelloApp {
+    let mut app = import_preset(crate::import_flow::ImportScreen::Preflight);
+    app.import_flow.recovery_contract_gap = true;
+    app.import_flow.recovery_import_id = "imp_inspector".to_string();
+    app.import_flow.categories.clear();
+    app.import_flow.plan = None;
+    app
+}
+
+fn import_partial_categories_preset() -> LabelloApp {
+    let mut app = import_preset(crate::import_flow::ImportScreen::Preflight);
+    app.import_flow
+        .job
+        .as_mut()
+        .unwrap()
+        .preflight_report
+        .as_mut()
+        .unwrap()
+        .source
+        .categories = 3;
+    app.import_flow.pending_plan_request = Some(labello_client::UpdateImportPlanRequest {
+        category_mappings: Vec::new(),
+        geometry_mappings: Vec::new(),
+        task_mappings: Vec::new(),
+        skeleton_mappings: Vec::new(),
+        compatibility: Default::default(),
+        acknowledgements: Vec::new(),
+    });
+    app
+}
+
+fn migration_deleted_guide_preset(ctx: &egui::Context) -> LabelloApp {
+    let mut app = migration_preset(ctx, MigrationPreset::Object);
+    let state = app.current_state.as_mut().unwrap();
+    state
+        .annotations
+        .get_mut(&AnnotationId::from("guide-left"))
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .deleted = true;
+    app.annotations = state.active_annotations().cloned().collect();
+    app
+}
+
+fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
+    let mut app = setup_preset();
+    app.import_flow.capabilities = Some(import_capabilities());
+    app.import_flow.open = true;
+    app.import_flow.screen = screen;
+    app.import_flow.destination_id = "wildlife-2026".to_string();
+    app.import_flow.destination_name = "Wildlife 2026".to_string();
+    app.import_flow.ground_truth = true;
+    app.import_flow.exhaustive = true;
+    app.import_flow.coverage_scope = "person".to_string();
+    app.import_flow.provenance = "Curated benchmark release".to_string();
+    app.import_flow.descriptors[0].descriptor_file_id = "file-annotations".to_string();
+    app.import_flow.descriptors[0].image_root_file_id = "file-image-root".to_string();
+    if screen != crate::import_flow::ImportScreen::Source {
+        app.import_flow.job = Some(import_job(screen));
+    }
+    if matches!(
+        screen,
+        crate::import_flow::ImportScreen::Preflight
+            | crate::import_flow::ImportScreen::Ready
+            | crate::import_flow::ImportScreen::Running
+            | crate::import_flow::ImportScreen::Failure
+            | crate::import_flow::ImportScreen::Success
+    ) {
+        app.import_flow.categories = vec![crate::import_flow::ImportCategoryDraft {
+            selected: true,
+            source_category_key: "wildlife:v1:17".to_string(),
+            source_category_id: "17".to_string(),
+            source_name: "Person".to_string(),
+            class_id: "person".to_string(),
+            class_name: "Person".to_string(),
+            class_color: "#5eead4".to_string(),
+            bounding_box_task_id: "bounding_box:person".to_string(),
+            bounding_box_task_name: "Person bounding boxes".to_string(),
+            skeleton_task_id: "skeleton:person".to_string(),
+            skeleton_task_name: "Person skeletons".to_string(),
+            source_skeleton: None,
+            direct_geometry: vec![labello_client::ImportGeometryKind::BoundingBox],
+            geometry_mappings: Vec::new(),
+            task_mappings: Vec::new(),
+            skeleton_mappings: Vec::new(),
+            workflow_intent: labello_client::ImportWorkflowIntent::AuthoritativeGroundTruth,
+            target_keypoint_names: String::new(),
+        }];
+    }
+    if matches!(
+        screen,
+        crate::import_flow::ImportScreen::Ready | crate::import_flow::ImportScreen::Success
+    ) {
+        app.import_flow.plan = Some(ImportPlan {
+            import_id: labello_domain::ImportId::from("imp_inspector"),
+            source_fingerprint: "source-inspector".to_string(),
+            plan_hash: "plan-inspector".to_string(),
+            commit_ready: true,
+            blocking_diagnostic_codes: Vec::new(),
+            required_acknowledgement_codes: Vec::new(),
+            report: import_report(),
+            source_categories: Vec::new(),
+            accepted_request: app.import_flow.pending_plan_request.clone(),
+        });
+    }
+    app
+}
+
+fn import_capabilities() -> ImportCapabilities {
+    ImportCapabilities {
+        available: true,
+        profiles: vec![
+            ImportProfileCapability {
+                profile: ImportProfile::CocoInstancesGtV1,
+                enabled: true,
+                display_name: "COCO instances".to_string(),
+                profile_version: 1,
+            },
+            ImportProfileCapability {
+                profile: ImportProfile::CocoKeypointsGtV1,
+                enabled: true,
+                display_name: "COCO keypoints".to_string(),
+                profile_version: 1,
+            },
+        ],
+        transports: vec![
+            ImportTransportCapability {
+                transport: ImportTransport::BrowserFolder,
+                enabled: true,
+                resumable: true,
+            },
+            ImportTransportCapability {
+                transport: ImportTransport::ServerDirectory,
+                enabled: true,
+                resumable: true,
+            },
+        ],
+        server_roots: vec![labello_client::ServerImportRoot {
+            root_id: "staging".to_string(),
+            display_name: "Staging datasets".to_string(),
+        }],
+        schema_version: labello_domain::SCHEMA_VERSION,
+        parser_version: "import-parser-v1".to_string(),
+        tool_version: "inspector".to_string(),
+        manual_box_guide_migration: true,
+        ..Default::default()
+    }
+}
+
+fn import_job(screen: crate::import_flow::ImportScreen) -> ImportJob {
+    let lifecycle = match screen {
+        crate::import_flow::ImportScreen::Preflight | crate::import_flow::ImportScreen::Ready => {
+            ImportLifecycle::AwaitingDecision
+        }
+        crate::import_flow::ImportScreen::Running => ImportLifecycle::Building,
+        crate::import_flow::ImportScreen::Failure => ImportLifecycle::Failed,
+        crate::import_flow::ImportScreen::Success => ImportLifecycle::Succeeded,
+        _ => ImportLifecycle::Uploading,
+    };
+    ImportJob {
+        import_id: labello_domain::ImportId::from("imp_inspector"),
+        owner_user_id: UserId::from("demo_user"),
+        destination_dataset_id: labello_domain::DatasetId::from("wildlife-2026"),
+        destination_name: "Wildlife 2026".to_string(),
+        profile: ImportProfile::CocoInstancesGtV1,
+        transport: ImportTransport::BrowserFolder,
+        lifecycle,
+        progress: ImportProgress {
+            phase: if lifecycle == ImportLifecycle::Building {
+                ImportProgressPhase::Build
+            } else {
+                ImportProgressPhase::Preflight
+            },
+            registered_files: 126,
+            uploaded_files: 126,
+            total_files: 126,
+            accepted_bytes: 48_000_000,
+            total_bytes: 48_000_000,
+            processed_images: 64,
+            total_images: 120,
+            processed_objects: 418,
+            total_objects: 900,
+        },
+        failure: (screen == crate::import_flow::ImportScreen::Failure).then(|| ImportFailure {
+            code: "source_descriptor_invalid".to_string(),
+            phase: ImportProgressPhase::Preflight,
+            safe_summary: "The selected descriptor did not match the chosen profile.".to_string(),
+            retryable: true,
+        }),
+        source_fingerprint: Some("source-inspector".to_string()),
+        plan_hash: (screen != crate::import_flow::ImportScreen::Preflight)
+            .then(|| "plan-inspector".to_string()),
+        preflight_report: Some(import_report()),
+        can_cancel: !matches!(screen, crate::import_flow::ImportScreen::Success),
+        created_at: timestamp(),
+        updated_at: timestamp(),
+        expires_at: None,
+        recovery: None,
+    }
+}
+
+fn import_report() -> ImportPreflightReport {
+    ImportPreflightReport {
+        source_fingerprint: "source-inspector".to_string(),
+        source: ImportSourceCounts {
+            files: 126,
+            bytes: 48_000_000,
+            descriptors: 1,
+            splits: 2,
+            images: 120,
+            categories: 1,
+            objects: 900,
+            keypoints: 0,
+        },
+        geometry: labello_client::ImportGeometryCounts {
+            direct: 894,
+            clipped: 6,
+            skipped: 0,
+            ..Default::default()
+        },
+        output: labello_client::ImportOutputEstimate {
+            classes: 1,
+            tasks: 1,
+            annotations: 900,
+            events: 120,
+            ..Default::default()
+        },
+        diagnostics: vec![labello_client::ImportDiagnosticSummary {
+            code: "geometry_clipped".to_string(),
+            severity: labello_client::ImportDiagnosticSeverity::WarningRequiresAck,
+            source_profile: ImportProfile::CocoInstancesGtV1,
+            count: 6,
+            safe_summary: "Some boxes extend beyond image bounds and will be clipped.".to_string(),
+            impact: labello_client::ImportDiagnosticImpact {
+                requires_acknowledgement: true,
+                ..Default::default()
+            },
+            examples: Vec::new(),
+        }],
+        required_acknowledgements: 1,
+        ..Default::default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MigrationPreset {
+    Object,
+    Exclusion,
+    Pass,
+    FullImage,
+    Review,
+}
+
+fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp {
+    let mut app = work_preset(
+        if matches!(preset, MigrationPreset::Review) {
+            AssignmentKind::Review
+        } else {
+            AssignmentKind::Annotation
+        },
+        ctx,
+    );
+    let guide_task_id = TaskId::from("bounding_box:person");
+    let target_task_id = TaskId::from("skeleton:person");
+    app.tasks.push(labello_domain::TaskDefinition {
+        task_id: target_task_id.clone(),
+        name: "Person skeleton migration".to_string(),
+        annotation_type: AnnotationType::Skeleton,
+        class_ids: vec![ClassId::from("person")],
+        instructions: labello_domain::TutorialContent {
+            title: "Place a skeleton for each imported box".to_string(),
+            example_text: "Use the canonical box as a guide.".to_string(),
+            example_images: Vec::new(),
+        },
+        skeleton: Some(SkeletonSpec {
+            keypoints: ["head", "left_hand", "right_hand", "left_foot", "right_foot"]
+                .into_iter()
+                .map(|name| KeypointSpec {
+                    name: name.to_string(),
+                    required: name == "head",
+                })
+                .collect(),
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: true,
+        }),
+        review: Default::default(),
+        prelabel_config_ids: Vec::new(),
+        manual_box_guide_migration: Some(ManualBoxGuideMigration {
+            guide_task_id: guide_task_id.clone(),
+            cardinality: MigrationCardinality::ExactlyOne,
+            allow_exclusion: true,
+            sequence: MigrationSequence::ImportedSpatialOrderV1,
+        }),
+        enabled: true,
+    });
+    app.selected_task_id = Some(target_task_id.clone());
+    app.tool = crate::app::Tool::Keypoints;
+    app.assignment.as_mut().unwrap().task_id = target_task_id.clone();
+    let image_id = app.current.as_ref().unwrap().image.image_id.clone();
+    let targets = vec![
+        MigrationTarget {
+            object_group_id: ObjectGroupId::from("group-left"),
+            guide_annotation_id: AnnotationId::from("guide-left"),
+            reserved_skeleton_annotation_id: AnnotationId::from("skeleton-left"),
+            sequence_index: 0,
+        },
+        MigrationTarget {
+            object_group_id: ObjectGroupId::from("group-right"),
+            guide_annotation_id: AnnotationId::from("guide-right"),
+            reserved_skeleton_annotation_id: AnnotationId::from("skeleton-right"),
+            sequence_index: 1,
+        },
+    ];
+    let target_hash = migration_target_set_hash(
+        &MigrationHashContext {
+            dataset_id: &app.config.dataset_id,
+            image_id: &image_id,
+            guide_task_id: &guide_task_id,
+            target_task_id: &target_task_id,
+        },
+        &targets,
+    )
+    .unwrap();
+    let mut state = ImageState::new(image_id.clone());
+    for (index, target) in targets.iter().enumerate() {
+        let guide = guide_annotation(target, index);
+        state
+            .annotations
+            .insert(guide.annotation_id.clone(), vec![guide]);
+    }
+    state.migration_target_sets.insert(
+        target_task_id.clone(),
+        MigrationTargetSetInitialization {
+            dataset_id: app.config.dataset_id.clone(),
+            guide_task_id,
+            target_task_id: target_task_id.clone(),
+            target_set_hash: target_hash.clone(),
+            targets: targets.clone(),
+        },
+    );
+    let resolved = matches!(
+        preset,
+        MigrationPreset::Pass | MigrationPreset::FullImage | MigrationPreset::Review
+    );
+    state.migration_dispositions.insert(
+        target_task_id.clone(),
+        targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let status = if resolved && index == 0 {
+                    let skeleton = skeleton_annotation(target, &target_task_id);
+                    state
+                        .annotations
+                        .insert(skeleton.annotation_id.clone(), vec![skeleton]);
+                    MigrationDispositionStatus::Annotated {
+                        skeleton_annotation_id: target.reserved_skeleton_annotation_id.clone(),
+                        skeleton_version: 1,
+                    }
+                } else if resolved {
+                    MigrationDispositionStatus::Excluded {
+                        exclusion: labello_domain::MigrationExclusion {
+                            reason: labello_domain::MigrationExclusionReason::ObjectNotPresent,
+                            event_id: labello_domain::EventId::from("evt-exclusion"),
+                            actor_user_id: app.config.user_id.clone(),
+                            timestamp: timestamp(),
+                            note: Some("The source box covers a reflection.".to_string()),
+                        },
+                    }
+                } else {
+                    MigrationDispositionStatus::Pending
+                };
+                (
+                    target.object_group_id.clone(),
+                    MigrationDisposition {
+                        disposition_version: 1,
+                        status,
+                    },
+                )
+            })
+            .collect(),
+    );
+    if matches!(preset, MigrationPreset::Pass) {
+        let state_hash = state.current_migration_state_hash(&target_task_id).unwrap();
+        let pass_id = MigrationPassId::from("pass-inspector");
+        state.migration_passes.insert(
+            pass_id.clone(),
+            MigrationPass {
+                pass_id: pass_id.clone(),
+                assignment_id: app.assignment.as_ref().unwrap().assignment_id.clone(),
+                task_id: target_task_id.clone(),
+                expected_target_set_hash: target_hash,
+                starting_state_hash: state_hash,
+                actor_user_id: app.config.user_id.clone(),
+                started_at: timestamp(),
+                items: Vec::new(),
+            },
+        );
+        app.migration.active_pass_id = Some(pass_id);
+    }
+    app.current_state = Some(state.clone());
+    app.annotations = state.active_annotations().cloned().collect();
+    app.migration.cursor = state
+        .migration_cursor(&target_task_id, app.migration.active_pass_id.as_ref())
+        .ok();
+    if matches!(preset, MigrationPreset::Exclusion) {
+        app.migration.exclusion_reason =
+            labello_domain::MigrationExclusionReason::InsufficientVisibleFeatures;
+        app.migration.exclusion_note = "Only a small occluded region is visible.".to_string();
+    }
+    if matches!(preset, MigrationPreset::Review) {
+        app.migration.review_index = 1;
+    }
+    app
+}
+
+fn guide_annotation(target: &MigrationTarget, index: usize) -> AnnotationVersion {
+    AnnotationVersion {
+        annotation_id: target.guide_annotation_id.clone(),
+        version: 1,
+        object_group_id: Some(target.object_group_id.clone()),
+        origin: AnnotationOrigin::native(),
+        task_id: TaskId::from("bounding_box:person"),
+        class_id: ClassId::from("person"),
+        annotation_type: AnnotationType::BoundingBox,
+        revision_source: RevisionSource::Human {
+            action: HumanRevisionKind::Authored,
+        },
+        geometry: AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.12 + index as f32 * 0.48,
+            y: 0.18,
+            width: 0.26,
+            height: 0.62,
+        }),
+        author_user_id: UserId::from("import"),
+        created_at: timestamp(),
+        updated_at: timestamp(),
+        deleted: false,
+    }
+}
+
+fn skeleton_annotation(target: &MigrationTarget, task_id: &TaskId) -> AnnotationVersion {
+    AnnotationVersion {
+        annotation_id: target.reserved_skeleton_annotation_id.clone(),
+        version: 1,
+        object_group_id: Some(target.object_group_id.clone()),
+        origin: AnnotationOrigin::native(),
+        task_id: task_id.clone(),
+        class_id: ClassId::from("person"),
+        annotation_type: AnnotationType::Skeleton,
+        revision_source: RevisionSource::Human {
+            action: HumanRevisionKind::Authored,
+        },
+        geometry: AnnotationGeometry::Skeleton(labello_domain::SkeletonGeometry {
+            keypoints: vec![labello_domain::KeypointAnnotation {
+                name: "head".to_string(),
+                state: labello_domain::KeypointState::Visible,
+                point: Some(labello_domain::NormalizedPoint { x: 0.25, y: 0.25 }),
+            }],
+        }),
+        author_user_id: UserId::from("demo_user"),
+        created_at: timestamp(),
+        updated_at: timestamp(),
+        deleted: false,
     }
 }
 
@@ -229,6 +811,8 @@ fn statistics_preset() -> LabelloApp {
                 rejected: 2,
                 reviewer_corrected: 3,
                 finalized: 14,
+                provenance: Default::default(),
+                migration: Default::default(),
             },
         )]
         .into(),
@@ -237,6 +821,7 @@ fn statistics_preset() -> LabelloApp {
             ClassStats {
                 annotations: 31,
                 completed_tasks: 18,
+                provenance: Default::default(),
             },
         )]
         .into(),
@@ -257,6 +842,9 @@ fn statistics_preset() -> LabelloApp {
                 reviews: 10,
             },
         ],
+        provenance: Default::default(),
+        migration: Default::default(),
+        import_coverage: Default::default(),
     };
     app.datasets.last_stats_completion =
         Some(web_time::Instant::now() + web_time::Duration::from_secs(100 * 365 * 24 * 60 * 60));
@@ -318,10 +906,14 @@ fn sample_annotation() -> AnnotationVersion {
     AnnotationVersion {
         annotation_id: AnnotationId::from("ann_inspector"),
         version: 1,
+        object_group_id: None,
+        origin: AnnotationOrigin::native(),
         task_id: TaskId::from("bounding_box:person"),
         class_id: ClassId::from("person"),
         annotation_type: AnnotationType::BoundingBox,
-        source: AnnotationSource::Human,
+        revision_source: RevisionSource::Human {
+            action: HumanRevisionKind::Authored,
+        },
         geometry: AnnotationGeometry::BoundingBox(BoundingBox {
             x: 0.28,
             y: 0.2,

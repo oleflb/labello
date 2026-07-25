@@ -7,6 +7,7 @@ use labello_client::{OAuthCallbackRequest, OAuthLoginRequest};
 
 use crate::{
     ApiState,
+    auth::session_token,
     error::{ApiError, ApiResult},
     oauth,
 };
@@ -58,7 +59,10 @@ pub(crate) async fn github_callback(
         )
         .await?,
     )?;
-    let token = state.create_session(account.user_id.clone())?;
+    if let Some(token) = session_token(&headers) {
+        state.server_store.delete_session(&token)?;
+    }
+    let session = state.create_session(account.user_id.clone())?;
     tracing::info!(
         event = "auth.oauth.completed",
         user_id = %account.user_id,
@@ -68,7 +72,7 @@ pub(crate) async fn github_callback(
     response.headers_mut().append(
         SET_COOKIE,
         HeaderValue::from_str(&crate::session::session_cookie(
-            &token,
+            &session.cookie,
             state.session_cookie_secure(),
         ))
         .map_err(|error| ApiError::Internal(error.to_string()))?,

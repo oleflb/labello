@@ -13,6 +13,50 @@ sessionCookieSecure = false
 [developmentAuth]
 localAdminLogin = true
 
+# Dataset import is disabled when this optional section is absent.
+# [import]
+# enabled = true
+# retainRawSource = false
+# failedRetentionHours = 24
+# successfulMetadataRetentionDays = 30
+
+# Every field in this optional section may be overridden independently.
+# [import.limits]
+# concurrentBuildJobs = 1
+# concurrentBrowserUploadJobs = 2
+# activeReservationsPerOwner = 2
+# browserSourceFiles = 25_000
+# browserSourceBytes = 21_474_836_480
+# serverSourceFiles = 50_000
+# totalSourceBytes = 107_374_182_400
+# selectedImages = 10_000
+# singleSourceFileBytes = 4_294_967_296
+# descriptorBytes = 16_777_216
+# uploadChunkBytes = 8_388_608
+# sourcePathBytes = 1_024
+# sourcePathDepth = 32
+# sourceComponentBytes = 255
+# selectedCategories = 100
+# selectedTasks = 200
+# coverageEntries = 2_000_000
+# annotationsTotal = 1_000_000
+# annotationsPerImage = 10_000
+# generatedFileBytesPerImage = 67_108_864
+# keypointsPerSkeleton = 512
+# yoloLineBytes = 1_048_576
+# yoloColumns = 4_096
+# structuredDataNesting = 64
+# decodedImagePixels = 50_000_000
+# decodedImageBytes = 536_870_912
+# stagedBytes = 268_435_456_000
+# diagnosticExamplesPerCode = 100
+
+# [[import.serverRoots]]
+# id = "curated-releases"
+# path = "/srv/labello-imports"
+# Empty allows every bootstrap administrator; otherwise only listed IDs see and may use the root.
+# allowedOwners = ["admin"]
+
 # GitHub OAuth is disabled by default. Uncomment the complete section to enable it.
 # [githubOauth]
 # clientId = "your-github-client-id"

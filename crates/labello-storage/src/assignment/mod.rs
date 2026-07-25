@@ -1,14 +1,18 @@
 use labello_domain::{
-    Actor, AnnotationGeometry, AnnotationId, AnnotationSource, Assignment, AssignmentId,
-    AssignmentKind, AssignmentStatus, CorrectionId, DatasetRole, EventLogEntry, EventPayload,
-    ImageId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow,
-    ReviewerCorrectionRecord, TaskId, TaskOutcome, TaskState, TaskStatus, UserId, require_role,
+    Actor, AnnotationGeometry, AnnotationId, Assignment, AssignmentId, AssignmentKind,
+    AssignmentStatus, CorrectionId, DatasetRole, EventLogEntry, EventPayload, ImageId,
+    ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow, ReviewerCorrectionRecord,
+    RevisionSource, TaskId, TaskOutcome, TaskState, TaskStatus, UserId, require_role,
 };
 
 use crate::{DatasetRepository, StorageError, StorageResult};
 
 mod claim;
+mod migration;
 mod review;
+
+pub(crate) use migration::append_guide_invalidation_payloads;
+pub use migration::*;
 
 /// Assignments are renewed by claim retries and successful assignment-backed
 /// writes, so a separate heartbeat endpoint is not required.
@@ -111,7 +115,10 @@ impl DatasetRepository {
             DatasetRole::Annotator,
         )?;
         ensure_assignment_target_exists(&metadata, image_id, task_id)?;
-        if !metadata.task(task_id).is_some_and(|task| task.enabled) {
+        let task = metadata.task(task_id).ok_or_else(|| {
+            StorageError::InvalidAssignment(format!("task {task_id} does not exist"))
+        })?;
+        if !task.enabled {
             return Err(StorageError::InvalidAssignment(format!(
                 "task {task_id} is disabled"
             )));
@@ -151,7 +158,15 @@ impl DatasetRepository {
             .skip(target_index + 1)
             .filter(|assignment| assignment.task_id == *task_id)
             .collect::<Vec<_>>();
-        if let [successor] = later_assignments.as_slice()
+        let blocking_later_assignments = later_assignments
+            .iter()
+            .copied()
+            .filter(|assignment| {
+                task.manual_box_guide_migration.is_none()
+                    || assignment.kind == AssignmentKind::Annotation
+            })
+            .collect::<Vec<_>>();
+        if let [successor] = blocking_later_assignments.as_slice()
             && successor.kind == AssignmentKind::Annotation
             && successor.assigned_to == *user_id
             && successor.status == AssignmentStatus::Active
@@ -178,7 +193,7 @@ impl DatasetRepository {
             .await?;
             return Ok(successor);
         }
-        if !later_assignments.is_empty() {
+        if !blocking_later_assignments.is_empty() {
             return Err(StorageError::AssignmentConflict(format!(
                 "assignment {assignment_id} is no longer the latest attempt for task {task_id}"
             )));
@@ -208,14 +223,17 @@ impl DatasetRepository {
                         "completed assignment {assignment_id} cannot be reopened from task status {current_status:?}"
                     )));
                 }
-                let events = self.load_events(image_id).await?;
-                annotation_status_before_completion(&events, assignment_id, task_id).ok_or_else(
-                    || {
-                        StorageError::AssignmentConflict(format!(
-                            "assignment {assignment_id} has no replayable annotation state"
-                        ))
-                    },
-                )?
+                if task.manual_box_guide_migration.is_some() {
+                    TaskStatus::NeedsCorrection
+                } else {
+                    let events = self.load_events(image_id).await?;
+                    annotation_status_before_completion(&events, assignment_id, task_id)
+                        .ok_or_else(|| {
+                            StorageError::AssignmentConflict(format!(
+                                "assignment {assignment_id} has no replayable annotation state"
+                            ))
+                        })?
+                }
             }
             AssignmentStatus::Active => {
                 return Err(StorageError::AssignmentConflict(format!(
@@ -236,28 +254,42 @@ impl DatasetRepository {
             updated_at: now,
         };
         let assigned_to = (reopened_status == TaskStatus::InProgress).then(|| user_id.clone());
+        let mut payloads = vec![
+            EventPayload::AssignmentUpdated {
+                assignment: assignment.clone(),
+            },
+            EventPayload::TaskStateChanged {
+                task_state: TaskState {
+                    task_id: task_id.clone(),
+                    status: reopened_status,
+                    outcome: None,
+                    assigned_to,
+                    completed_by: None,
+                    completed_at: None,
+                    updated_at: now,
+                },
+            },
+        ];
+        if task.manual_box_guide_migration.is_some() {
+            for review_assignment in later_assignments.into_iter().filter(|assignment| {
+                assignment.kind == AssignmentKind::Review
+                    && assignment.status == AssignmentStatus::Active
+            }) {
+                let mut review_assignment = review_assignment.clone();
+                review_assignment.status = AssignmentStatus::Cancelled;
+                review_assignment.updated_at = now;
+                payloads.push(EventPayload::AssignmentUpdated {
+                    assignment: review_assignment,
+                });
+            }
+        }
         self.append_payloads_unlocked(
             image_id,
             &Actor {
                 user_id: user_id.clone(),
                 role: DatasetRole::Annotator,
             },
-            vec![
-                EventPayload::AssignmentUpdated {
-                    assignment: assignment.clone(),
-                },
-                EventPayload::TaskStateChanged {
-                    task_state: TaskState {
-                        task_id: task_id.clone(),
-                        status: reopened_status,
-                        outcome: None,
-                        assigned_to,
-                        completed_by: None,
-                        completed_at: None,
-                        updated_at: now,
-                    },
-                },
-            ],
+            payloads,
         )
         .await?;
         Ok(assignment)
@@ -355,6 +387,11 @@ impl DatasetRepository {
         let task = metadata.task(task_id).ok_or_else(|| {
             StorageError::InvalidAssignment(format!("task {task_id} does not exist"))
         })?;
+        if task.manual_box_guide_migration.is_some() {
+            return Err(StorageError::InvalidAssignment(
+                "manual migration annotations require the migration command workflow".to_string(),
+            ));
+        }
         let image = metadata.images.get(image_id).ok_or_else(|| {
             StorageError::InvalidAssignment(format!("image {image_id} does not exist"))
         })?;
@@ -375,9 +412,8 @@ impl DatasetRepository {
             user_id: user_id.clone(),
             role: DatasetRole::Annotator,
         };
-        let payloads =
+        let mut payloads =
             validate_annotation_batch(&state, task, image.dimensions(), &actor, payloads)?;
-
         if let Some(existing) = state
             .assignments
             .iter()
@@ -430,7 +466,6 @@ impl DatasetRepository {
             return Ok(state);
         }
 
-        let mut payloads = payloads;
         if complete {
             payloads.push(EventPayload::TaskStateChanged {
                 task_state: TaskState {
@@ -477,6 +512,14 @@ impl DatasetRepository {
             role.clone(),
         )?;
         ensure_assignment_target_exists(&metadata, image_id, task_id)?;
+        if metadata
+            .task(task_id)
+            .is_some_and(|task| task.manual_box_guide_migration.is_some())
+        {
+            return Err(StorageError::InvalidAssignment(
+                "manual migration writes require the migration command workflow".to_string(),
+            ));
+        }
 
         let lock = self.image_lock(image_id);
         let _guard = lock.lock().await;
@@ -730,8 +773,9 @@ mod tests {
 
     use labello_domain::{
         AdjudicationDecision, AdjudicationId, AdjudicationRecord, AnnotationGeometry,
-        AnnotationType, AnnotationVersion, BoundingBox, ClassId, DatasetId, DatasetMetadata,
-        DatasetRoleAssignment, ImageRecord, ImagesIndex, KeypointAnnotation, KeypointSpec,
+        AnnotationOrigin, AnnotationType, AnnotationVersion, BoundingBox, ClassId, DatasetId,
+        DatasetMetadata, DatasetRoleAssignment, HumanRevisionKind, ImageRecord, ImagesIndex,
+        ImportCoverage, ImportId, ImportTaskInitialization, KeypointAnnotation, KeypointSpec,
         KeypointState, LabelClass, NormalizedPoint, ReviewConfig, ReviewDecision, ReviewId,
         ReviewRecord, ReviewTarget, ReviewWorkflow, SCHEMA_VERSION, SkeletonGeometry, SkeletonSpec,
         TaskDefinition, TutorialContent, now,
@@ -826,6 +870,7 @@ mod tests {
             skeleton: None,
             review: ReviewConfig::default(),
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         });
         metadata.role_assignments.push(DatasetRoleAssignment {
@@ -847,6 +892,7 @@ mod tests {
             width: 2,
             height: 2,
             media_type: "image/png".to_string(),
+            source_memberships: None,
         };
         let second_image = ImageRecord {
             image_id: ImageId::from("img_2"),
@@ -859,6 +905,7 @@ mod tests {
             width: 2,
             height: 2,
             media_type: "image/png".to_string(),
+            source_memberships: None,
         };
         repo.save_images_index(&ImagesIndex {
             schema_version: SCHEMA_VERSION,
@@ -1059,6 +1106,7 @@ mod tests {
                 agreement_threshold: None,
             },
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         });
         metadata
@@ -1088,6 +1136,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     media_type: "image/png".to_string(),
+                    source_memberships: None,
                 },
             )]),
         })
@@ -1854,6 +1903,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn annotation_claims_skip_excluded_and_imported_terminal_tasks() {
+        let (_temp, repo, task_id, users) = annotation_repo(3, &["worker"]).await;
+        let timestamp = now();
+        for (index, (coverage, status)) in [
+            (ImportCoverage::Excluded, TaskStatus::Pending),
+            (ImportCoverage::Complete, TaskStatus::Completed),
+            (ImportCoverage::Complete, TaskStatus::Submitted),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let image_id = ImageId::from(format!("img_{index}"));
+            let terminal = matches!(status, TaskStatus::Completed | TaskStatus::Submitted);
+            repo.append_payload(
+                &image_id,
+                &Actor {
+                    user_id: UserId::from("admin"),
+                    role: DatasetRole::DataAdmin,
+                },
+                EventPayload::ImportInitialized {
+                    import_id: ImportId::from(format!("imp_{index}")),
+                    annotations: Vec::new(),
+                    task_initializations: vec![ImportTaskInitialization {
+                        task_id: task_id.clone(),
+                        coverage,
+                        initial_state: TaskState {
+                            task_id: task_id.clone(),
+                            status,
+                            outcome: terminal.then_some(TaskOutcome::ImportedGroundTruth),
+                            assigned_to: None,
+                            completed_by: terminal.then(|| UserId::from("admin")),
+                            completed_at: terminal.then_some(timestamp),
+                            updated_at: timestamp,
+                        },
+                    }],
+                    migration_target_sets: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                !repo
+                    .load_image_state(&image_id)
+                    .await
+                    .unwrap()
+                    .assignment_eligible(&task_id)
+            );
+        }
+
+        assert!(
+            repo.assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn claim_rejects_enabled_tasks_without_exactly_one_class() {
         let (_temp, repo, task_id, users) = annotation_repo(1, &["worker"]).await;
         let mut metadata = repo.load_dataset_config().await.unwrap();
@@ -1878,10 +1985,14 @@ mod tests {
         let annotation = |id: &str| AnnotationVersion {
             annotation_id: AnnotationId::from(id),
             version: 1,
+            object_group_id: None,
+            origin: AnnotationOrigin::native(),
             task_id: task_id.clone(),
             class_id: ClassId::from("person"),
             annotation_type: AnnotationType::BoundingBox,
-            source: AnnotationSource::Human,
+            revision_source: RevisionSource::Human {
+                action: HumanRevisionKind::Authored,
+            },
             geometry: AnnotationGeometry::BoundingBox(BoundingBox {
                 x: 0.1,
                 y: 0.1,
@@ -2059,8 +2170,8 @@ mod tests {
         assert_eq!(corrected.geometry, geometry);
         assert_eq!(corrected.author_user_id, reviewers[0]);
         assert!(matches!(
-            &corrected.source,
-            AnnotationSource::ReviewerCorrection { correction_id: id } if id == &correction_id
+            &corrected.revision_source,
+            RevisionSource::ReviewerCorrection { correction_id: id } if id == &correction_id
         ));
         assert_eq!(state.task_states[&task_id].status, TaskStatus::Completed);
         assert_eq!(
@@ -2509,6 +2620,7 @@ mod tests {
                 agreement_threshold: None,
             },
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         });
         metadata.role_assignments.push(DatasetRoleAssignment {
@@ -2544,6 +2656,7 @@ mod tests {
                     width: 100,
                     height: 100,
                     media_type: "image/png".to_string(),
+                    source_memberships: None,
                 },
             )]),
         })
@@ -2575,10 +2688,14 @@ mod tests {
                 annotation: AnnotationVersion {
                     annotation_id: AnnotationId::from("ann_1"),
                     version: 1,
+                    object_group_id: None,
+                    origin: AnnotationOrigin::native(),
                     task_id: task_id.clone(),
                     class_id,
                     annotation_type,
-                    source: AnnotationSource::Human,
+                    revision_source: RevisionSource::Human {
+                        action: HumanRevisionKind::Authored,
+                    },
                     geometry,
                     author_user_id: annotator.clone(),
                     created_at: timestamp,
@@ -2646,6 +2763,7 @@ mod tests {
             skeleton: None,
             review: ReviewConfig::default(),
             prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
             enabled: true,
         });
         metadata
@@ -2677,6 +2795,7 @@ mod tests {
                             width: 2,
                             height: 2,
                             media_type: "image/png".to_string(),
+                            source_memberships: None,
                         },
                     )
                 })

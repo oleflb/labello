@@ -68,7 +68,10 @@ impl InspectorApp {
             InspectorMode::Live => {
                 let executor = Rc::new(NativeExecutor::new()?);
                 let executor_for_spawner = executor.clone();
-                let mut app = labello_ui::LabelloApp::live_http(Default::default());
+                let mut app = labello_ui::LabelloApp::live_http(labello_ui::AppConfig {
+                    application_url: Some("http://127.0.0.1:8081".to_string()),
+                    ..Default::default()
+                });
                 app.set_native_task_spawner(move |task| executor_for_spawner.spawn(task));
                 Ok(Self {
                     app,

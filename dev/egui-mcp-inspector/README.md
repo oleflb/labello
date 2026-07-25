@@ -20,7 +20,10 @@ EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml --
 Available presets are `annotation`, `setup`, `review`, `review-correction`,
 `adjudication`, `admin`, `statistics`, `dialog-settings`, `dialog-transition`,
 `dialog-admin-discard`, `setup-failure`, `admin-failure`,
-`statistics-failure`, `assignment-failure`, and `image-failure`. Preset actions
+`statistics-failure`, `assignment-failure`, `image-failure`, `import-source`,
+`import-preflight`, `import-ready`, `import-running`, `import-failure`,
+`import-success`, `migration-object`, `migration-exclusion`, `migration-pass`,
+`migration-full-image`, and `migration-review`. Preset actions
 are intentionally local and deterministic; restart with another preset for a
 clean inspection context.
 

@@ -347,7 +347,14 @@ fn v2_event_names_shapes_and_replay_match_the_golden_log() {
     }
 
     let state = rebuild_state(ImageId::from("img_1"), &events).unwrap();
-    assert_eq!(state.schema_version, 2);
+    assert_eq!(state.schema_version, 3);
+    assert!(
+        state
+            .current_annotation(&AnnotationId::from("ann_1"))
+            .unwrap()
+            .origin
+            .is_legacy_v2()
+    );
     assert_eq!(state.current_sequence, 10);
     assert_eq!(
         state
@@ -488,7 +495,7 @@ fn task_workflow_and_review_target_v2_json_is_stable() {
 }
 
 #[test]
-fn v2_schema_version_fields_are_present_at_persistence_boundaries() {
+fn current_schema_version_fields_are_present_at_persistence_boundaries() {
     let timestamp: Timestamp = "2026-01-02T03:04:05Z".parse().unwrap();
     let metadata = DatasetMetadata::new(DatasetId::from("ds_1"), "Dataset", timestamp);
     let config = DatasetConfig::from_metadata(&metadata);
@@ -503,6 +510,7 @@ fn v2_schema_version_fields_are_present_at_persistence_boundaries() {
         includes_image_bytes: false,
         total_bytes: 0,
         files: Vec::new(),
+        imports: Vec::new(),
     };
     let offline_bundle = OfflineBundle {
         schema_version: SCHEMA_VERSION,
@@ -513,6 +521,7 @@ fn v2_schema_version_fields_are_present_at_persistence_boundaries() {
         roles: vec![DatasetRole::Annotator],
         tasks: Vec::new(),
         images: Vec::new(),
+        import_manifests: Vec::new(),
     };
     let offline_sync =
         OfflineSyncRequest::new(DatasetId::from("ds_1"), UserId::from("user_1"), Vec::new());
@@ -526,7 +535,7 @@ fn v2_schema_version_fields_are_present_at_persistence_boundaries() {
         serde_json::to_value(offline_bundle).unwrap(),
         serde_json::to_value(offline_sync).unwrap(),
     ] {
-        assert_eq!(value.get("schemaVersion"), Some(&json!(2)));
+        assert_eq!(value.get("schemaVersion"), Some(&json!(3)));
         assert!(value.get("schema_version").is_none());
     }
 }
