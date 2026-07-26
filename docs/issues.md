@@ -50,8 +50,8 @@ Only after that continue with the next issue.
 - [x] Support removing placed migration keypoints with both Delete and Undo.
   - Match normal annotation behavior without allowing edits to the canonical bounding-box guide.
 - [x] Add focused UI regression tests for migration inspector layout, one-step confirmation, and keypoint removal.
-- [ ] Validate the migration workflow in the live inspector at desktop and mobile widths.
-- [ ] Complete live migration exercises for TSpot and XSpot and verify that their skeleton annotations persist.
+- [x] Validate the migration workflow in the live inspector at desktop and mobile widths.
+- [x] Complete live migration exercises for TSpot and XSpot and verify that their skeleton annotations persist.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
 - [ ] Redesign and compact the left-panel workflow selector.

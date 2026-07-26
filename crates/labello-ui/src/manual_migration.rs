@@ -335,7 +335,7 @@ impl LabelloApp {
         ui.separator();
         ui.label(RichText::new("Canonical guide").strong());
         ui.label(format!(
-            "Object {} of {expected} | Group {group_id} | Read-only guide",
+            "Object {} of {expected} | Read-only guide",
             sequence_index + 1
         ));
         let status = self.migration_disposition(&group_id);

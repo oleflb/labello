@@ -2068,7 +2068,16 @@ impl eframe::App for LabelloApp {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.right_panel(ui, true));
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin {
+                                    left: 2,
+                                    right: 0,
+                                    top: 0,
+                                    bottom: 0,
+                                })
+                                .show(ui, |ui| self.right_panel(ui, true));
+                        });
                 });
         }
         let central_frame = if self.work_view() {

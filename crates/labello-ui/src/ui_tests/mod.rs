@@ -614,6 +614,11 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         if width >= 600.0 || height >= 667.0 {
             assert!(migration.query_by_label("Canonical guide").is_some());
             assert!(migration.query_by_label("Exclusion reason").is_some());
+            assert!(
+                migration
+                    .query_by_label("Object 1 of 2 | Read-only guide")
+                    .is_some()
+            );
         }
         if LayoutMode::for_width(width) == LayoutMode::Wide {
             let canvas = migration.get_by_label("Annotation canvas").rect();
@@ -622,6 +627,10 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             assert!(
                 canvas.right() <= inspector_boundary + 0.5,
                 "canvas crosses the inspector boundary: canvas={canvas:?} boundary={inspector_boundary}",
+            );
+            assert!(
+                inspector.left() >= inspector_boundary + 26.0,
+                "inspector text touches its scroll clip: inspector={inspector:?} boundary={inspector_boundary}",
             );
             assert!(
                 canvas.right() + 15.0 <= inspector.left(),
