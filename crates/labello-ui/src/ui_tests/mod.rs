@@ -356,7 +356,7 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     recovered.source_fingerprint = Some("source-recovered".to_string());
     recovered.plan_hash = Some("plan-recovered".to_string());
     recovered.preflight_report = Some(test_import_report());
-    let recovered_plan = contract_import_plan(recovered.import_id.clone());
+    let mut recovered_plan = contract_import_plan(recovered.import_id.clone());
     recovered.recovery = Some(labello_client::ImportRecoveryState {
         attestations: labello_client::ImportAttestations {
             ground_truth: true,
@@ -615,12 +615,17 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             assert!(migration.query_by_label("Canonical guide").is_some());
             assert!(migration.query_by_label("Exclusion reason").is_some());
         }
-        if width >= 600.0 {
+        if LayoutMode::for_width(width) == LayoutMode::Wide {
             let canvas = migration.get_by_label("Annotation canvas").rect();
             let inspector = migration.get_by_label("Inspector").rect();
+            let inspector_boundary = width - LayoutMode::INSPECTOR_PANEL_WIDTH;
             assert!(
-                canvas.right() <= inspector.left(),
-                "canvas overlaps the inspector: canvas={canvas:?} inspector={inspector:?}",
+                canvas.right() <= inspector_boundary + 0.5,
+                "canvas crosses the inspector boundary: canvas={canvas:?} boundary={inspector_boundary}",
+            );
+            assert!(
+                canvas.right() + 15.0 <= inspector.left(),
+                "canvas crowds the inspector text: canvas={canvas:?} inspector={inspector:?}",
             );
         }
         assert_visible_controls_clamped(&migration, width, height);
@@ -4140,6 +4145,14 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             assert!(status_badge.right() <= sign_out.left() + 0.5);
         }
         let canvas = harness.get_by_label("Annotation canvas");
+        if layout == LayoutMode::Wide {
+            let inspector_boundary = width - LayoutMode::INSPECTOR_PANEL_WIDTH;
+            assert!(
+                canvas.rect().right() <= inspector_boundary + 0.5,
+                "canvas crosses the inspector boundary at {width}x{height}: {:?}",
+                canvas.rect(),
+            );
+        }
         let app_bar = harness.get_by_label("Application bar").rect();
         let context_bar = harness.get_by_label("Workspace context bar").rect();
         assert!(app_bar.bottom() <= context_bar.top() + 0.5);
