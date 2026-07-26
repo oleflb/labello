@@ -49,7 +49,7 @@ Only after that continue with the next issue.
   - Use context-specific wording for images with no guides and images whose guides were resolved.
 - [x] Support removing placed migration keypoints with both Delete and Undo.
   - Match normal annotation behavior without allowing edits to the canonical bounding-box guide.
-- [ ] Add focused UI regression tests for migration inspector layout, one-step confirmation, and keypoint removal.
+- [x] Add focused UI regression tests for migration inspector layout, one-step confirmation, and keypoint removal.
 - [ ] Validate the migration workflow in the live inspector at desktop and mobile widths.
 - [ ] Complete live migration exercises for TSpot and XSpot and verify that their skeleton annotations persist.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.

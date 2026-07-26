@@ -112,6 +112,17 @@ impl LayoutMode {
     }
 }
 
+fn work_central_frame() -> egui::Frame {
+    theme::central_frame()
+        .fill(egui::Color32::TRANSPARENT)
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 16,
+            top: 8,
+            bottom: 8,
+        })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Drawer {
     Workflow,
@@ -2065,14 +2076,7 @@ impl eframe::App for LabelloApp {
                 });
         }
         let central_frame = if self.work_view() {
-            theme::central_frame()
-                .fill(egui::Color32::TRANSPARENT)
-                .inner_margin(egui::Margin {
-                    left: 8,
-                    right: 16,
-                    top: 8,
-                    bottom: 8,
-                })
+            work_central_frame()
         } else {
             theme::central_frame()
         };
@@ -2138,6 +2142,13 @@ fn demo_image(index: usize) -> QueuedImage {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    #[test]
+    fn work_frame_preserves_the_inspector_inset() {
+        let frame = work_central_frame();
+        assert_eq!(frame.fill, egui::Color32::TRANSPARENT);
+        assert_eq!(frame.inner_margin.right, 16);
+    }
 
     #[test]
     fn undo_history_respects_operation_and_approximate_memory_budgets() {

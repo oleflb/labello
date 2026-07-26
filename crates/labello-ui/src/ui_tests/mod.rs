@@ -602,13 +602,20 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         let mut migration = Harness::builder()
             .with_size(egui::vec2(width, height))
             .build_eframe(|ctx| {
-                inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
+                let mut app =
+                    inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx);
+                if width < 600.0 {
+                    app.drawer = Some(Drawer::Inspector);
+                }
+                app
             });
         migration.step();
         assert!(migration.query_by_label("Annotation canvas").is_some());
-        if width >= 600.0 {
+        if width >= 600.0 || height >= 667.0 {
             assert!(migration.query_by_label("Canonical guide").is_some());
             assert!(migration.query_by_label("Exclusion reason").is_some());
+        }
+        if width >= 600.0 {
             let canvas = migration.get_by_label("Annotation canvas").rect();
             let inspector = migration.get_by_label("Inspector").rect();
             assert!(
@@ -661,8 +668,11 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         .clear();
     no_guides_app.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
     no_guides_app.migration.progress = None;
+    let no_guides_api = Rc::new(SpyApi::new());
+    no_guides_api.set_image_state(no_guides_app.current_state.clone().unwrap());
     let mut no_guides = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
         .build_eframe(|_| no_guides_app);
     no_guides.step();
     assert!(
@@ -672,11 +682,20 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     );
     assert!(
         no_guides
+            .query_by_role(egui::accesskit::Role::CheckBox)
+            .is_none()
+    );
+    assert!(
+        no_guides
             .query_by_label(
                 "Confirm that this image has no canonical guides and needs no skeletons."
             )
             .is_some()
     );
+    no_guides.state_mut().runtime.api = Some(no_guides_api.clone());
+    click_accesskit_button(&mut no_guides, "Confirm no guides & finish");
+    step_until(&mut no_guides, 8, |app| !app.migration.busy);
+    assert_eq!(no_guides_api.counts().migration_commands, 1);
 
     let mut deleted = Harness::builder()
         .with_size(egui::vec2(390.0, 667.0))
@@ -896,6 +915,17 @@ fn migration_draft_supports_undo_and_delete() {
 
     place_first_keypoint(harness.state_mut());
     harness.step();
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    harness.step();
+    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert!(
+        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_none()
+    );
+
+    place_first_keypoint(harness.state_mut());
+    harness.step();
     harness.key_press(egui::Key::Delete);
     harness.step();
     assert_eq!(harness.state().migration.keypoint_index, 0);
@@ -934,6 +964,36 @@ fn migration_draft_supports_undo_and_delete() {
             .point
             .is_some()
     );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn migration_confirmation_button_dispatches_once() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    api.set_image_state(app.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Confirm all guides & finish");
+    step_until(&mut harness, 8, |app| !app.migration.busy);
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(
+        harness
+            .query_by_label("Confirm all guides & finish")
+            .is_none()
+    );
+    harness.step();
+    assert_eq!(api.counts().migration_commands, 1);
 }
 
 #[cfg(feature = "inspector-presets")]
