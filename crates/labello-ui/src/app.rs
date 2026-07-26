@@ -2000,6 +2000,8 @@ impl eframe::App for LabelloApp {
                 return;
             }
         }
+        ui.painter()
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::APP_BG);
         self.process_messages(ui.ctx());
         self.retry_prefetch_if_due(ui.ctx());
         if self.queue.remove_expired() {
@@ -2055,11 +2057,20 @@ impl eframe::App for LabelloApp {
                 .exact_size(LayoutMode::INSPECTOR_PANEL_WIDTH)
                 .frame(theme::side_frame())
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui, true));
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.right_panel(ui, true));
                 });
         }
         let central_frame = if self.work_view() {
-            theme::central_frame().inner_margin(egui::Margin::symmetric(8, 8))
+            theme::central_frame()
+                .fill(egui::Color32::TRANSPARENT)
+                .inner_margin(egui::Margin {
+                    left: 8,
+                    right: 16,
+                    top: 8,
+                    bottom: 8,
+                })
         } else {
             theme::central_frame()
         };

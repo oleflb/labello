@@ -583,7 +583,12 @@ fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
 fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes() {
     use crate::inspector_presets::{self, InspectorPreset};
 
-    for (width, height) in [(1440.0, 900.0), (390.0, 667.0), (390.0, 320.0)] {
+    for (width, height) in [
+        (1440.0, 900.0),
+        (1288.0, 820.0),
+        (390.0, 667.0),
+        (390.0, 320.0),
+    ] {
         let mut source = Harness::builder()
             .with_size(egui::vec2(width, height))
             .build_eframe(|ctx| {
@@ -604,6 +609,12 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         if width >= 600.0 {
             assert!(migration.query_by_label("Canonical guide").is_some());
             assert!(migration.query_by_label("Exclusion reason").is_some());
+            let canvas = migration.get_by_label("Annotation canvas").rect();
+            let inspector = migration.get_by_label("Inspector").rect();
+            assert!(
+                canvas.right() <= inspector.left(),
+                "canvas overlaps the inspector: canvas={canvas:?} inspector={inspector:?}",
+            );
         }
         assert_visible_controls_clamped(&migration, width, height);
     }

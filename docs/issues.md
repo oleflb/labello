@@ -42,7 +42,7 @@ Only after that continue with the next issue.
   - The elements of the top bar should only overflow into one burger/dropdown menu when width is too narrow to display.
   - In the Setup view, all collapsed sections should be moved into seperate sections with a sections navigator like in Admin view.
   - This would completely remove the horizontal navigation in non-image views.
-- [ ] Fix horizontal clipping in the migration inspector when canonical bounding-box guides are present.
+- [x] Fix horizontal clipping in the migration inspector when canonical bounding-box guides are present.
   - The annotation canvas must not overlap or obscure the left edge of the inspector.
   - Validate the fix in the native inspector at desktop and mobile widths.
 - [ ] Replace the redundant full-image migration confirmation checkbox and button with one explicit confirmation button.
