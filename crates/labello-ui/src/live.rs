@@ -87,7 +87,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportJobLoaded { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match *result {
                         Ok(job) => {
                             let job_changed = self
@@ -132,14 +132,14 @@ impl LabelloApp {
                 }
                 #[cfg(target_arch = "wasm32")]
                 UiMessage::ImportBrowserFilesSelected { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match result {
                         Ok(files) => self.register_selected_import_files(files),
                         Err(error) => self.import_flow.error = Some(error),
                     }
                 }
                 UiMessage::ImportFilesRegistered { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match result {
                         Ok(registered) => {
                             if let Some(job) = self.import_flow.job.as_mut() {
@@ -280,7 +280,7 @@ impl LabelloApp {
                     result,
                     ..
                 } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match result {
                         Ok(_chunk) => {
                             #[cfg(target_arch = "wasm32")]
@@ -333,7 +333,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportSealed { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match result {
                         Ok(sealed) => {
                             if let Some(job) = self.import_flow.job.as_mut() {
@@ -348,7 +348,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportPlanUpdated { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match *result {
                         Ok(plan) => {
                             let requested = self.import_flow.pending_plan_request.take();
@@ -381,7 +381,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportDiagnosticsLoaded { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
                     match result {
                         Ok(page) => {
                             self.import_flow.diagnostics.extend(page.diagnostics);
@@ -391,7 +391,8 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportCommitted { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
+                    self.begin_import_epoch();
                     match result {
                         Ok(committed) => {
                             if let Some(job) = self.import_flow.job.as_mut() {
@@ -400,6 +401,7 @@ impl LabelloApp {
                                 job.plan_hash = Some(committed.plan_hash);
                             }
                             self.import_flow.screen = crate::import_flow::ImportScreen::Success;
+                            self.import_flow.error = None;
                             self.runtime.notice = Some(if committed.recovered {
                                 "Recovered and completed the import".to_string()
                             } else {
@@ -414,7 +416,8 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ImportCancelled { result, .. } => {
-                    self.import_flow.busy = false;
+                    self.sync_import_busy();
+                    self.begin_import_epoch();
                     match result {
                         Ok(cancelled) => {
                             if let Some(job) = self.import_flow.job.as_mut() {
@@ -1784,6 +1787,11 @@ impl LabelloApp {
                 .map(|request| request.request_id)
                 .unwrap_or_else(|| command.request().request_id);
             self.runtime.active_requests.insert(request_id);
+            if let Some(activity) = command.import_activity() {
+                self.import_flow
+                    .active_operations
+                    .insert(request_id, activity);
+            }
             self.runtime.commands.push_back(command);
             true
         } else {
@@ -1795,12 +1803,21 @@ impl LabelloApp {
         }
     }
 
+    fn sync_import_busy(&mut self) {
+        self.import_flow.busy = self
+            .import_flow
+            .active_operations
+            .values()
+            .any(|activity| activity.blocks_controls());
+    }
+
     fn rollback_command(&mut self, command: &UiCommand, error: &str) {
         let request_id = command
             .import_request()
             .map(|request| request.request_id)
             .unwrap_or_else(|| command.request().request_id);
         self.runtime.active_requests.remove(&request_id);
+        self.import_flow.active_operations.remove(&request_id);
         match command {
             UiCommand::ImportCapabilities { .. } => {
                 self.import_flow.capabilities_loading = false;
@@ -1825,7 +1842,7 @@ impl LabelloApp {
             | UiCommand::ImportDiagnostics { .. }
             | UiCommand::CommitImport { .. }
             | UiCommand::CancelImport { .. } => {
-                self.import_flow.busy = false;
+                self.sync_import_busy();
                 self.import_flow.error = Some(error.to_string());
             }
             UiCommand::Migration { .. } => {
@@ -1962,6 +1979,7 @@ impl LabelloApp {
             self.runtime.active_requests.remove(&request_id);
         }
         self.import_flow.busy = false;
+        self.import_flow.active_operations.clear();
         self.import_flow.poll_after = None;
     }
 
@@ -1977,6 +1995,9 @@ impl LabelloApp {
             && request.import_epoch == self.import_epoch
             && owner_matches;
         let active = self.runtime.active_requests.remove(&request.request_id);
+        self.import_flow
+            .active_operations
+            .remove(&request.request_id);
         current && active
     }
 

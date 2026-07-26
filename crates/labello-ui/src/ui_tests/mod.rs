@@ -395,6 +395,64 @@ fn import_capability_is_bootstrap_admin_gated_and_stale_epochs_are_ignored() {
 }
 
 #[test]
+fn terminal_import_result_invalidates_an_inflight_status_poll() {
+    let mut app = LabelloApp::default();
+    let mut job = test_import_job(
+        DatasetId::from("imported"),
+        "Imported".to_string(),
+        labello_client::ImportProfile::CocoInstancesGtV1,
+        labello_client::ImportTransport::ServerDirectory,
+    );
+    job.lifecycle = labello_client::ImportLifecycle::Building;
+    let import_id = job.import_id.clone();
+    app.import_flow.job = Some(job.clone());
+    app.import_flow.screen = crate::import_flow::ImportScreen::Running;
+
+    let commit = app.import_request_identity(Some(import_id.clone()));
+    let poll = app.import_request_identity(Some(import_id.clone()));
+    app.runtime.active_requests.insert(commit.request_id);
+    app.runtime.active_requests.insert(poll.request_id);
+    app.import_flow
+        .active_operations
+        .insert(commit.request_id, crate::app::ImportActivity::Commit);
+    app.import_flow
+        .active_operations
+        .insert(poll.request_id, crate::app::ImportActivity::LoadStatus);
+
+    app.runtime
+        .tx
+        .send(UiMessage::ImportCommitted {
+            request: commit,
+            result: Ok(labello_client::CommitImportResult {
+                import_id: import_id.clone(),
+                dataset_id: DatasetId::from("imported"),
+                plan_hash: "plan-hash".to_string(),
+                recovered: false,
+            }),
+        })
+        .unwrap();
+    app.runtime
+        .tx
+        .send(UiMessage::ImportJobLoaded {
+            request: poll,
+            result: Box::new(Ok(job)),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+
+    assert_eq!(
+        app.import_flow.screen,
+        crate::import_flow::ImportScreen::Success
+    );
+    assert_eq!(
+        app.import_flow.job.as_ref().unwrap().lifecycle,
+        labello_client::ImportLifecycle::Succeeded
+    );
+    assert!(app.import_flow.active_operations.is_empty());
+}
+
+#[test]
 fn endpoint_and_session_identity_changes_clear_import_state() {
     let mut endpoint_app = LabelloApp::default();
     endpoint_app.import_flow.open = true;
@@ -1029,6 +1087,79 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     assert!(
         annotated
             .query_by_label("Focus current box (guide v1)")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn import_progress_overview_exposes_stage_and_activity_status() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    for (preset, expected_stage) in [
+        (
+            InspectorPreset::ImportSource,
+            "Step 1 of 5: Source, current",
+        ),
+        (
+            InspectorPreset::ImportMultipleDescriptors,
+            "Step 2 of 5: Configure, current",
+        ),
+        (
+            InspectorPreset::ImportPreflight,
+            "Step 3 of 5: Preflight, current",
+        ),
+        (InspectorPreset::ImportReady, "Step 4 of 5: Ready, current"),
+        (
+            InspectorPreset::ImportRunning,
+            "Step 5 of 5: Import, current",
+        ),
+        (
+            InspectorPreset::ImportFailure,
+            "Step 3 of 5: Preflight, failed",
+        ),
+        (
+            InspectorPreset::ImportSuccess,
+            "Step 5 of 5: Import, complete",
+        ),
+    ] {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(390.0, 667.0))
+            .build_eframe(|ctx| inspector_presets::build(preset, &ctx.egui_ctx));
+        harness.step();
+
+        assert!(harness.query_by_label("Import progress").is_some());
+        assert!(
+            harness.query_by_label(expected_stage).is_some(),
+            "missing stage status {expected_stage:?} for {preset:?}"
+        );
+        assert!(
+            harness
+                .query_by_label("Step 1 of 5: Source, complete")
+                .is_some()
+                || preset == InspectorPreset::ImportSource
+        );
+        assert_visible_controls_clamped(&harness, 390.0, 667.0);
+    }
+
+    let mut running = Harness::builder()
+        .with_size(egui::vec2(1288.0, 820.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportRunning, &ctx.egui_ctx)
+        });
+    running.step();
+    assert!(
+        running
+            .query_by_label("Building and publishing dataset")
+            .is_some()
+    );
+    assert!(
+        running
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::ProgressIndicator,
+                "Building dataset: 482 of 1020 records processed",
+            )
+            .next()
             .is_some()
     );
 }

@@ -28,8 +28,8 @@ use crate::{
 };
 
 pub(crate) use crate::live_protocol::{
-    FolderUploadProgress, ImportRequestIdentity, LoadedAdmin, LoadedDataset, LoadedImage,
-    MigrationAction, RequestIdentity, ReviewPhase, UiCommand, UiMessage,
+    FolderUploadProgress, ImportActivity, ImportRequestIdentity, LoadedAdmin, LoadedDataset,
+    LoadedImage, MigrationAction, RequestIdentity, ReviewPhase, UiCommand, UiMessage,
 };
 
 pub const IMAGE_QUEUE_SIZE: usize = 2;

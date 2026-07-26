@@ -14,7 +14,7 @@ use labello_domain::{
 };
 
 use crate::{
-    app::{AppView, LabelloApp, UiCommand},
+    app::{AppView, ImportActivity, LabelloApp, UiCommand},
     theme,
 };
 
@@ -156,6 +156,58 @@ pub(crate) enum ImportScreen {
     Success,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportStage {
+    Source,
+    Configure,
+    Preflight,
+    Ready,
+    Import,
+}
+
+impl ImportStage {
+    const ALL: [Self; 5] = [
+        Self::Source,
+        Self::Configure,
+        Self::Preflight,
+        Self::Ready,
+        Self::Import,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Source => 0,
+            Self::Configure => 1,
+            Self::Preflight => 2,
+            Self::Ready => 3,
+            Self::Import => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Configure => "Configure",
+            Self::Preflight => "Preflight",
+            Self::Ready => "Ready",
+            Self::Import => "Import",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportStageStatus {
+    Pending,
+    Active,
+    Complete,
+    Failed,
+}
+
+struct ActiveStageProgress {
+    label: String,
+    fraction: Option<f32>,
+}
+
 pub(crate) struct ImportFlowState {
     pub capabilities: Option<ImportCapabilities>,
     pub capabilities_loading: bool,
@@ -163,6 +215,7 @@ pub(crate) struct ImportFlowState {
     pub open: bool,
     pub screen: ImportScreen,
     pub busy: bool,
+    pub active_operations: std::collections::BTreeMap<u64, ImportActivity>,
     pub error: Option<String>,
     pub job: Option<ImportJob>,
     pub plan: Option<ImportPlan>,
@@ -224,6 +277,7 @@ impl Default for ImportFlowState {
             open: false,
             screen: ImportScreen::Source,
             busy: false,
+            active_operations: Default::default(),
             error: None,
             job: None,
             plan: None,
@@ -508,7 +562,11 @@ impl LabelloApp {
 
     pub(crate) fn refresh_import_if_due(&mut self) {
         let should_poll = self.import_flow.open
-            && !self.import_flow.busy
+            && !self
+                .import_flow
+                .active_operations
+                .values()
+                .any(|activity| *activity == ImportActivity::LoadStatus)
             && self.import_flow.job.as_ref().is_some_and(|job| {
                 matches!(
                     job.lifecycle,
@@ -535,42 +593,37 @@ impl LabelloApp {
                 self.import_flow.destination_name = "Imported dataset".to_string();
             }
         }
-        ui.heading("Import a dataset");
+        ui.heading("Import dataset");
         ui.label(
             RichText::new("Register, validate, and import an existing dataset.")
                 .color(theme::TEXT_MUTED),
         );
         ui.add_space(theme::SPACE_2);
         self.request_import_capabilities();
-        let Some(capabilities) = self.import_flow.capabilities.clone() else {
-            if self.import_flow.capabilities_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.small("Checking dataset import capability...");
-                });
-            } else if let Some(error) = self.import_flow.capabilities_error.clone() {
-                theme::inline_message(ui, theme::Intent::Warning, error);
-            }
-            return;
-        };
-        if !capabilities.available {
-            if let Some(reason) = capabilities.unavailable_reason {
-                ui.small(format!("Dataset import unavailable: {reason}"));
-            }
-            return;
-        }
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            self.import_progress_overview(ui);
+            ui.separator();
+            let Some(capabilities) = self.import_flow.capabilities.clone() else {
+                if self.import_flow.capabilities_loading {
+                    ui.small("Checking dataset import capability...");
+                } else if let Some(error) = self.import_flow.capabilities_error.clone() {
+                    theme::inline_message(ui, theme::Intent::Warning, error);
+                }
+                return;
+            };
+            if !capabilities.available {
+                if let Some(reason) = capabilities.unavailable_reason {
+                    ui.small(format!("Dataset import unavailable: {reason}"));
+                }
+                return;
+            }
             self.import_flow_contents(ui, &capabilities);
         });
         self.import_source_picker_modal(ui.ctx());
     }
 
     fn import_flow_contents(&mut self, ui: &mut egui::Ui, capabilities: &ImportCapabilities) {
-        ui.heading("Import dataset");
-        ui.label(
-            RichText::new(import_step_label(self.import_flow.screen)).color(theme::TEXT_MUTED),
-        );
         if let Some(error) = self.import_flow.error.clone() {
             theme::inline_message(ui, theme::Intent::Error, error);
         }
@@ -626,6 +679,292 @@ impl LabelloApp {
                 self.request_import_recovery();
             }
         });
+    }
+
+    fn import_progress_overview(&self, ui: &mut egui::Ui) {
+        let activity = self.current_import_activity();
+        let show_activity_label = ui.available_width() >= 520.0;
+        ui.horizontal(|ui| {
+            ui.heading("Import progress");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(activity) = activity {
+                    let status = format!("{} | {}", activity.label(), activity.operation());
+                    let response = ui.spinner().on_hover_text(&status);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, status.clone())
+                    });
+                    if show_activity_label {
+                        ui.label(
+                            RichText::new(activity.label())
+                                .small()
+                                .color(theme::TEXT_MUTED),
+                        );
+                    }
+                }
+            });
+        });
+
+        let active_stage = current_import_stage(&self.import_flow);
+        let active_progress = self.active_stage_progress(active_stage, activity);
+        let pill_width = 98.0;
+        let columns = (((ui.available_width() + theme::SPACE_2) / (pill_width + theme::SPACE_2))
+            .floor() as usize)
+            .clamp(1, ImportStage::ALL.len());
+        for row in ImportStage::ALL.chunks(columns) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_2;
+                for &stage in row {
+                    let status = import_stage_status(&self.import_flow, stage);
+                    let fraction = match status {
+                        ImportStageStatus::Complete | ImportStageStatus::Failed => Some(1.0),
+                        ImportStageStatus::Pending => Some(0.0),
+                        ImportStageStatus::Active => active_progress.fraction,
+                    };
+                    import_stage_pill(ui, stage, status, fraction);
+                }
+            });
+        }
+        ui.add_space(theme::SPACE_2);
+        ui.label(
+            RichText::new(import_step_label(self.import_flow.screen)).color(theme::TEXT_MUTED),
+        );
+        let progress_color = if self.import_flow.screen == ImportScreen::Failure {
+            theme::DANGER
+        } else if self.import_flow.screen == ImportScreen::Success {
+            theme::SUCCESS
+        } else {
+            theme::ACCENT
+        };
+        ui.label(RichText::new(&active_progress.label).strong());
+        if let Some(fraction) = active_progress.fraction {
+            let progress = egui::ProgressBar::new(fraction)
+                .desired_height(18.0)
+                .fill(progress_color);
+            let show_value = self.import_flow.screen != ImportScreen::Failure;
+            let response = ui.add(if show_value {
+                progress.show_percentage()
+            } else {
+                progress.text("Blocked")
+            });
+            response.widget_info(|| {
+                let mut info = egui::WidgetInfo::labeled(
+                    egui::WidgetType::ProgressIndicator,
+                    true,
+                    active_progress.label.clone(),
+                );
+                if show_value {
+                    info.value = Some((fraction.clamp(0.0, 1.0) * 100.0).floor() as f64);
+                }
+                info
+            });
+        } else {
+            indeterminate_import_progress(ui, &active_progress.label, progress_color);
+        }
+    }
+
+    fn current_import_activity(&self) -> Option<ImportActivity> {
+        self.import_flow
+            .active_operations
+            .values()
+            .copied()
+            .max_by_key(|activity| activity.priority())
+            .or_else(|| {
+                self.import_flow
+                    .capabilities_loading
+                    .then_some(ImportActivity::CheckCapabilities)
+            })
+            .or_else(|| {
+                self.import_flow
+                    .source_picker
+                    .loading
+                    .then_some(ImportActivity::BrowseSource)
+            })
+            .or_else(|| {
+                self.import_flow
+                    .yolo_inspection_loading
+                    .then_some(ImportActivity::InspectDescriptor)
+            })
+            .or_else(|| {
+                (self.import_flow.screen == ImportScreen::Success && self.loading.datasets)
+                    .then_some(ImportActivity::RefreshDatasets)
+            })
+            .or_else(|| {
+                self.import_flow
+                    .busy
+                    .then_some(match self.import_flow.screen {
+                        ImportScreen::Source => ImportActivity::Create,
+                        ImportScreen::Configure => ImportActivity::Seal,
+                        ImportScreen::Preflight => ImportActivity::Preflight,
+                        ImportScreen::Ready => ImportActivity::UpdatePlan,
+                        ImportScreen::Running => ImportActivity::Commit,
+                        ImportScreen::Failure => ImportActivity::LoadStatus,
+                        ImportScreen::Success => ImportActivity::RefreshDatasets,
+                    })
+            })
+    }
+
+    fn active_stage_progress(
+        &self,
+        stage: ImportStage,
+        activity: Option<ImportActivity>,
+    ) -> ActiveStageProgress {
+        if self.import_flow.screen == ImportScreen::Failure {
+            return ActiveStageProgress {
+                label: format!("{} needs attention", stage.label()),
+                fraction: Some(1.0),
+            };
+        }
+        if self.import_flow.screen == ImportScreen::Success {
+            return ActiveStageProgress {
+                label: "Import complete".to_string(),
+                fraction: Some(1.0),
+            };
+        }
+
+        match stage {
+            ImportStage::Source => {
+                if matches!(activity, Some(ImportActivity::Create)) {
+                    return ActiveStageProgress {
+                        label: activity.unwrap().label().to_string(),
+                        fraction: None,
+                    };
+                }
+                let dataset_id = DatasetId::from(self.import_flow.destination_id.trim());
+                let source_selected = self.import_flow.transport == ImportTransport::BrowserFolder
+                    || (!self.import_flow.server_root_id.is_empty()
+                        && !self.import_flow.server_relative_path.trim().is_empty());
+                let complete = [
+                    dataset_id.validate_path_segment().is_ok(),
+                    !self.import_flow.destination_name.trim().is_empty(),
+                    source_selected,
+                    self.import_flow.ground_truth,
+                    !self.import_flow.provenance.trim().is_empty(),
+                ]
+                .into_iter()
+                .filter(|ready| *ready)
+                .count();
+                ActiveStageProgress {
+                    label: format!("Source setup: {complete} of 5 requirements complete"),
+                    fraction: Some(complete as f32 / 5.0),
+                }
+            }
+            ImportStage::Configure => {
+                if let Some(job) = &self.import_flow.job
+                    && job.transport == ImportTransport::BrowserFolder
+                    && job.progress.total_bytes > 0
+                    && job.progress.accepted_bytes < job.progress.total_bytes
+                {
+                    return ActiveStageProgress {
+                        label: format!(
+                            "Uploading source: {} of {} files, {} of {}",
+                            job.progress.uploaded_files,
+                            job.progress.total_files,
+                            import_human_bytes(job.progress.accepted_bytes),
+                            import_human_bytes(job.progress.total_bytes),
+                        ),
+                        fraction: Some(
+                            job.progress.accepted_bytes as f32 / job.progress.total_bytes as f32,
+                        ),
+                    };
+                }
+                if let Some(activity) = activity {
+                    return ActiveStageProgress {
+                        label: activity.label().to_string(),
+                        fraction: None,
+                    };
+                }
+                let upload_ready = self.import_flow.transport == ImportTransport::ServerDirectory
+                    || self.import_flow.job.as_ref().is_some_and(|job| {
+                        job.progress.total_files > 0
+                            && job.progress.uploaded_files == job.progress.total_files
+                            && job.progress.accepted_bytes == job.progress.total_bytes
+                    });
+                let complete = [
+                    upload_ready,
+                    !self.import_flow.source_namespace.trim().is_empty(),
+                    self.import_descriptor_error().is_none(),
+                ]
+                .into_iter()
+                .filter(|ready| *ready)
+                .count();
+                ActiveStageProgress {
+                    label: format!("Source configuration: {complete} of 3 requirements complete"),
+                    fraction: Some(complete as f32 / 3.0),
+                }
+            }
+            ImportStage::Preflight => {
+                if let Some(activity) = activity {
+                    return ActiveStageProgress {
+                        label: activity.label().to_string(),
+                        fraction: None,
+                    };
+                }
+                let report = self
+                    .import_flow
+                    .plan
+                    .as_ref()
+                    .map(|plan| &plan.report)
+                    .or_else(|| {
+                        self.import_flow
+                            .job
+                            .as_ref()
+                            .and_then(|job| job.preflight_report.as_ref())
+                    });
+                let acknowledgements_complete = report.is_some_and(|report| {
+                    report.diagnostics.iter().all(|diagnostic| {
+                        !diagnostic.impact.requires_acknowledgement
+                            || self.import_flow.acknowledgements.contains(&diagnostic.code)
+                    })
+                });
+                let complete = [
+                    report.is_some(),
+                    self.import_mappings_complete(),
+                    acknowledgements_complete,
+                ]
+                .into_iter()
+                .filter(|ready| *ready)
+                .count();
+                ActiveStageProgress {
+                    label: format!("Preflight review: {complete} of 3 requirements complete"),
+                    fraction: Some(complete as f32 / 3.0),
+                }
+            }
+            ImportStage::Ready => ActiveStageProgress {
+                label: "Preflight accepted; ready to import".to_string(),
+                fraction: Some(1.0),
+            },
+            ImportStage::Import => {
+                let counters = self.import_flow.job.as_ref().and_then(|job| {
+                    let total = job
+                        .progress
+                        .total_images
+                        .saturating_add(job.progress.total_objects);
+                    let complete = job
+                        .progress
+                        .processed_images
+                        .saturating_add(job.progress.processed_objects);
+                    (total > 0 && complete < total).then_some((complete, total))
+                });
+                match counters {
+                    Some((complete, total)) => ActiveStageProgress {
+                        label: format!("Building dataset: {complete} of {total} records processed"),
+                        fraction: Some(complete as f32 / total as f32),
+                    },
+                    None => ActiveStageProgress {
+                        label: activity.map_or_else(
+                            || {
+                                self.import_flow.job.as_ref().map_or_else(
+                                    || "Building and publishing dataset".to_string(),
+                                    |job| lifecycle_label(job.lifecycle).to_string(),
+                                )
+                            },
+                            |activity| activity.label().to_string(),
+                        ),
+                        fraction: None,
+                    },
+                }
+            }
+        }
     }
 
     fn import_source_step(&mut self, ui: &mut egui::Ui, capabilities: &ImportCapabilities) {
@@ -993,10 +1332,7 @@ impl LabelloApp {
             }
             ui.label(RichText::new("Splits to import").strong());
             if self.import_flow.yolo_inspection_loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Inspecting the staged YAML...");
-                });
+                ui.small("Descriptor inspection is in progress.");
             }
             for split in &mut self.import_flow.yolo_splits {
                 ui.add_enabled(
@@ -1148,10 +1484,7 @@ impl LabelloApp {
                 self.request_import_diagnostics(false);
             }
         } else {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Running deterministic preflight checks...");
-            });
+            ui.small("Deterministic preflight checks are in progress.");
         }
         ui.separator();
         self.import_mapping_editor(ui);
@@ -1632,26 +1965,6 @@ impl LabelloApp {
                     job.progress.processed_objects, job.progress.total_objects
                 ),
             );
-            let total = job
-                .progress
-                .total_images
-                .saturating_add(job.progress.total_objects);
-            let complete = job
-                .progress
-                .processed_images
-                .saturating_add(job.progress.processed_objects);
-            let progress_label =
-                format!("Import progress: {complete} of {total} image and object records");
-            ui.label(RichText::new(&progress_label).strong());
-            ui.add(
-                egui::ProgressBar::new(if total == 0 {
-                    0.0
-                } else {
-                    complete as f32 / total as f32
-                })
-                .show_percentage()
-                .text(progress_label),
-            );
             if job.can_cancel
                 && ui
                     .add_enabled(!self.import_flow.busy, egui::Button::new("Cancel import"))
@@ -1720,10 +2033,7 @@ impl LabelloApp {
                 .any(|dataset| dataset.dataset_id == job.destination_dataset_id)
         }) && !self.loading.datasets;
         if self.loading.datasets {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Refreshing the dataset catalog before navigation...");
-            });
+            ui.label("Refreshing the dataset catalog before navigation...");
         }
         if theme::primary_button(
             ui,
@@ -2255,6 +2565,12 @@ impl LabelloApp {
         };
         self.import_flow.busy = true;
         self.import_flow.screen = ImportScreen::Running;
+        if let Some(job) = self.import_flow.job.as_mut() {
+            job.lifecycle = ImportLifecycle::Building;
+            job.progress.phase = labello_client::ImportProgressPhase::Build;
+        }
+        self.import_flow.poll_after =
+            Some(web_time::Instant::now() + web_time::Duration::from_millis(500));
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("commit", request.request_id);
         self.queue_command(UiCommand::CommitImport {
@@ -2295,7 +2611,6 @@ impl LabelloApp {
         else {
             return;
         };
-        self.import_flow.busy = true;
         self.import_flow.poll_after = None;
         let request = self.import_request_identity(Some(import_id.clone()));
         self.queue_command(UiCommand::GetImport { request, import_id });
@@ -2379,6 +2694,9 @@ impl LabelloApp {
             };
             let request = self.import_request_identity(Some(import_id));
             self.runtime.active_requests.insert(request.request_id);
+            self.import_flow
+                .active_operations
+                .insert(request.request_id, ImportActivity::SelectFolder);
             self.import_flow.busy = true;
             let limits = self
                 .import_flow
@@ -2390,6 +2708,9 @@ impl LabelloApp {
                 crate::import_flow::browser::pick_import_folder(self, request.clone(), limits)
             {
                 self.runtime.active_requests.remove(&request.request_id);
+                self.import_flow
+                    .active_operations
+                    .remove(&request.request_id);
                 self.import_flow.busy = false;
                 self.import_flow.error = Some(error);
             }
@@ -2522,6 +2843,9 @@ impl LabelloApp {
         let length = (file.byte_size - offset).min(chunk_bytes);
         let request = self.import_request_identity(Some(import_id_value.clone()));
         self.runtime.active_requests.insert(request.request_id);
+        self.import_flow
+            .active_operations
+            .insert(request.request_id, ImportActivity::UploadChunk);
         self.import_flow.busy = true;
         let api_base_url = self.config.api_base_url.clone();
         let import_id = import_id_value.to_string();
@@ -3410,6 +3734,211 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn current_import_stage(flow: &ImportFlowState) -> ImportStage {
+    match flow.screen {
+        ImportScreen::Source => ImportStage::Source,
+        ImportScreen::Configure => ImportStage::Configure,
+        ImportScreen::Preflight => ImportStage::Preflight,
+        ImportScreen::Ready => ImportStage::Ready,
+        ImportScreen::Running | ImportScreen::Success => ImportStage::Import,
+        ImportScreen::Failure => failure_import_stage(flow),
+    }
+}
+
+fn failure_import_stage(flow: &ImportFlowState) -> ImportStage {
+    let phase = flow
+        .job
+        .as_ref()
+        .and_then(|job| job.failure.as_ref().map(|failure| failure.phase))
+        .or_else(|| {
+            (flow.plan.is_none())
+                .then(|| flow.job.as_ref().map(|job| job.progress.phase))
+                .flatten()
+        });
+    match phase {
+        Some(labello_client::ImportProgressPhase::Registration) => ImportStage::Source,
+        Some(
+            labello_client::ImportProgressPhase::Upload
+            | labello_client::ImportProgressPhase::Sealing,
+        ) => ImportStage::Configure,
+        Some(labello_client::ImportProgressPhase::Preflight) => ImportStage::Preflight,
+        Some(
+            labello_client::ImportProgressPhase::Build
+            | labello_client::ImportProgressPhase::Verification
+            | labello_client::ImportProgressPhase::Commit,
+        ) => ImportStage::Import,
+        Some(labello_client::ImportProgressPhase::Cleanup) | None => {
+            if flow.plan.is_some() {
+                ImportStage::Import
+            } else if flow
+                .job
+                .as_ref()
+                .is_some_and(|job| job.preflight_report.is_some())
+            {
+                ImportStage::Preflight
+            } else if flow.job.is_some() {
+                ImportStage::Configure
+            } else {
+                ImportStage::Source
+            }
+        }
+        Some(labello_client::ImportProgressPhase::Unknown) => ImportStage::Configure,
+    }
+}
+
+fn import_stage_status(flow: &ImportFlowState, stage: ImportStage) -> ImportStageStatus {
+    if flow.screen == ImportScreen::Success {
+        return ImportStageStatus::Complete;
+    }
+    let current = current_import_stage(flow);
+    if flow.screen == ImportScreen::Failure && stage == current {
+        return ImportStageStatus::Failed;
+    }
+    match stage.index().cmp(&current.index()) {
+        std::cmp::Ordering::Less => ImportStageStatus::Complete,
+        std::cmp::Ordering::Equal => ImportStageStatus::Active,
+        std::cmp::Ordering::Greater => ImportStageStatus::Pending,
+    }
+}
+
+fn import_stage_pill(
+    ui: &mut egui::Ui,
+    stage: ImportStage,
+    status: ImportStageStatus,
+    fraction: Option<f32>,
+) {
+    let (color, fill, stroke) = match status {
+        ImportStageStatus::Pending => (theme::TEXT_DISABLED, theme::SURFACE, theme::BORDER),
+        ImportStageStatus::Active => (
+            theme::ACCENT,
+            egui::Color32::from_rgba_unmultiplied(
+                theme::ACCENT.r(),
+                theme::ACCENT.g(),
+                theme::ACCENT.b(),
+                60,
+            ),
+            theme::ACCENT,
+        ),
+        ImportStageStatus::Complete => (
+            theme::SUCCESS,
+            egui::Color32::from_rgba_unmultiplied(
+                theme::SUCCESS.r(),
+                theme::SUCCESS.g(),
+                theme::SUCCESS.b(),
+                24,
+            ),
+            theme::SUCCESS.gamma_multiply(0.6),
+        ),
+        ImportStageStatus::Failed => (
+            theme::DANGER,
+            egui::Color32::from_rgba_unmultiplied(
+                theme::DANGER.r(),
+                theme::DANGER.g(),
+                theme::DANGER.b(),
+                36,
+            ),
+            theme::DANGER,
+        ),
+    };
+    let response = egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .corner_radius(egui::CornerRadius::same(theme::BADGE_RADIUS))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_width(78.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(format!("{} {}", stage.index() + 1, stage.label()))
+                        .color(color)
+                        .small()
+                        .strong(),
+                );
+                let (track, _) =
+                    ui.allocate_exact_size(egui::vec2(78.0, 3.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(track, 2.0, theme::BORDER_STRONG.gamma_multiply(0.55));
+                match fraction {
+                    Some(fraction) => {
+                        let width = track.width() * fraction.clamp(0.0, 1.0);
+                        if width > 0.0 {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    track.min,
+                                    egui::vec2(width, track.height()),
+                                ),
+                                2.0,
+                                color,
+                            );
+                        }
+                    }
+                    None => {
+                        ui.ctx().request_repaint();
+                        let phase = ((ui.input(|input| input.time) as f32 * 0.7) % 1.35) - 0.35;
+                        let segment = egui::Rect::from_min_size(
+                            egui::pos2(track.left() + track.width() * phase, track.top()),
+                            egui::vec2(track.width() * 0.35, track.height()),
+                        );
+                        ui.painter()
+                            .with_clip_rect(track)
+                            .rect_filled(segment, 2.0, color);
+                    }
+                }
+            });
+        })
+        .response;
+    let status_label = match status {
+        ImportStageStatus::Pending => "pending",
+        ImportStageStatus::Active => "current",
+        ImportStageStatus::Complete => "complete",
+        ImportStageStatus::Failed => "failed",
+    };
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::ProgressIndicator,
+            true,
+            format!(
+                "Step {} of 5: {}, {status_label}",
+                stage.index() + 1,
+                stage.label()
+            ),
+        )
+    });
+}
+
+fn indeterminate_import_progress(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(96.0), 18.0),
+        egui::Sense::hover(),
+    );
+    ui.ctx().request_repaint();
+    ui.painter()
+        .rect_filled(rect, 12.0, ui.visuals().extreme_bg_color);
+    let phase = ((ui.input(|input| input.time) as f32 * 0.55) % 1.4) - 0.4;
+    let segment = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + rect.width() * phase, rect.top()),
+        egui::vec2(rect.width() * 0.4, rect.height()),
+    );
+    ui.painter()
+        .with_clip_rect(rect)
+        .rect_filled(segment, 12.0, color.gamma_multiply(0.8));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, label.to_string())
+    });
+}
+
+fn import_human_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
 pub(crate) fn import_screen(job: &ImportJob, plan: Option<&ImportPlan>) -> ImportScreen {
     match job.lifecycle {
         ImportLifecycle::Registering | ImportLifecycle::Uploading | ImportLifecycle::Sealed => {
@@ -3828,6 +4357,79 @@ mod tests {
         assert_eq!(flow.profile, ImportProfile::UltralyticsYoloDetectV1);
         assert_eq!(flow.descriptors.len(), 1);
         assert_eq!(flow.descriptors[0].kind, ImportDescriptorKind::YoloDataset);
+    }
+
+    #[test]
+    fn progress_overview_projects_each_screen_to_one_current_stage() {
+        for (screen, current) in [
+            (ImportScreen::Source, ImportStage::Source),
+            (ImportScreen::Configure, ImportStage::Configure),
+            (ImportScreen::Preflight, ImportStage::Preflight),
+            (ImportScreen::Ready, ImportStage::Ready),
+            (ImportScreen::Running, ImportStage::Import),
+        ] {
+            let flow = ImportFlowState {
+                screen,
+                ..Default::default()
+            };
+            for stage in ImportStage::ALL {
+                let expected = match stage.index().cmp(&current.index()) {
+                    std::cmp::Ordering::Less => ImportStageStatus::Complete,
+                    std::cmp::Ordering::Equal => ImportStageStatus::Active,
+                    std::cmp::Ordering::Greater => ImportStageStatus::Pending,
+                };
+                assert_eq!(import_stage_status(&flow, stage), expected);
+            }
+        }
+
+        let success = ImportFlowState {
+            screen: ImportScreen::Success,
+            ..Default::default()
+        };
+        assert!(
+            ImportStage::ALL.into_iter().all(|stage| {
+                import_stage_status(&success, stage) == ImportStageStatus::Complete
+            })
+        );
+
+        let failure = ImportFlowState {
+            screen: ImportScreen::Failure,
+            ..Default::default()
+        };
+        assert_eq!(
+            import_stage_status(&failure, ImportStage::Source),
+            ImportStageStatus::Failed
+        );
+    }
+
+    #[test]
+    fn activity_descriptions_use_redacted_route_templates() {
+        assert_eq!(
+            ImportActivity::Commit.operation(),
+            "POST /imports/{import_id}/commit"
+        );
+        assert_eq!(
+            ImportActivity::UploadChunk.operation(),
+            "POST /imports/{import_id}/files/{file_id}/chunks"
+        );
+        assert!(!ImportActivity::Commit.operation().contains("imp_"));
+    }
+
+    #[test]
+    fn queued_import_activity_is_cleared_with_the_import_epoch() {
+        let mut app = LabelloApp::default();
+        let request = app.import_request_identity(None);
+        let request_id = request.request_id;
+
+        assert!(app.queue_command(UiCommand::ImportCapabilities { request }));
+        assert_eq!(
+            app.import_flow.active_operations.get(&request_id),
+            Some(&ImportActivity::CheckCapabilities)
+        );
+
+        app.begin_import_epoch();
+        assert!(app.import_flow.active_operations.is_empty());
+        assert!(app.runtime.commands.is_empty());
     }
 
     fn category(key: &str, source_id: &str, class_id: &str) -> ImportCategoryDraft {

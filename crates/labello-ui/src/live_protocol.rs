@@ -47,6 +47,102 @@ pub(crate) struct ImportRequestIdentity {
     pub import_id: Option<labello_domain::ImportId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImportActivity {
+    CheckCapabilities,
+    Create,
+    LoadStatus,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    SelectFolder,
+    RegisterFiles,
+    BrowseRoot,
+    BrowseSource,
+    InspectDescriptor,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    UploadChunk,
+    Seal,
+    Preflight,
+    UpdatePlan,
+    LoadDiagnostics,
+    Commit,
+    Cancel,
+    RefreshDatasets,
+}
+
+impl ImportActivity {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::CheckCapabilities => "Checking import capability",
+            Self::Create => "Registering import source",
+            Self::LoadStatus => "Refreshing import status",
+            Self::SelectFolder => "Scanning and hashing folder",
+            Self::RegisterFiles => "Registering selected files",
+            Self::BrowseRoot | Self::BrowseSource => "Loading server source",
+            Self::InspectDescriptor => "Inspecting source descriptor",
+            Self::UploadChunk => "Uploading source files",
+            Self::Seal => "Sealing source files",
+            Self::Preflight => "Running preflight checks",
+            Self::UpdatePlan => "Validating mappings",
+            Self::LoadDiagnostics => "Loading diagnostic details",
+            Self::Commit => "Building and publishing dataset",
+            Self::Cancel => "Cancelling import",
+            Self::RefreshDatasets => "Refreshing dataset catalog",
+        }
+    }
+
+    pub(crate) fn operation(self) -> &'static str {
+        match self {
+            Self::CheckCapabilities => "GET /import-capabilities",
+            Self::Create => "POST /imports",
+            Self::LoadStatus => "GET /imports/{import_id}",
+            Self::SelectFolder => "Local browser folder scan",
+            Self::RegisterFiles => "POST /imports/{import_id}/files/register",
+            Self::BrowseRoot => "POST /import-roots/{root_id}/browse",
+            Self::BrowseSource => "POST /imports/{import_id}/source/browse",
+            Self::InspectDescriptor => "POST /imports/{import_id}/yolo-descriptor/inspect",
+            Self::UploadChunk => "POST /imports/{import_id}/files/{file_id}/chunks",
+            Self::Seal => "POST /imports/{import_id}/seal",
+            Self::Preflight => "POST /imports/{import_id}/preflight",
+            Self::UpdatePlan => "PUT /imports/{import_id}/plan",
+            Self::LoadDiagnostics => "GET /imports/{import_id}/diagnostics",
+            Self::Commit => "POST /imports/{import_id}/commit",
+            Self::Cancel => "POST /imports/{import_id}/cancel",
+            Self::RefreshDatasets => "GET /datasets",
+        }
+    }
+
+    pub(crate) fn priority(self) -> u8 {
+        match self {
+            Self::LoadStatus | Self::LoadDiagnostics => 1,
+            Self::CheckCapabilities | Self::BrowseRoot | Self::BrowseSource => 2,
+            Self::InspectDescriptor | Self::RefreshDatasets => 3,
+            Self::SelectFolder | Self::RegisterFiles | Self::UploadChunk => 4,
+            Self::Create
+            | Self::Seal
+            | Self::Preflight
+            | Self::UpdatePlan
+            | Self::Commit
+            | Self::Cancel => 5,
+        }
+    }
+
+    pub(crate) fn blocks_controls(self) -> bool {
+        matches!(
+            self,
+            Self::Create
+                | Self::SelectFolder
+                | Self::RegisterFiles
+                | Self::UploadChunk
+                | Self::Seal
+                | Self::Preflight
+                | Self::UpdatePlan
+                | Self::LoadDiagnostics
+                | Self::Commit
+                | Self::Cancel
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum UiMessage {
     ImportCapabilitiesLoaded {
@@ -549,6 +645,25 @@ impl UiCommand {
             | Self::CancelImport { request, .. } => Some(request),
             _ => None,
         }
+    }
+
+    pub(crate) fn import_activity(&self) -> Option<ImportActivity> {
+        Some(match self {
+            Self::ImportCapabilities { .. } => ImportActivity::CheckCapabilities,
+            Self::CreateImport { .. } => ImportActivity::Create,
+            Self::GetImport { .. } => ImportActivity::LoadStatus,
+            Self::RegisterImportFiles { .. } => ImportActivity::RegisterFiles,
+            Self::BrowseImportRoot { .. } => ImportActivity::BrowseRoot,
+            Self::BrowseImportSource { .. } => ImportActivity::BrowseSource,
+            Self::InspectYoloDescriptor { .. } => ImportActivity::InspectDescriptor,
+            Self::SealImport { .. } => ImportActivity::Seal,
+            Self::PreflightImport { .. } => ImportActivity::Preflight,
+            Self::UpdateImportPlan { .. } => ImportActivity::UpdatePlan,
+            Self::ImportDiagnostics { .. } => ImportActivity::LoadDiagnostics,
+            Self::CommitImport { .. } => ImportActivity::Commit,
+            Self::CancelImport { .. } => ImportActivity::Cancel,
+            _ => return None,
+        })
     }
 }
 

@@ -419,6 +419,14 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
     if screen != crate::import_flow::ImportScreen::Source {
         app.import_flow.job = Some(import_job(screen));
     }
+    if screen == crate::import_flow::ImportScreen::Running {
+        app.import_flow.busy = true;
+        app.import_flow.poll_after =
+            Some(web_time::Instant::now() + web_time::Duration::from_secs(3600));
+        app.import_flow
+            .active_operations
+            .insert(u64::MAX, crate::app::ImportActivity::Commit);
+    }
     if matches!(
         screen,
         crate::import_flow::ImportScreen::Preflight
