@@ -35,8 +35,17 @@ pub(super) fn routes(state: &ApiState) -> Router<ApiState> {
         .unwrap_or_else(|| storage::ImportLimits::default().upload_chunk_bytes);
     let control = Router::new()
         .route("/import-capabilities", get(capabilities))
+        .route("/import-roots/{root_id}/browse", post(browse_import_root))
         .route("/imports", get(list_imports).post(create_import))
         .route("/imports/{import_id}", get(get_import))
+        .route(
+            "/imports/{import_id}/source/browse",
+            post(browse_import_source),
+        )
+        .route(
+            "/imports/{import_id}/yolo-descriptor/inspect",
+            post(inspect_yolo_descriptor),
+        )
         .route("/imports/{import_id}/seal", post(seal_import))
         .route("/imports/{import_id}/preflight", post(preflight_import))
         .route(
@@ -68,6 +77,26 @@ async fn capabilities(
     Ok(Json(convert_capabilities(&state, &actor.user_id)))
 }
 
+async fn browse_import_root(
+    State(state): State<ApiState>,
+    AxumPath(root_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<client::BrowseServerImportRootRequest>,
+) -> ApiResult<Json<client::ImportBrowsePage>> {
+    let actor = import_actor(&state, &headers)?;
+    ensure_import_admin(&state, &actor.user_id)?;
+    let page = require_service(&state)?
+        .browse_server_root(
+            &root_id,
+            &actor.user_id,
+            &request.relative_path,
+            request.offset as usize,
+        )
+        .await
+        .map_err(map_storage)?;
+    Ok(Json(convert_browse_page(page)))
+}
+
 async fn list_imports(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -89,7 +118,7 @@ async fn list_imports(
             Err(error) => return Err(map_storage(error)),
         }
     }
-    jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
     Ok(Json(jobs))
 }
 
@@ -389,6 +418,84 @@ async fn upload_chunk(
     };
     complete_idempotency(&state, &actor.user_id, key, &operation, &response).await?;
     Ok(Json(response))
+}
+
+async fn inspect_yolo_descriptor(
+    State(state): State<ApiState>,
+    AxumPath(import_id): AxumPath<ImportId>,
+    headers: HeaderMap,
+    Json(request): Json<client::InspectYoloDescriptorRequest>,
+) -> ApiResult<Json<client::YoloDescriptorInspection>> {
+    let actor = import_actor(&state, &headers)?;
+    ensure_import_admin(&state, &actor.user_id)?;
+    require_owned_job(&state, &import_id, &actor.user_id).await?;
+    let control = load_job_control(&state, &import_id).await?;
+    let descriptor_path =
+        resolve_source_reference(&control, &request.descriptor_file_id)?.to_string();
+    let inspection = require_service(&state)?
+        .inspect_yolo_descriptor(&import_id, &actor.user_id, &descriptor_path)
+        .await
+        .map_err(map_storage)?;
+    Ok(Json(client::YoloDescriptorInspection {
+        splits: inspection
+            .splits
+            .into_iter()
+            .map(|split| client::YoloSplitInspection {
+                name: split.name,
+                usable: split.usable,
+                issue: split.issue,
+            })
+            .collect(),
+    }))
+}
+
+async fn browse_import_source(
+    State(state): State<ApiState>,
+    AxumPath(import_id): AxumPath<ImportId>,
+    headers: HeaderMap,
+    Json(request): Json<client::BrowseImportSourceRequest>,
+) -> ApiResult<Json<client::ImportBrowsePage>> {
+    let actor = import_actor(&state, &headers)?;
+    ensure_import_admin(&state, &actor.user_id)?;
+    let mode = match request.mode {
+        client::ImportSourceBrowseMode::Descriptors => storage::ImportBrowseMode::Descriptors,
+        client::ImportSourceBrowseMode::Images => storage::ImportBrowseMode::Images,
+    };
+    let page = require_service(&state)?
+        .browse_staged_source(
+            &import_id,
+            &actor.user_id,
+            &request.relative_path,
+            request.offset as usize,
+            mode,
+        )
+        .await
+        .map_err(map_storage)?;
+    Ok(Json(convert_browse_page(page)))
+}
+
+fn convert_browse_page(page: storage::ImportBrowsePage) -> client::ImportBrowsePage {
+    client::ImportBrowsePage {
+        relative_path: page.relative_path,
+        entries: page
+            .entries
+            .into_iter()
+            .map(|entry| client::ImportBrowseEntry {
+                name: entry.name,
+                relative_path: entry.relative_path,
+                kind: match entry.kind {
+                    storage::ImportBrowseEntryKind::Directory => {
+                        client::ImportBrowseEntryKind::Directory
+                    }
+                    storage::ImportBrowseEntryKind::File => client::ImportBrowseEntryKind::File,
+                },
+                file_id: entry.file_id,
+            })
+            .collect(),
+        next_offset: page
+            .next_offset
+            .and_then(|offset| u32::try_from(offset).ok()),
+    }
 }
 
 async fn seal_import(
@@ -2551,6 +2658,7 @@ fn map_storage(error: storage::StorageError) -> ApiError {
             "source_file_limit"
             | "source_byte_limit"
             | "source_file_too_large"
+            | "server_source_browse_limit"
             | "upload_chunk_limit"
             | "selected_image_limit"
             | "annotation_limit"
@@ -2568,12 +2676,14 @@ fn map_storage(error: storage::StorageError) -> ApiError {
             | "reservation_limit"
             | "upload_concurrency_limit"
             | "build_concurrency_limit"
+            | "descriptor_inspection_busy"
             | "import_unavailable" => ApiError::Conflict(message),
             "profile_disabled"
             | "destination_name_invalid"
             | "source_incomplete"
             | "ground_truth_attestation_required"
             | "plan_not_committable"
+            | "parser_time_limit"
             | "source_file_missing"
             | "import_root_missing"
             | "upload_chunk_digest_mismatch"
@@ -2582,6 +2692,7 @@ fn map_storage(error: storage::StorageError) -> ApiError {
                 || code.starts_with("coco_")
                 || code.starts_with("image_")
                 || code.starts_with("descriptor_")
+                || code.starts_with("server_source_")
                 || code.starts_with("source_path_")
                 || code.starts_with("source_file_")
                 || code.starts_with("geometry_")
@@ -3015,6 +3126,16 @@ mod tests {
     use super::*;
     use labello_domain::{DatasetId, SCHEMA_VERSION, now};
     use serde_json::json;
+
+    #[test]
+    fn parser_time_limit_is_an_actionable_client_error() {
+        let error = map_storage(storage::StorageError::Import {
+            code: "parser_time_limit".to_string(),
+            message: "import parsing exceeded the parser time budget".to_string(),
+        });
+
+        assert!(matches!(error, ApiError::Unprocessable(_)));
+    }
 
     fn attestations() -> client::ImportAttestations {
         client::ImportAttestations {

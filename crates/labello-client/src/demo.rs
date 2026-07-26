@@ -176,6 +176,14 @@ impl ImportApi for DemoLabelloApi {
         })
     }
 
+    fn browse_server_import_root<'a>(
+        &'a self,
+        _root_id: &'a str,
+        _request: crate::BrowseServerImportRootRequest,
+    ) -> crate::ApiFuture<'a, crate::ImportBrowsePage> {
+        import_unavailable()
+    }
+
     fn create_import<'a>(
         &'a self,
         _request: crate::CreateImportRequest,
@@ -207,6 +215,22 @@ impl ImportApi for DemoLabelloApi {
         _upload: crate::ImportChunkUpload,
         _idempotency_key: &'a str,
     ) -> crate::ApiFuture<'a, crate::ImportChunkResult> {
+        import_unavailable()
+    }
+
+    fn browse_import_source<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::BrowseImportSourceRequest,
+    ) -> crate::ApiFuture<'a, crate::ImportBrowsePage> {
+        import_unavailable()
+    }
+
+    fn inspect_yolo_descriptor<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: crate::InspectYoloDescriptorRequest,
+    ) -> crate::ApiFuture<'a, crate::YoloDescriptorInspection> {
         import_unavailable()
     }
 

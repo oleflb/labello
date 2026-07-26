@@ -43,6 +43,9 @@ pub enum InspectorPreset {
     ImportFailure,
     ImportSuccess,
     ImportMultipleDescriptors,
+    ImportYoloSplits,
+    ImportServerFolderPicker,
+    ImportServerDescriptorPicker,
     ImportPartialCategories,
     ImportRecoveryBlocked,
     MigrationObject,
@@ -55,7 +58,7 @@ pub enum InspectorPreset {
 }
 
 impl InspectorPreset {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 34] = [
         Self::Annotation,
         Self::Setup,
         Self::Review,
@@ -78,6 +81,9 @@ impl InspectorPreset {
         Self::ImportFailure,
         Self::ImportSuccess,
         Self::ImportMultipleDescriptors,
+        Self::ImportYoloSplits,
+        Self::ImportServerFolderPicker,
+        Self::ImportServerDescriptorPicker,
         Self::ImportPartialCategories,
         Self::ImportRecoveryBlocked,
         Self::MigrationObject,
@@ -113,6 +119,9 @@ impl InspectorPreset {
             Self::ImportFailure => "import-failure",
             Self::ImportSuccess => "import-success",
             Self::ImportMultipleDescriptors => "import-multiple-descriptors",
+            Self::ImportYoloSplits => "import-yolo-splits",
+            Self::ImportServerFolderPicker => "import-server-folder-picker",
+            Self::ImportServerDescriptorPicker => "import-server-descriptor-picker",
             Self::ImportPartialCategories => "import-partial-categories",
             Self::ImportRecoveryBlocked => "import-recovery-blocked",
             Self::MigrationObject => "migration-object",
@@ -217,6 +226,9 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
         InspectorPreset::ImportFailure => import_preset(crate::import_flow::ImportScreen::Failure),
         InspectorPreset::ImportSuccess => import_preset(crate::import_flow::ImportScreen::Success),
         InspectorPreset::ImportMultipleDescriptors => import_multiple_descriptors_preset(),
+        InspectorPreset::ImportYoloSplits => import_yolo_splits_preset(),
+        InspectorPreset::ImportServerFolderPicker => import_server_folder_picker_preset(),
+        InspectorPreset::ImportServerDescriptorPicker => import_server_descriptor_picker_preset(),
         InspectorPreset::ImportPartialCategories => import_partial_categories_preset(),
         InspectorPreset::ImportRecoveryBlocked => import_recovery_blocked_preset(),
         InspectorPreset::MigrationObject => migration_preset(ctx, MigrationPreset::Object),
@@ -265,6 +277,79 @@ fn import_multiple_descriptors_preset() -> LabelloApp {
             ..Default::default()
         },
     ];
+    app
+}
+
+fn import_yolo_splits_preset() -> LabelloApp {
+    let mut app = import_preset(crate::import_flow::ImportScreen::Configure);
+    app.import_flow.profile = ImportProfile::UltralyticsYoloDetectV1;
+    app.import_flow.registered_paths = vec![crate::import_flow::RegisteredImportPath {
+        client_file_id: "browser-yaml".to_string(),
+        file_id: "file-yaml".to_string(),
+        relative_path: "release/dataset.yaml".to_string(),
+    }];
+    app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
+        descriptor_file_id: "file-yaml".to_string(),
+        kind: labello_client::ImportDescriptorKind::YoloDataset,
+        release: "v1".to_string(),
+        ..Default::default()
+    }];
+    app.import_flow.yolo_inspected_descriptor_file_id = Some("file-yaml".to_string());
+    app.import_flow.yolo_splits = ["train", "val", "test"]
+        .into_iter()
+        .map(|name| crate::import_flow::ImportYoloSplitDraft {
+            name: name.to_string(),
+            usable: true,
+            selected: true,
+            issue: None,
+        })
+        .collect();
+    app
+}
+
+fn import_server_folder_picker_preset() -> LabelloApp {
+    let mut app = import_preset(crate::import_flow::ImportScreen::Source);
+    app.import_flow.transport = ImportTransport::ServerDirectory;
+    app.import_flow.server_root_id = "staging".to_string();
+    app.import_flow.source_picker = crate::import_flow::ImportSourcePickerState {
+        target: Some(crate::import_flow::ImportSourcePickerTarget::DatasetFolder),
+        page: Some(labello_client::ImportBrowsePage {
+            relative_path: String::new(),
+            entries: ["release-2025", "release-2026"]
+                .into_iter()
+                .map(|name| labello_client::ImportBrowseEntry {
+                    name: name.to_string(),
+                    relative_path: name.to_string(),
+                    kind: labello_client::ImportBrowseEntryKind::Directory,
+                    file_id: None,
+                })
+                .collect(),
+            next_offset: None,
+        }),
+        ..Default::default()
+    };
+    app
+}
+
+fn import_server_descriptor_picker_preset() -> LabelloApp {
+    let mut app = import_yolo_splits_preset();
+    app.import_flow.transport = ImportTransport::ServerDirectory;
+    app.import_flow.server_root_id = "staging".to_string();
+    app.import_flow.server_relative_path = "release-2026".to_string();
+    app.import_flow.source_picker = crate::import_flow::ImportSourcePickerState {
+        target: Some(crate::import_flow::ImportSourcePickerTarget::Descriptor(0)),
+        page: Some(labello_client::ImportBrowsePage {
+            relative_path: "release-2026".to_string(),
+            entries: vec![labello_client::ImportBrowseEntry {
+                name: "dataset.yaml".to_string(),
+                relative_path: "release-2026/dataset.yaml".to_string(),
+                kind: labello_client::ImportBrowseEntryKind::File,
+                file_id: Some("file-yaml".to_string()),
+            }],
+            next_offset: None,
+        }),
+        ..Default::default()
+    };
     app
 }
 
@@ -325,6 +410,10 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
     app.import_flow.exhaustive = true;
     app.import_flow.coverage_scope = "person".to_string();
     app.import_flow.provenance = "Curated benchmark release".to_string();
+    if screen != crate::import_flow::ImportScreen::Source {
+        app.import_flow.profile = ImportProfile::CocoInstancesGtV1;
+        app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft::default()];
+    }
     app.import_flow.descriptors[0].descriptor_file_id = "file-annotations".to_string();
     app.import_flow.descriptors[0].image_root_file_id = "file-image-root".to_string();
     if screen != crate::import_flow::ImportScreen::Source {

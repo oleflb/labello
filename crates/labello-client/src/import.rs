@@ -378,6 +378,135 @@ pub enum ImportDescriptorKind {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowseServerImportRootRequest {
+    #[serde(default)]
+    pub relative_path: String,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+impl fmt::Debug for BrowseServerImportRootRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseServerImportRootRequest")
+            .field("relative_path", &"<redacted>")
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSourceBrowseMode {
+    Descriptors,
+    Images,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowseImportSourceRequest {
+    #[serde(default)]
+    pub relative_path: String,
+    #[serde(default)]
+    pub offset: u32,
+    pub mode: ImportSourceBrowseMode,
+}
+
+impl fmt::Debug for BrowseImportSourceRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseImportSourceRequest")
+            .field("relative_path", &"<redacted>")
+            .field("offset", &self.offset)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportBrowseEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBrowseEntry {
+    pub name: String,
+    pub relative_path: String,
+    pub kind: ImportBrowseEntryKind,
+    #[serde(default)]
+    pub file_id: Option<String>,
+}
+
+impl fmt::Debug for ImportBrowseEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportBrowseEntry")
+            .field("name", &"<redacted>")
+            .field("relative_path", &"<redacted>")
+            .field("kind", &self.kind)
+            .field("file_id", &self.file_id.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBrowsePage {
+    #[serde(default)]
+    pub relative_path: String,
+    #[serde(default)]
+    pub entries: Vec<ImportBrowseEntry>,
+    #[serde(default)]
+    pub next_offset: Option<u32>,
+}
+
+impl fmt::Debug for ImportBrowsePage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportBrowsePage")
+            .field("relative_path", &"<redacted>")
+            .field("entry_count", &self.entries.len())
+            .field("next_offset", &self.next_offset)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InspectYoloDescriptorRequest {
+    pub descriptor_file_id: String,
+}
+
+impl fmt::Debug for InspectYoloDescriptorRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InspectYoloDescriptorRequest")
+            .field("descriptor_file_id", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YoloDescriptorInspection {
+    #[serde(default)]
+    pub splits: Vec<YoloSplitInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YoloSplitInspection {
+    pub name: String,
+    pub usable: bool,
+    #[serde(default)]
+    pub issue: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportDescriptorSelection {
     pub descriptor_file_id: String,
     pub kind: ImportDescriptorKind,
@@ -1170,6 +1299,22 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
 
+        let error = serde_json::from_value::<InspectYoloDescriptorRequest>(serde_json::json!({
+            "descriptorFileId": "file-1",
+            "path": "private.yaml"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+
+        let error = serde_json::from_value::<BrowseImportSourceRequest>(serde_json::json!({
+            "relativePath": "release",
+            "offset": 0,
+            "mode": "descriptors",
+            "recursive": true
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+
         let error = serde_json::from_value::<CreateImportRequest>(serde_json::json!({
             "destinationDatasetId": "animals",
             "destinationName": "Animals",
@@ -1239,14 +1384,38 @@ mod tests {
             reason: MigrationExclusionReason::Other,
             note: Some("private review note".to_string()),
         };
+        let inspection = InspectYoloDescriptorRequest {
+            descriptor_file_id: "private/dataset.yaml".to_string(),
+        };
+        let browse = BrowseImportSourceRequest {
+            relative_path: "private/release".to_string(),
+            offset: 0,
+            mode: ImportSourceBrowseMode::Descriptors,
+        };
+        let browse_page = ImportBrowsePage {
+            relative_path: "private/release".to_string(),
+            entries: vec![ImportBrowseEntry {
+                name: "dataset.yaml".to_string(),
+                relative_path: "private/release/dataset.yaml".to_string(),
+                kind: ImportBrowseEntryKind::File,
+                file_id: Some("secret-file-id".to_string()),
+            }],
+            next_offset: None,
+        };
 
-        let output = format!("{upload:?} {registration:?} {exclusion:?}");
+        let output = format!(
+            "{upload:?} {registration:?} {exclusion:?} {inspection:?} {browse:?} {browse_page:?}"
+        );
         for secret in [
             "secret-digest",
             "data",
             "private/person/image.jpg",
             "secret-file-digest",
             "private review note",
+            "private/dataset.yaml",
+            "private/release",
+            "dataset.yaml",
+            "secret-file-id",
         ] {
             assert!(!output.contains(secret), "Debug output leaked {secret}");
         }

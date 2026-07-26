@@ -52,8 +52,6 @@ Only after that continue with the next issue.
 - [x] Add focused UI regression tests for migration inspector layout, one-step confirmation, and keypoint removal.
 - [x] Validate the migration workflow in the live inspector at desktop and mobile widths.
 - [x] Complete live migration exercises for TSpot and XSpot and verify that their skeleton annotations persist.
-- [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
-  - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
 - [x] Redesign and compact the left-panel workflow selector.
   - Make every workflow card narrow and the same full width within the panel.
   - Replace annotation-type text pills with representative icons.
@@ -65,10 +63,22 @@ Only after that continue with the next issue.
   - Load availability when a workspace opens or its assignment kind changes, refresh it after claim/release/complete/reopen transitions, and poll lightly so assignments released by other users become selectable.
   - Keep unknown or failed availability enabled. Grey out and skip unavailable workflows in keyboard cycling, with an accessible explanation and a manual retry path.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
-- [ ] Run focused regression checks and review the complete integration diff.
-- [ ] Clean up disposable integration processes, data, and temporary configuration files without touching unrelated services or user files.
 - [ ] Perform a full deep-dive integration test of every import UI stage and element.
   - Complete a real import using `/home/alex/Projects/hulks/datasets/nao_dataset/labello_nao_data.yaml`.
   - Inspect every import stage and element visually with screenshots.
   - Evaluate visual noise, workflow complexity, confusing naming, layout, interaction flow, visual consistency, and overall design quality.
   - Record every actionable finding as its own unchecked issue in `docs/issues.md`.
+- [x] Fix multi-split import configuration and make descriptor/split controls format-specific.
+  - The current **Add descriptor or split** action always creates another descriptor row. For YOLO, this makes **Seal source and run preflight** unavailable because the import contract requires exactly one YAML descriptor, even though that descriptor may select multiple splits.
+  - Model YOLO's descriptor and selected splits separately: show exactly one **Dataset YAML** selector followed by a server-derived **Splits to import** checkbox list. After the staged YAML is available, inspect it and check every usable discovered split by default; let the administrator uncheck splits, but require at least one selection. Do not ask users to retype YAML keys or enter comma-separated values.
+  - Add an authenticated descriptor-inspection API that resolves only registered source references and parses the private staged copy before sealing. Use the same bounded YAML parser and split-value rules as preflight so browser-folder and server-directory imports behave identically; do not duplicate YAML parsing in the WASM client or trust browser-reported descriptor contents.
+  - Treat inspection as configuration assistance rather than preflight: discover only supported split keys and whether their path values have a usable shape, while keeping image, label, category, path-resolution, and source-integrity validation authoritative after sealing.
+  - Show a local loading state while inspecting. On malformed YAML, no usable splits, an incomplete upload, or another inspection failure, retain the descriptor selection, clear stale split options, show a retryable inline explanation, and keep sealing unavailable. When the descriptor changes, clear the old result immediately and ignore late responses for the previous selection.
+  - Keep COCO configuration descriptor-oriented: show one card per annotation JSON with its split and image root, retain the optional pairing group, and label the action **Add COCO descriptor** instead of conflating descriptors and splits.
+  - Hide controls that do not apply to the selected format. In particular, do not show pairing-group or image-root inputs for YOLO.
+  - Validate entries inline as they are edited: explain invalid identifiers, missing files or image roots, duplicate descriptor references, duplicate descriptor identities, and invalid discovered split values next to the relevant control. If sealing is unavailable, show a concise actionable reason instead of only disabling the button.
+  - Preserve all selected YOLO splits from `recovery.source.selectedSplits` when restoring an in-progress import and submit one descriptor with the independently collected `selectedSplits` values. Re-inspect pre-seal jobs after the source or descriptor is reselected.
+  - Keep the split list and descriptor cards readable and operable at desktop and mobile widths, with accessible labels for add/remove actions and disabled-state explanations.
+  - Add storage coverage for split discovery and parser limits; API coverage for browser and server sources, incomplete files, authorization, malformed descriptors, and one descriptor with multiple splits; and UI coverage for default checks, unchecking, loading and retry states, stale responses, descriptor changes, irrelevant YOLO controls being absent, multiple valid COCO descriptors, and recovery of selected splits.
+- [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
+  - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.

@@ -22,8 +22,11 @@ Available presets are `annotation`, `setup`, `review`, `review-correction`,
 `dialog-admin-discard`, `setup-failure`, `admin-failure`,
 `statistics-failure`, `assignment-failure`, `image-failure`, `import-source`,
 `import-preflight`, `import-ready`, `import-running`, `import-failure`,
-`import-success`, `migration-object`, `migration-exclusion`, `migration-pass`,
-`migration-full-image`, and `migration-review`. Preset actions
+`import-success`, `import-multiple-descriptors`, `import-yolo-splits`,
+`import-server-folder-picker`, `import-server-descriptor-picker`,
+`import-partial-categories`, `import-recovery-blocked`, `migration-object`,
+`migration-exclusion`, `migration-pass`, `migration-full-image`, and
+`migration-review`. Preset actions
 are intentionally local and deterministic; restart with another preset for a
 clean inspection context.
 

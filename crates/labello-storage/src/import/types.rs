@@ -256,6 +256,45 @@ pub struct ServerDirectorySelection {
     pub relative_directory: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportBrowseMode {
+    Descriptors,
+    Images,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportBrowseEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportBrowseEntry {
+    pub name: String,
+    pub relative_path: String,
+    pub kind: ImportBrowseEntryKind,
+    pub file_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportBrowsePage {
+    pub relative_path: String,
+    pub entries: Vec<ImportBrowseEntry>,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct YoloDescriptorInspection {
+    pub splits: Vec<YoloSplitInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YoloSplitInspection {
+    pub name: String,
+    pub usable: bool,
+    pub issue: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CocoDescriptorSelection {

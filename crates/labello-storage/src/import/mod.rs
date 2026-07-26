@@ -33,7 +33,9 @@ const JOBS_DIR: &str = "jobs";
 const RESERVATIONS_DIR: &str = "reservations";
 const JOB_FILE: &str = "job.json";
 const PREFLIGHT_FILE: &str = "spool/preflight-artifacts.json";
-const PREFLIGHT_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const PREFLIGHT_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+const DESCRIPTOR_INSPECTION_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_CONCURRENT_DESCRIPTOR_INSPECTIONS: usize = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +54,7 @@ pub struct ImportService {
     import_root_handles: Arc<BTreeMap<String, Arc<File>>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     active_builds: Arc<Mutex<BTreeSet<ImportId>>>,
+    descriptor_inspection_workers: Arc<tokio::sync::Semaphore>,
     capabilities: ImportCapabilities,
     #[cfg(test)]
     fail_create_after_reservation: Arc<std::sync::atomic::AtomicBool>,
@@ -142,6 +145,9 @@ impl ImportService {
             import_root_handles: Arc::new(import_root_handles),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             active_builds: Arc::new(Mutex::new(BTreeSet::new())),
+            descriptor_inspection_workers: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_DESCRIPTOR_INSPECTIONS,
+            )),
             capabilities,
             #[cfg(test)]
             fail_create_after_reservation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -399,6 +405,145 @@ impl ImportService {
         Ok(job)
     }
 
+    pub async fn browse_server_root(
+        &self,
+        root_id: &str,
+        owner: &UserId,
+        relative_directory: &str,
+        offset: usize,
+    ) -> StorageResult<ImportBrowsePage> {
+        self.require_available()?;
+        let root = self
+            .config
+            .import_roots
+            .iter()
+            .find(|root| root.root_id == root_id)
+            .ok_or_else(|| {
+                import_error(
+                    "import_root_missing",
+                    "configured import root does not exist",
+                )
+            })?;
+        if !root.allowed_owners.is_empty() && !root.allowed_owners.contains(owner) {
+            return Err(import_error(
+                "import_root_forbidden",
+                "owner cannot use this import root",
+            ));
+        }
+        let root_handle = self
+            .import_root_handles
+            .get(root_id)
+            .cloned()
+            .ok_or_else(|| {
+                import_error(
+                    "import_root_missing",
+                    "configured import root does not exist",
+                )
+            })?;
+        let relative_directory = relative_directory.to_string();
+        let limits = self.config.limits.clone();
+        tokio::task::spawn_blocking(move || {
+            source::browse_server_directory(&root_handle, &relative_directory, offset, &limits)
+        })
+        .await
+        .map_err(|_| {
+            import_error(
+                "server_source_browse_failed",
+                "server source browser failed",
+            )
+        })?
+    }
+
+    pub async fn browse_staged_source(
+        &self,
+        import_id: &ImportId,
+        owner: &UserId,
+        relative_directory: &str,
+        offset: usize,
+        mode: ImportBrowseMode,
+    ) -> StorageResult<ImportBrowsePage> {
+        let job = self.load_owned_job(import_id, owner).await?;
+        if !matches!(
+            job.phase,
+            ImportJobPhase::Uploading | ImportJobPhase::Sealed
+        ) {
+            return Err(import_error(
+                "job_phase_invalid",
+                "job source cannot be browsed in this phase",
+            ));
+        }
+        let index = source::load_source_index(&self.job_dir(import_id)).await?;
+        source::browse_staged_source(
+            &index,
+            job.profile,
+            relative_directory,
+            offset,
+            mode,
+            &self.config.limits,
+        )
+    }
+
+    pub async fn inspect_yolo_descriptor(
+        &self,
+        import_id: &ImportId,
+        owner: &UserId,
+        descriptor_path: &str,
+    ) -> StorageResult<YoloDescriptorInspection> {
+        let job = self.load_owned_job(import_id, owner).await?;
+        if !matches!(
+            job.phase,
+            ImportJobPhase::Uploading | ImportJobPhase::Sealed
+        ) {
+            return Err(import_error(
+                "job_phase_invalid",
+                "job is not accepting descriptor inspection",
+            ));
+        }
+        if !matches!(
+            job.profile,
+            ImportProfile::UltralyticsYoloDetectV1 | ImportProfile::UltralyticsYoloPoseV1
+        ) {
+            return Err(import_error(
+                "yolo_profile_mismatch",
+                "descriptor inspection requires a YOLO import profile",
+            ));
+        }
+        let job_dir = self.job_dir(import_id);
+        let index = source::load_source_index(&job_dir).await?;
+        let limits = self.config.limits.clone();
+        let descriptor_path = descriptor_path.to_string();
+        let worker_permit = self
+            .descriptor_inspection_workers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                import_error(
+                    "descriptor_inspection_busy",
+                    "too many descriptor inspections are already running",
+                )
+            })?;
+        match tokio::time::timeout(
+            DESCRIPTOR_INSPECTION_TIME_LIMIT,
+            tokio::task::spawn_blocking(move || {
+                let _worker_permit = worker_permit;
+                let source = source::SourceAccess::new(&job_dir, &index);
+                formats::inspect_yolo_descriptor(&source, &descriptor_path, &limits)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(import_error(
+                "parser_worker_failed",
+                "descriptor parser worker terminated unexpectedly",
+            )),
+            Err(_) => Err(import_error(
+                "parser_time_limit",
+                "descriptor parsing exceeded the parser time budget",
+            )),
+        }
+    }
+
     pub async fn seal(&self, import_id: &ImportId, owner: &UserId) -> StorageResult<ImportJob> {
         let mut job = self.load_owned_job(import_id, owner).await?;
         if !matches!(
@@ -459,6 +604,7 @@ impl ImportService {
         job.phase = ImportJobPhase::Preflighting;
         job.plan_hash = None;
         job.preflight_generation = Some(generation.clone());
+        job.failure_code = None;
         self.save_job(&job).await?;
         let parse_job_dir = self.job_dir(import_id);
         let parse_job = job.clone();
@@ -501,7 +647,10 @@ impl ImportService {
                 job.phase = ImportJobPhase::Sealed;
                 job.plan_hash = None;
                 job.preflight_generation = None;
-                job.failure_code = Some(error.kind().to_string());
+                job.failure_code = Some(match &error {
+                    StorageError::Import { code, .. } => code.clone(),
+                    _ => error.kind().to_string(),
+                });
                 self.save_job(&job).await?;
                 Err(error)
             }

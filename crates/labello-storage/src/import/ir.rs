@@ -94,5 +94,7 @@ pub(crate) struct IrObject {
     pub source_segmentation: Option<serde_json::Value>,
     pub derived_bbox: bool,
     pub clipped: bool,
+    #[serde(default)]
+    pub boundary_rounding_normalized: bool,
     pub row_references: Vec<String>,
 }

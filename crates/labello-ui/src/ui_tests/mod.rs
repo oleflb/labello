@@ -87,6 +87,113 @@ fn native_task_spawner_delivers_live_messages() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    let scheduled = Rc::new(RefCell::new(None));
+    let scheduled_for_spawner = scheduled.clone();
+    app.set_native_task_spawner(move |future| {
+        *scheduled_for_spawner.borrow_mut() = Some(future);
+    });
+    app.import_flow.profile = labello_client::ImportProfile::UltralyticsYoloDetectV1;
+    app.import_flow.transport = labello_client::ImportTransport::ServerDirectory;
+    app.import_flow.job = Some(test_import_job(
+        DatasetId::from("yolo-inspection"),
+        "YOLO inspection".to_string(),
+        app.import_flow.profile,
+        app.import_flow.transport,
+    ));
+    app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
+        descriptor_file_id: "dataset.yaml".to_string(),
+        kind: labello_client::ImportDescriptorKind::YoloDataset,
+        ..Default::default()
+    }];
+
+    app.request_yolo_descriptor_inspection();
+    assert!(app.import_flow.yolo_inspection_loading);
+    app.start_next_command();
+    poll_ready_task(
+        scheduled
+            .borrow_mut()
+            .take()
+            .expect("inspection task was not scheduled"),
+    );
+    app.process_messages(&egui::Context::default());
+
+    assert_eq!(api.counts().inspect_yolo_descriptor, 1);
+    assert_eq!(
+        app.import_flow
+            .yolo_splits
+            .iter()
+            .map(|split| (split.name.as_str(), split.selected))
+            .collect::<Vec<_>>(),
+        vec![("train", true), ("val", true)]
+    );
+    assert_eq!(
+        app.import_flow.yolo_inspected_descriptor_file_id.as_deref(),
+        Some("dataset.yaml")
+    );
+
+    let import_id = app.import_flow.job.as_ref().unwrap().import_id.clone();
+    let stale_request = app.import_request_identity(Some(import_id));
+    app.runtime.active_requests.insert(stale_request.request_id);
+    app.import_flow.pending_yolo_inspection_request_id = Some(stale_request.request_id + 1);
+    app.import_flow.yolo_inspection_loading = true;
+    app.runtime
+        .tx
+        .send(UiMessage::YoloDescriptorInspected {
+            request: stale_request,
+            descriptor_file_id: "dataset.yaml".to_string(),
+            result: Ok(labello_client::YoloDescriptorInspection {
+                splits: vec![labello_client::YoloSplitInspection {
+                    name: "test".to_string(),
+                    usable: true,
+                    issue: None,
+                }],
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.import_flow.yolo_inspection_loading);
+    assert_eq!(
+        app.import_flow
+            .yolo_splits
+            .iter()
+            .map(|split| split.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["train", "val"]
+    );
+
+    let failed_request = app.import_request_identity(Some(
+        app.import_flow.job.as_ref().unwrap().import_id.clone(),
+    ));
+    app.runtime
+        .active_requests
+        .insert(failed_request.request_id);
+    app.import_flow.pending_yolo_inspection_request_id = Some(failed_request.request_id);
+    app.runtime
+        .tx
+        .send(UiMessage::YoloDescriptorInspected {
+            request: failed_request,
+            descriptor_file_id: "dataset.yaml".to_string(),
+            result: Err("The YAML is malformed.".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(!app.import_flow.yolo_inspection_loading);
+    assert!(app.import_flow.yolo_splits.is_empty());
+    assert_eq!(
+        app.import_flow.yolo_inspection_error.as_deref(),
+        Some("The YAML is malformed.")
+    );
+
+    app.request_yolo_descriptor_inspection();
+    assert!(app.import_flow.yolo_inspection_loading);
+    assert!(app.import_flow.yolo_inspection_error.is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn poll_ready_task(mut future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
@@ -356,7 +463,7 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     recovered.source_fingerprint = Some("source-recovered".to_string());
     recovered.plan_hash = Some("plan-recovered".to_string());
     recovered.preflight_report = Some(test_import_report());
-    let mut recovered_plan = contract_import_plan(recovered.import_id.clone());
+    let recovered_plan = contract_import_plan(recovered.import_id.clone());
     recovered.recovery = Some(labello_client::ImportRecoveryState {
         attestations: labello_client::ImportAttestations {
             ground_truth: true,
@@ -472,6 +579,79 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
         recovered_plan.accepted_request.as_ref()
     );
     assert!(harness.query_by_label("Restart import setup").is_none());
+
+    let mut yolo_recovered = test_import_job(
+        DatasetId::from("recovered-yolo"),
+        "Recovered YOLO".to_string(),
+        labello_client::ImportProfile::UltralyticsYoloDetectV1,
+        labello_client::ImportTransport::ServerDirectory,
+    );
+    yolo_recovered.recovery = Some(labello_client::ImportRecoveryState {
+        attestations: labello_client::ImportAttestations {
+            ground_truth: true,
+            exhaustive: true,
+            coverage_scope: Vec::new(),
+            provenance: "curated release".to_string(),
+        },
+        server_root_id: Some("staging".to_string()),
+        source: Some(labello_client::ImportSourceConfiguration {
+            source_namespace: "release".to_string(),
+            descriptors: vec![labello_client::ImportDescriptorSelection {
+                descriptor_file_id: "dataset.yaml".to_string(),
+                kind: labello_client::ImportDescriptorKind::YoloDataset,
+                release: "v1".to_string(),
+                split: "train".to_string(),
+                image_root_file_id: None,
+                pairing_group: None,
+            }],
+            selected_splits: vec!["train".to_string(), "val".to_string()],
+            selected_category_keys: Vec::new(),
+        }),
+        registered_files: Vec::new(),
+        accepted_plan: None,
+    });
+    harness
+        .state_mut()
+        .import_flow
+        .hydrate_job_contract(&yolo_recovered);
+    assert_eq!(
+        harness
+            .state()
+            .import_flow
+            .yolo_splits
+            .iter()
+            .map(|split| (split.name.as_str(), split.selected))
+            .collect::<Vec<_>>(),
+        vec![("train", true), ("val", true)]
+    );
+
+    let mut uploading_yolo = test_import_job(
+        DatasetId::from("uploading-yolo"),
+        "Uploading YOLO".to_string(),
+        labello_client::ImportProfile::UltralyticsYoloDetectV1,
+        labello_client::ImportTransport::BrowserFolder,
+    );
+    uploading_yolo.recovery = Some(labello_client::ImportRecoveryState {
+        attestations: labello_client::ImportAttestations {
+            ground_truth: true,
+            exhaustive: true,
+            coverage_scope: Vec::new(),
+            provenance: "curated release".to_string(),
+        },
+        server_root_id: None,
+        source: None,
+        registered_files: Vec::new(),
+        accepted_plan: None,
+    });
+    harness.state_mut().import_flow.descriptors = vec![Default::default()];
+    harness
+        .state_mut()
+        .import_flow
+        .hydrate_job_contract(&uploading_yolo);
+    assert_eq!(
+        harness.state().import_flow.descriptors[0].kind,
+        labello_client::ImportDescriptorKind::YoloDataset
+    );
 }
 
 #[test]
@@ -765,6 +945,62 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         2
     );
 
+    for size in [egui::vec2(1180.0, 1000.0), egui::vec2(390.0, 900.0)] {
+        let mut yolo = Harness::builder().with_size(size).build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportYoloSplits, &ctx.egui_ctx)
+        });
+        yolo.step();
+        for split in ["train", "val", "test"] {
+            assert!(
+                yolo.query_by_role_and_label(egui::accesskit::Role::CheckBox, split)
+                    .is_some(),
+                "missing {split} at {size:?}"
+            );
+        }
+        assert!(yolo.query_by_label("Pairing group (optional)").is_none());
+        assert!(yolo.query_by_label("Add COCO descriptor").is_none());
+        assert!(
+            !yolo
+                .get_by_role_and_label(
+                    egui::accesskit::Role::Button,
+                    "Seal source and run preflight"
+                )
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert_visible_controls_clamped(&yolo, size.x, size.y);
+    }
+
+    for (preset, action) in [
+        (
+            InspectorPreset::ImportServerFolderPicker,
+            "Open folder release-2026",
+        ),
+        (
+            InspectorPreset::ImportServerDescriptorPicker,
+            "Select dataset.yaml",
+        ),
+    ] {
+        for size in [
+            egui::vec2(1180.0, 900.0),
+            egui::vec2(390.0, 844.0),
+            egui::vec2(320.0, 320.0),
+        ] {
+            let mut picker = Harness::builder()
+                .with_size(size)
+                .build_eframe(|ctx| inspector_presets::build(preset, &ctx.egui_ctx));
+            picker.step();
+            assert!(
+                picker
+                    .query_by_role_and_label(egui::accesskit::Role::Window, "Server source picker")
+                    .is_some()
+            );
+            assert!(picker.query_by_label(action).is_some());
+            assert!(picker.query_by_label("Close picker").is_some());
+            assert_visible_controls_clamped(&picker, size.x, size.y);
+        }
+    }
+
     let mut recovery = Harness::builder()
         .with_size(egui::vec2(800.0, 900.0))
         .build_eframe(|ctx| {
@@ -794,6 +1030,76 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         annotated
             .query_by_label("Focus current box (guide v1)")
             .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn server_source_pickers_commit_folder_and_opaque_file_selections() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut folder = Harness::builder()
+        .with_size(egui::vec2(900.0, 800.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportServerFolderPicker, &ctx.egui_ctx)
+        });
+    folder.step();
+    assert!(folder.query_by_label("Relative source path").is_none());
+    click_accesskit_button(&mut folder, "Select folder release-2026");
+    folder.step();
+    assert_eq!(
+        folder.state().import_flow.server_relative_path,
+        "release-2026"
+    );
+    assert!(folder.state().import_flow.source_picker.target.is_none());
+
+    let mut failed_folder = Harness::builder()
+        .with_size(egui::vec2(390.0, 844.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportServerFolderPicker, &ctx.egui_ctx)
+        });
+    {
+        let picker = &mut failed_folder.state_mut().import_flow.source_picker;
+        picker.relative_path = "release-2026/nested".to_string();
+        picker.page = None;
+        picker.error = Some("This folder could not be listed.".to_string());
+    }
+    failed_folder.step();
+    click_accesskit_button(&mut failed_folder, "Select this folder");
+    failed_folder.step();
+    assert_eq!(
+        failed_folder.state().import_flow.server_relative_path,
+        "release-2026/nested"
+    );
+
+    let mut descriptor = Harness::builder()
+        .with_size(egui::vec2(900.0, 800.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportServerDescriptorPicker, &ctx.egui_ctx)
+        });
+    descriptor.step();
+    click_accesskit_button(&mut descriptor, "Select dataset.yaml");
+    descriptor.step();
+    assert_eq!(
+        descriptor.state().import_flow.descriptors[0].descriptor_file_id,
+        "file-yaml"
+    );
+    assert!(
+        descriptor
+            .state()
+            .import_flow
+            .registered_paths
+            .iter()
+            .any(|path| path.file_id == "file-yaml"
+                && path.relative_path == "release-2026/dataset.yaml")
+    );
+    assert!(
+        descriptor
+            .state()
+            .import_flow
+            .source_picker
+            .target
+            .is_none()
     );
 }
 

@@ -19,6 +19,8 @@ use crate::{StorageError, StorageResult};
 const MAX_STRUCTURED_NODES: usize = 1_000_000;
 const MAX_STRUCTURED_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_YAML_ALIASES: usize = 0;
+const YOLO_SPLIT_KEYS: [&str; 3] = ["train", "val", "test"];
+pub(super) const YOLO_BOUNDARY_ROUNDING_TOLERANCE: f64 = 1e-6;
 
 pub(super) fn preflight(
     job_dir: &std::path::Path,
@@ -255,25 +257,7 @@ fn parse_yolo(
         ));
     }
     let descriptor_path = &request.descriptor_paths[0];
-    let bytes = source.read_limited(descriptor_path, limits.descriptor_bytes)?;
-    enforce_yaml_alias_limit(&bytes, MAX_YAML_ALIASES)?;
-    let yaml_value: serde_yaml_ng::Value = serde_yaml_ng::from_slice(&bytes).map_err(|error| {
-        import_error(
-            "yolo_yaml_invalid",
-            format!("YOLO descriptor is invalid: {error}"),
-        )
-    })?;
-    validate_yaml_value(&yaml_value, limits.structured_data_nesting, 1, &mut 0)?;
-    let yaml: Value = serde_json::to_value(yaml_value).map_err(|error| {
-        import_error(
-            "yolo_yaml_invalid",
-            format!("YOLO descriptor contains unsupported mapping keys: {error}"),
-        )
-    })?;
-    enforce_value_depth(&yaml, limits.structured_data_nesting, "yolo_yaml_nesting")?;
-    let object = yaml
-        .as_object()
-        .ok_or_else(|| import_error("yolo_yaml_invalid", "YOLO descriptor must be a mapping"))?;
+    let object = parse_yolo_mapping(source, descriptor_path, limits)?;
     if object.contains_key("download") {
         diagnostics.add(
             "yolo_download_ignored",
@@ -512,12 +496,20 @@ fn parse_yolo(
                             .iter()
                             .map(|value| parse_finite(value, "yolo_number_invalid"))
                             .collect::<StorageResult<Vec<_>>>()?;
-                        let mut bbox = F64Box {
-                            x: numbers[0] - numbers[2] / 2.0,
-                            y: numbers[1] - numbers[3] / 2.0,
-                            width: numbers[2],
-                            height: numbers[3],
-                        };
+                        let (mut bbox, boundary_normalized) = normalize_yolo_bbox_boundary(
+                            numbers[0], numbers[1], numbers[2], numbers[3],
+                        );
+                        if boundary_normalized {
+                            diagnostics.add(
+                                "yolo_boundary_rounding_normalized",
+                                DiagnosticSeverity::Info,
+                                "tiny YOLO boundary rounding was normalized to the image edge",
+                                false,
+                                false,
+                                false,
+                                Some(example_line(&label_path, line_index)),
+                            );
+                        }
                         let clipped = validate_or_clip_box(
                             &mut bbox,
                             request.policies.geometry_bounds,
@@ -612,6 +604,7 @@ fn parse_yolo(
                             source_segmentation: None,
                             derived_bbox: false,
                             clipped,
+                            boundary_rounding_normalized: boundary_normalized,
                             row_references: vec![format!("{}:{}", label_path, row_ordinal)],
                         });
                         Ok(())
@@ -649,6 +642,64 @@ fn parse_yolo(
         }
     }
     Ok(ir)
+}
+
+fn parse_yolo_mapping(
+    source: &SourceAccess<'_>,
+    descriptor_path: &str,
+    limits: &ImportLimits,
+) -> StorageResult<serde_json::Map<String, Value>> {
+    let bytes = source.read_limited(descriptor_path, limits.descriptor_bytes)?;
+    enforce_yaml_alias_limit(&bytes, MAX_YAML_ALIASES)?;
+    let yaml_value: serde_yaml_ng::Value = serde_yaml_ng::from_slice(&bytes).map_err(|error| {
+        import_error(
+            "yolo_yaml_invalid",
+            format!("YOLO descriptor is invalid: {error}"),
+        )
+    })?;
+    validate_yaml_value(&yaml_value, limits.structured_data_nesting, 1, &mut 0)?;
+    let yaml: Value = serde_json::to_value(yaml_value).map_err(|error| {
+        import_error(
+            "yolo_yaml_invalid",
+            format!("YOLO descriptor contains unsupported mapping keys: {error}"),
+        )
+    })?;
+    enforce_value_depth(&yaml, limits.structured_data_nesting, "yolo_yaml_nesting")?;
+    yaml.as_object()
+        .cloned()
+        .ok_or_else(|| import_error("yolo_yaml_invalid", "YOLO descriptor must be a mapping"))
+}
+
+pub(super) fn inspect_yolo_descriptor(
+    source: &SourceAccess<'_>,
+    descriptor_path: &str,
+    limits: &ImportLimits,
+) -> StorageResult<YoloDescriptorInspection> {
+    let object = parse_yolo_mapping(source, descriptor_path, limits)?;
+    let splits = YOLO_SPLIT_KEYS
+        .into_iter()
+        .filter_map(|name| {
+            let value = object.get(name)?;
+            Some(match yaml_strings(value) {
+                Ok(_) => YoloSplitInspection {
+                    name: name.to_string(),
+                    usable: true,
+                    issue: None,
+                },
+                Err(StorageError::Import { message, .. }) => YoloSplitInspection {
+                    name: name.to_string(),
+                    usable: false,
+                    issue: Some(message),
+                },
+                Err(_) => YoloSplitInspection {
+                    name: name.to_string(),
+                    usable: false,
+                    issue: Some("YOLO split value is invalid".to_string()),
+                },
+            })
+        })
+        .collect();
+    Ok(YoloDescriptorInspection { splits })
 }
 
 fn parse_coco(
@@ -1090,6 +1141,7 @@ fn parse_coco(
                 source_segmentation: segmentation.cloned(),
                 derived_bbox: false,
                 clipped,
+                boundary_rounding_normalized: false,
                 row_references: vec![format!("{}#{}", selection.descriptor_path, id)],
             };
             if let Some(existing) = object_payloads.get_mut(&object_key) {
@@ -3106,22 +3158,78 @@ fn validate_or_clip_box(
     Ok(true)
 }
 
+fn normalize_yolo_bbox_boundary(
+    center_x: f64,
+    center_y: f64,
+    width: f64,
+    height: f64,
+) -> (F64Box, bool) {
+    let left = center_x - width / 2.0;
+    let right = center_x + width / 2.0;
+    let top = center_y - height / 2.0;
+    let bottom = center_y + height / 2.0;
+    let reconstructed_right = left + width;
+    let reconstructed_bottom = top + height;
+    let outside =
+        left < 0.0 || top < 0.0 || reconstructed_right > 1.0 || reconstructed_bottom > 1.0;
+    let comparison_margin = f64::EPSILON * 8.0;
+    let lower_bound = -YOLO_BOUNDARY_ROUNDING_TOLERANCE - comparison_margin;
+    let upper_bound = 1.0 + YOLO_BOUNDARY_ROUNDING_TOLERANCE + comparison_margin;
+    let within_rounding_tolerance = left >= lower_bound
+        && top >= lower_bound
+        && right <= upper_bound
+        && bottom <= upper_bound
+        && reconstructed_right <= upper_bound
+        && reconstructed_bottom <= upper_bound;
+    if outside && within_rounding_tolerance {
+        let left = left.clamp(0.0, 1.0);
+        let right = right.clamp(0.0, 1.0);
+        let top = top.clamp(0.0, 1.0);
+        let bottom = bottom.clamp(0.0, 1.0);
+        return (
+            F64Box {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            },
+            true,
+        );
+    }
+    (
+        F64Box {
+            x: left,
+            y: top,
+            width,
+            height,
+        },
+        false,
+    )
+}
+
 fn yaml_strings(value: &Value) -> StorageResult<Vec<String>> {
-    match value {
-        Value::String(value) => Ok(vec![value.clone()]),
-        Value::Array(values) => values
+    let values = match value {
+        Value::String(value) => vec![value.clone()],
+        Value::Array(values) if !values.is_empty() => values
             .iter()
             .map(|value| {
                 value.as_str().map(str::to_string).ok_or_else(|| {
                     import_error("yolo_split_invalid", "YOLO split entries must be strings")
                 })
             })
-            .collect(),
+            .collect::<StorageResult<Vec<_>>>()?,
         _ => Err(import_error(
             "yolo_split_invalid",
-            "YOLO split must be a string or list of strings",
-        )),
+            "YOLO split must be a nonempty string or list of strings",
+        ))?,
+    };
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(import_error(
+            "yolo_split_invalid",
+            "YOLO split paths must be nonempty strings",
+        ));
     }
+    Ok(values)
 }
 
 fn required_array<'a>(

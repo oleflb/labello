@@ -360,6 +360,21 @@ impl ImportApi for HttpLabelloApi {
         })
     }
 
+    fn browse_server_import_root<'a>(
+        &'a self,
+        root_id: &'a str,
+        request: crate::BrowseServerImportRootRequest,
+    ) -> crate::ApiFuture<'a, crate::ImportBrowsePage> {
+        Box::pin(async move {
+            let root_id = urlencoding::encode(root_id);
+            Self::send_json(
+                self.request(Method::POST, &format!("/import-roots/{root_id}/browse"))?,
+                &request,
+            )
+            .await
+        })
+    }
+
     fn create_import<'a>(
         &'a self,
         request: crate::CreateImportRequest,
@@ -428,6 +443,37 @@ impl ImportApi for HttpLabelloApi {
                 .send()
                 .await?;
             Self::json(response).await
+        })
+    }
+
+    fn browse_import_source<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::BrowseImportSourceRequest,
+    ) -> crate::ApiFuture<'a, crate::ImportBrowsePage> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(Method::POST, &format!("/imports/{import_id}/source/browse"))?,
+                &request,
+            )
+            .await
+        })
+    }
+
+    fn inspect_yolo_descriptor<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::InspectYoloDescriptorRequest,
+    ) -> crate::ApiFuture<'a, crate::YoloDescriptorInspection> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+                )?,
+                &request,
+            )
+            .await
         })
     }
 
@@ -1505,10 +1551,13 @@ mod tests {
         let responses = vec![
             session.to_string(),
             r#"{"available":true}"#.to_string(),
+            r#"{"relativePath":"","entries":[]}"#.to_string(),
             job.to_string(),
             job.to_string(),
+            r#"{"relativePath":"","entries":[]}"#.to_string(),
             r#"{"files":[]}"#.to_string(),
             r#"{"fileId":"opaque/file","acceptedOffset":4,"complete":true}"#.to_string(),
+            r#"{"splits":[{"name":"train","usable":true}]}"#.to_string(),
             r#"{"importId":"imp_1","sourceFingerprint":"source"}"#.to_string(),
             job.to_string(),
             r#"{"importId":"imp_1","sourceFingerprint":"source","planHash":"plan","report":{}}"#
@@ -1532,6 +1581,15 @@ mod tests {
         let api = HttpLabelloApi::new(format!("http://{address}")).unwrap();
         api.local_admin_login().await.unwrap();
         api.import_capabilities().await.unwrap();
+        api.browse_server_import_root(
+            "staging",
+            crate::BrowseServerImportRootRequest {
+                relative_path: String::new(),
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
         let import_id = ImportId::from("imp_1");
         let create = crate::CreateImportRequest {
             destination_dataset_id: DatasetId::from("animals"),
@@ -1547,6 +1605,16 @@ mod tests {
         };
         api.create_import(create, "create-key").await.unwrap();
         api.get_import(&import_id).await.unwrap();
+        api.browse_import_source(
+            &import_id,
+            crate::BrowseImportSourceRequest {
+                relative_path: String::new(),
+                offset: 0,
+                mode: crate::ImportSourceBrowseMode::Descriptors,
+            },
+        )
+        .await
+        .unwrap();
         api.register_import_files(
             &import_id,
             crate::RegisterImportFilesRequest { files: vec![] },
@@ -1564,6 +1632,14 @@ mod tests {
                 bytes: b"DATA".to_vec(),
             },
             "chunk-key",
+        )
+        .await
+        .unwrap();
+        api.inspect_yolo_descriptor(
+            &import_id,
+            crate::InspectYoloDescriptorRequest {
+                descriptor_file_id: "opaque/file".to_string(),
+            },
         )
         .await
         .unwrap();
@@ -1651,10 +1727,13 @@ mod tests {
         let starts = [
             "POST /auth/local-admin ",
             "GET /import-capabilities ",
+            "POST /import-roots/staging/browse ",
             "POST /imports ",
             "GET /imports/imp_1 ",
+            "POST /imports/imp_1/source/browse ",
             "POST /imports/imp_1/files/register ",
             "POST /imports/imp_1/files/opaque%2Ffile/chunks ",
+            "POST /imports/imp_1/yolo-descriptor/inspect ",
             "POST /imports/imp_1/seal ",
             "POST /imports/imp_1/preflight ",
             "PUT /imports/imp_1/plan ",
@@ -1667,25 +1746,37 @@ mod tests {
             assert!(headers.starts_with(start), "unexpected request: {headers}");
         }
         for (index, key) in [
-            (2, "create-key"),
-            (4, "register-key"),
-            (5, "chunk-key"),
-            (6, "seal-key"),
-            (7, "preflight-key"),
-            (8, "plan-key"),
-            (10, "commit-key"),
-            (11, "cancel-key"),
-            (12, "migration-key"),
+            (3, "create-key"),
+            (6, "register-key"),
+            (7, "chunk-key"),
+            (9, "seal-key"),
+            (10, "preflight-key"),
+            (11, "plan-key"),
+            (13, "commit-key"),
+            (14, "cancel-key"),
+            (15, "migration-key"),
         ] {
             let headers = requests[index].0.to_ascii_lowercase();
             assert!(headers.contains("x-csrf-token: csrf-import\r\n"));
             assert!(headers.contains(&format!("idempotency-key: {key}\r\n")));
         }
-        let chunk_headers = requests[5].0.to_ascii_lowercase();
+        let chunk_headers = requests[7].0.to_ascii_lowercase();
         assert!(chunk_headers.contains("content-type: application/octet-stream\r\n"));
         assert!(chunk_headers.contains("upload-offset: 0\r\n"));
         assert!(chunk_headers.contains("upload-length: 4\r\n"));
         assert!(chunk_headers.contains("digest: blake3=test\r\n"));
-        assert_eq!(requests[5].1, b"DATA");
+        assert_eq!(requests[7].1, b"DATA");
+        let inspection_headers = requests[8].0.to_ascii_lowercase();
+        assert!(inspection_headers.contains("x-csrf-token: csrf-import\r\n"));
+        assert!(!inspection_headers.contains("idempotency-key:"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[8].1).unwrap(),
+            serde_json::json!({ "descriptorFileId": "opaque/file" })
+        );
+        for index in [2, 5] {
+            let headers = requests[index].0.to_ascii_lowercase();
+            assert!(headers.contains("x-csrf-token: csrf-import\r\n"));
+            assert!(!headers.contains("idempotency-key:"));
+        }
     }
 }

@@ -150,6 +150,7 @@ impl LabelloApp {
                             }
                             #[cfg(target_arch = "wasm32")]
                             {
+                                let mut yolo_descriptor_reference_changed = false;
                                 for file in &registered.files {
                                     if let Some(path) = self
                                         .import_flow
@@ -159,12 +160,119 @@ impl LabelloApp {
                                     {
                                         path.file_id = file.file_id.clone();
                                     }
+                                    for descriptor in &mut self.import_flow.descriptors {
+                                        if descriptor.descriptor_file_id == file.client_file_id {
+                                            descriptor.descriptor_file_id = file.file_id.clone();
+                                            yolo_descriptor_reference_changed = true;
+                                        }
+                                        if descriptor.image_root_file_id == file.client_file_id {
+                                            descriptor.image_root_file_id = file.file_id.clone();
+                                        }
+                                    }
                                 }
+                                if yolo_descriptor_reference_changed
+                                    && matches!(
+                                        self.import_flow.profile,
+                                        labello_client::ImportProfile::UltralyticsYoloDetectV1
+                                            | labello_client::ImportProfile::UltralyticsYoloPoseV1
+                                    )
+                                {
+                                    self.import_flow.invalidate_yolo_inspection();
+                                }
+                                let inspect_completed_yolo = yolo_descriptor_reference_changed
+                                    && self.import_flow.descriptors.first().is_some_and(
+                                        |descriptor| {
+                                            registered.files.iter().any(|file| {
+                                                file.file_id == descriptor.descriptor_file_id
+                                                    && file.complete
+                                            })
+                                        },
+                                    );
                                 self.import_flow.browser_uploads = registered.files;
                                 self.upload_next_import_chunk();
+                                if inspect_completed_yolo {
+                                    self.request_yolo_descriptor_inspection_after_upload();
+                                }
                             }
                         }
                         Err(error) => self.import_flow.error = Some(error),
+                    }
+                }
+                UiMessage::ImportSourceBrowsed { request, result } => {
+                    if self.import_flow.source_picker.pending_request_id != Some(request.request_id)
+                    {
+                        continue;
+                    }
+                    self.import_flow.source_picker.pending_request_id = None;
+                    self.import_flow.source_picker.loading = false;
+                    match result {
+                        Ok(mut page) => {
+                            if self.import_flow.source_picker.pending_append
+                                && let Some(current) = self.import_flow.source_picker.page.as_mut()
+                                && current.relative_path == page.relative_path
+                            {
+                                current.entries.append(&mut page.entries);
+                                current.next_offset = page.next_offset;
+                            } else {
+                                self.import_flow.source_picker.page = Some(page);
+                            }
+                            self.import_flow.source_picker.error = None;
+                        }
+                        Err(error) => self.import_flow.source_picker.error = Some(error),
+                    }
+                    self.import_flow.source_picker.pending_append = false;
+                }
+                UiMessage::YoloDescriptorInspected {
+                    request,
+                    descriptor_file_id,
+                    result,
+                } => {
+                    let current_descriptor = self
+                        .import_flow
+                        .descriptors
+                        .first()
+                        .map(|descriptor| descriptor.descriptor_file_id.trim());
+                    if self.import_flow.pending_yolo_inspection_request_id
+                        != Some(request.request_id)
+                        || current_descriptor != Some(descriptor_file_id.trim())
+                    {
+                        continue;
+                    }
+                    self.import_flow.pending_yolo_inspection_request_id = None;
+                    self.import_flow.yolo_inspection_loading = false;
+                    match result {
+                        Ok(inspection) => {
+                            self.import_flow.yolo_splits = inspection
+                                .splits
+                                .into_iter()
+                                .map(|split| crate::import_flow::ImportYoloSplitDraft {
+                                    name: split.name,
+                                    usable: split.usable,
+                                    selected: split.usable,
+                                    issue: split.issue,
+                                })
+                                .collect();
+                            self.import_flow.yolo_inspected_descriptor_file_id =
+                                Some(descriptor_file_id);
+                            self.import_flow.yolo_inspection_error = self
+                                .import_flow
+                                .yolo_splits
+                                .iter()
+                                .all(|split| !split.usable)
+                                .then(|| {
+                                    "The YAML does not define a usable train, val, or test split."
+                                        .to_string()
+                                });
+                        }
+                        Err(error) => {
+                            self.import_flow.yolo_splits.clear();
+                            self.import_flow.yolo_inspected_descriptor_file_id = None;
+                            self.import_flow.yolo_inspection_error = Some(error);
+                        }
+                    }
+                    if self.import_flow.yolo_inspection_retry_after_current {
+                        self.import_flow.yolo_inspection_retry_after_current = false;
+                        self.request_yolo_descriptor_inspection();
                     }
                 }
                 UiMessage::ImportChunkUploaded {
@@ -175,6 +283,18 @@ impl LabelloApp {
                     self.import_flow.busy = false;
                     match result {
                         Ok(_chunk) => {
+                            #[cfg(target_arch = "wasm32")]
+                            let inspect_completed_yolo =
+                                _chunk.complete
+                                    && matches!(
+                                        self.import_flow.profile,
+                                        labello_client::ImportProfile::UltralyticsYoloDetectV1
+                                            | labello_client::ImportProfile::UltralyticsYoloPoseV1
+                                    )
+                                    && self.import_flow.descriptors.first().is_some_and(
+                                        |descriptor| descriptor.descriptor_file_id == _file_id,
+                                    )
+                                    && self.import_flow.yolo_inspected_descriptor_file_id.is_none();
                             #[cfg(target_arch = "wasm32")]
                             if let Some(file) = self
                                 .import_flow
@@ -204,6 +324,10 @@ impl LabelloApp {
                             }
                             #[cfg(target_arch = "wasm32")]
                             self.upload_next_import_chunk();
+                            #[cfg(target_arch = "wasm32")]
+                            if inspect_completed_yolo {
+                                self.request_yolo_descriptor_inspection_after_upload();
+                            }
                         }
                         Err(error) => self.import_flow.error = Some(error),
                     }
@@ -1094,6 +1218,47 @@ impl LabelloApp {
                         .map_err(|error| error.to_string()),
                 }
             }),
+            UiCommand::BrowseImportRoot {
+                request,
+                root_id,
+                body,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportSourceBrowsed {
+                    request,
+                    result: api
+                        .browse_server_import_root(&root_id, body)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::BrowseImportSource {
+                request,
+                import_id,
+                body,
+            } => self.spawn_import_message(async move {
+                UiMessage::ImportSourceBrowsed {
+                    request,
+                    result: api
+                        .browse_import_source(&import_id, body)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
+            UiCommand::InspectYoloDescriptor {
+                request,
+                import_id,
+                descriptor_file_id,
+                body,
+            } => self.spawn_import_message(async move {
+                UiMessage::YoloDescriptorInspected {
+                    request,
+                    descriptor_file_id,
+                    result: api
+                        .inspect_yolo_descriptor(&import_id, body)
+                        .await
+                        .map_err(|error| error.to_string()),
+                }
+            }),
             UiCommand::SealImport {
                 request,
                 import_id,
@@ -1640,6 +1805,16 @@ impl LabelloApp {
             UiCommand::ImportCapabilities { .. } => {
                 self.import_flow.capabilities_loading = false;
                 self.import_flow.capabilities_error = Some(error.to_string());
+            }
+            UiCommand::BrowseImportRoot { .. } | UiCommand::BrowseImportSource { .. } => {
+                self.import_flow.source_picker.loading = false;
+                self.import_flow.source_picker.pending_request_id = None;
+                self.import_flow.source_picker.error = Some(error.to_string());
+            }
+            UiCommand::InspectYoloDescriptor { .. } => {
+                self.import_flow.yolo_inspection_loading = false;
+                self.import_flow.pending_yolo_inspection_request_id = None;
+                self.import_flow.yolo_inspection_error = Some(error.to_string());
             }
             UiCommand::CreateImport { .. }
             | UiCommand::GetImport { .. }

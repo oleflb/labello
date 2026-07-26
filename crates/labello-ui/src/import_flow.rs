@@ -28,6 +28,32 @@ pub(crate) struct ImportDescriptorDraft {
     pub pairing_group: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportYoloSplitDraft {
+    pub name: String,
+    pub usable: bool,
+    pub selected: bool,
+    pub issue: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImportSourcePickerTarget {
+    DatasetFolder,
+    Descriptor(usize),
+    CocoImageRoot(usize),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ImportSourcePickerState {
+    pub target: Option<ImportSourcePickerTarget>,
+    pub relative_path: String,
+    pub page: Option<labello_client::ImportBrowsePage>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub pending_request_id: Option<u64>,
+    pub pending_append: bool,
+}
+
 impl Default for ImportDescriptorDraft {
     fn default() -> Self {
         Self {
@@ -146,12 +172,19 @@ pub(crate) struct ImportFlowState {
     pub transport: ImportTransport,
     pub server_root_id: String,
     pub server_relative_path: String,
+    pub source_picker: ImportSourcePickerState,
     pub ground_truth: bool,
     pub exhaustive: bool,
     pub coverage_scope: String,
     pub provenance: String,
     pub source_namespace: String,
     pub descriptors: Vec<ImportDescriptorDraft>,
+    pub yolo_splits: Vec<ImportYoloSplitDraft>,
+    pub yolo_inspection_loading: bool,
+    pub yolo_inspection_error: Option<String>,
+    pub yolo_inspected_descriptor_file_id: Option<String>,
+    pub pending_yolo_inspection_request_id: Option<u64>,
+    pub yolo_inspection_retry_after_current: bool,
     pub registered_paths: Vec<RegisteredImportPath>,
     pub categories: Vec<ImportCategoryDraft>,
     pub direct_bounding_boxes: bool,
@@ -196,16 +229,23 @@ impl Default for ImportFlowState {
             plan: None,
             destination_id: String::new(),
             destination_name: String::new(),
-            profile: ImportProfile::CocoInstancesGtV1,
+            profile: ImportProfile::UltralyticsYoloDetectV1,
             transport: ImportTransport::BrowserFolder,
             server_root_id: String::new(),
             server_relative_path: String::new(),
+            source_picker: Default::default(),
             ground_truth: false,
             exhaustive: false,
             coverage_scope: String::new(),
             provenance: String::new(),
             source_namespace: "source".to_string(),
-            descriptors: vec![ImportDescriptorDraft::default()],
+            descriptors: vec![descriptor_draft(ImportProfile::UltralyticsYoloDetectV1)],
+            yolo_splits: Vec::new(),
+            yolo_inspection_loading: false,
+            yolo_inspection_error: None,
+            yolo_inspected_descriptor_file_id: None,
+            pending_yolo_inspection_request_id: None,
+            yolo_inspection_retry_after_current: false,
             registered_paths: Vec::new(),
             categories: Vec::new(),
             direct_bounding_boxes: true,
@@ -284,6 +324,7 @@ impl ImportFlowState {
         }
         if self.profile != previous_profile {
             self.descriptors = vec![descriptor_draft(self.profile)];
+            self.invalidate_yolo_inspection();
             self.categories.clear();
             self.direct_bounding_boxes = true;
             self.direct_skeletons = profile_has_skeletons(self.profile);
@@ -317,6 +358,10 @@ impl ImportFlowState {
                 },
             })
             .collect();
+        if recovery.source.is_none() {
+            self.descriptors = vec![descriptor_draft(self.profile)];
+            self.invalidate_yolo_inspection();
+        }
         if let Some(source) = recovery.source.as_ref() {
             self.source_namespace = source.source_namespace.clone();
             self.descriptors = source
@@ -331,6 +376,26 @@ impl ImportFlowState {
                     pairing_group: descriptor.pairing_group.clone().unwrap_or_default(),
                 })
                 .collect();
+            if !is_coco_profile(self.profile) {
+                self.yolo_splits = source
+                    .selected_splits
+                    .iter()
+                    .map(|name| ImportYoloSplitDraft {
+                        name: name.clone(),
+                        usable: true,
+                        selected: true,
+                        issue: None,
+                    })
+                    .collect();
+                self.yolo_inspected_descriptor_file_id = self
+                    .descriptors
+                    .first()
+                    .map(|descriptor| descriptor.descriptor_file_id.clone());
+                self.yolo_inspection_loading = false;
+                self.yolo_inspection_error = None;
+                self.pending_yolo_inspection_request_id = None;
+                self.yolo_inspection_retry_after_current = false;
+            }
         }
         let Some(plan) = recovery.accepted_plan.as_ref() else {
             self.plan = None;
@@ -414,6 +479,15 @@ impl ImportFlowState {
         self.accepted_plan_request = accepted;
         self.plan = Some(plan.clone());
     }
+
+    pub(crate) fn invalidate_yolo_inspection(&mut self) {
+        self.yolo_splits.clear();
+        self.yolo_inspection_loading = false;
+        self.yolo_inspection_error = None;
+        self.yolo_inspected_descriptor_file_id = None;
+        self.pending_yolo_inspection_request_id = None;
+        self.yolo_inspection_retry_after_current = false;
+    }
 }
 
 impl LabelloApp {
@@ -489,6 +563,7 @@ impl LabelloApp {
             ui.set_min_width(ui.available_width());
             self.import_flow_contents(ui, &capabilities);
         });
+        self.import_source_picker_modal(ui.ctx());
     }
 
     fn import_flow_contents(&mut self, ui: &mut egui::Ui, capabilities: &ImportCapabilities) {
@@ -596,6 +671,7 @@ impl LabelloApp {
             self.import_flow.geometry_policy = ImportGeometryPolicy::Direct;
             self.import_flow.categories.clear();
             self.import_flow.descriptors = vec![descriptor_draft(self.import_flow.profile)];
+            self.import_flow.invalidate_yolo_inspection();
             self.import_flow.direct_bounding_boxes = true;
             self.import_flow.direct_skeletons = profile_has_skeletons(self.import_flow.profile);
             self.import_flow.target_geometry = match self.import_flow.profile {
@@ -621,8 +697,10 @@ impl LabelloApp {
         if self.import_flow.transport != previous_transport {
             self.import_flow.registered_paths.clear();
             self.import_flow.descriptors = vec![descriptor_draft(self.import_flow.profile)];
+            self.import_flow.invalidate_yolo_inspection();
         }
         if self.import_flow.transport == ImportTransport::ServerDirectory {
+            let previous_root = self.import_flow.server_root_id.clone();
             egui::ComboBox::from_label("Server import root")
                 .selected_text(
                     capabilities
@@ -641,12 +719,32 @@ impl LabelloApp {
                         );
                     }
                 });
-            theme::labeled_text_field(
+            if self.import_flow.server_root_id != previous_root {
+                self.import_flow.server_relative_path.clear();
+                self.import_flow.source_picker = Default::default();
+            }
+            status_row(
                 ui,
-                "Relative source path",
-                &mut self.import_flow.server_relative_path,
-                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                "Dataset folder",
+                match self.import_flow.server_relative_path.as_str() {
+                    "" => "Not selected".to_string(),
+                    "." => "/".to_string(),
+                    path => path.to_string(),
+                },
             );
+            if ui
+                .add_enabled(
+                    !self.import_flow.server_root_id.is_empty(),
+                    egui::Button::new(if self.import_flow.server_relative_path.is_empty() {
+                        "Choose dataset folder"
+                    } else {
+                        "Change dataset folder"
+                    }),
+                )
+                .clicked()
+            {
+                self.open_import_source_picker(ImportSourcePickerTarget::DatasetFolder);
+            }
         } else {
             theme::inline_message(
                 ui,
@@ -738,12 +836,13 @@ impl LabelloApp {
         let browser_transport = self.import_flow.transport == ImportTransport::BrowserFolder;
         let profile = self.import_flow.profile;
         let coco = is_coco_profile(profile);
-        let descriptor_count = self.import_flow.descriptors.len();
-        let mut remove = None;
-        for (index, descriptor) in self.import_flow.descriptors.iter_mut().enumerate() {
-            ui.push_id(("import-descriptor", index), |ui| {
-                ui.label(RichText::new(format!("Descriptor {}", index + 1)).strong());
-                if coco {
+        let mut open_picker = None;
+        if coco {
+            let descriptor_count = self.import_flow.descriptors.len();
+            let mut remove = None;
+            for (index, descriptor) in self.import_flow.descriptors.iter_mut().enumerate() {
+                ui.push_id(("import-descriptor", index), |ui| {
+                    ui.label(RichText::new(format!("Descriptor {}", index + 1)).strong());
                     egui::ComboBox::from_label("Descriptor kind")
                         .selected_text(descriptor_kind_label(descriptor.kind))
                         .show_ui(ui, |ui| {
@@ -760,78 +859,173 @@ impl LabelloApp {
                                 );
                             }
                         });
-                } else {
-                    status_row(ui, "Descriptor kind", descriptor_kind_label(descriptor.kind));
-                }
-                source_file_selector(
+                    if browser_transport {
+                        source_file_selector(
+                            ui,
+                            "Descriptor file",
+                            &mut descriptor.descriptor_file_id,
+                            &browser_paths,
+                            |path| descriptor_path_matches(profile, path),
+                        );
+                    } else if server_source_file_picker(
+                        ui,
+                        "Descriptor file",
+                        &descriptor.descriptor_file_id,
+                        &browser_paths,
+                        "Choose descriptor file",
+                    ) {
+                        open_picker = Some(ImportSourcePickerTarget::Descriptor(index));
+                    }
+                    theme::labeled_text_field(
+                        ui,
+                        "Release",
+                        &mut descriptor.release,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    );
+                    theme::labeled_text_field(
+                        ui,
+                        "Split",
+                        &mut descriptor.split,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    );
+                    theme::labeled_text_field(
+                        ui,
+                        "Pairing group (optional)",
+                        &mut descriptor.pairing_group,
+                        theme::COMPACT_TEXT_FIELD_HEIGHT,
+                    );
+                    if browser_transport {
+                        source_file_selector(
+                            ui,
+                            "Exact COCO image root",
+                            &mut descriptor.image_root_file_id,
+                            &browser_paths,
+                            is_image_path,
+                        );
+                    } else if server_source_file_picker(
+                        ui,
+                        "Exact COCO image root",
+                        &descriptor.image_root_file_id,
+                        &browser_paths,
+                        "Choose image in root",
+                    ) {
+                        open_picker = Some(ImportSourcePickerTarget::CocoImageRoot(index));
+                    }
+                    ui.small(
+                        "Select a registered image directly inside the exact root referenced by COCO file_name values.",
+                    );
+                    if descriptor_count > 1 && ui.button("Remove descriptor").clicked() {
+                        remove = Some(index);
+                    }
+                    ui.separator();
+                });
+            }
+            if let Some(index) = remove {
+                self.import_flow.descriptors.remove(index);
+                self.import_flow.source_picker = Default::default();
+            }
+            if ui.button("Add COCO descriptor").clicked() {
+                self.import_flow
+                    .descriptors
+                    .push(descriptor_draft(self.import_flow.profile));
+            }
+        } else {
+            if self.import_flow.descriptors.len() != 1 {
+                self.import_flow.descriptors = vec![descriptor_draft(profile)];
+                self.import_flow.invalidate_yolo_inspection();
+            }
+            let mut descriptor_changed = false;
+            let mut inspect_after_edit = false;
+            if let Some(descriptor) = self.import_flow.descriptors.first_mut() {
+                ui.label(RichText::new("YOLO source").strong());
+                let previous = descriptor.descriptor_file_id.clone();
+                if browser_transport {
+                    inspect_after_edit = source_file_selector(
+                        ui,
+                        "Dataset YAML",
+                        &mut descriptor.descriptor_file_id,
+                        &browser_paths,
+                        |path| descriptor_path_matches(profile, path),
+                    );
+                } else if server_source_file_picker(
                     ui,
-                    "Descriptor file",
-                    &mut descriptor.descriptor_file_id,
+                    "Dataset YAML",
+                    &descriptor.descriptor_file_id,
                     &browser_paths,
-                    browser_transport,
-                    |path| descriptor_path_matches(profile, path),
-                );
+                    "Choose descriptor file",
+                ) {
+                    open_picker = Some(ImportSourcePickerTarget::Descriptor(0));
+                }
+                descriptor_changed = previous != descriptor.descriptor_file_id;
                 theme::labeled_text_field(
                     ui,
                     "Release",
                     &mut descriptor.release,
                     theme::COMPACT_TEXT_FIELD_HEIGHT,
                 );
-                theme::labeled_text_field(
-                    ui,
-                    "Split",
-                    &mut descriptor.split,
-                    theme::COMPACT_TEXT_FIELD_HEIGHT,
-                );
-                theme::labeled_text_field(
-                    ui,
-                    "Pairing group (optional)",
-                    &mut descriptor.pairing_group,
-                    theme::COMPACT_TEXT_FIELD_HEIGHT,
-                );
-                if coco {
-                    source_file_selector(
-                        ui,
-                        "Exact COCO image root",
-                        &mut descriptor.image_root_file_id,
-                        &browser_paths,
-                        browser_transport,
-                        is_image_path,
-                    );
-                    ui.small(
-                        "Select a registered image directly inside the exact root referenced by COCO file_name values.",
-                    );
-                }
-                if descriptor_count > 1 && ui.button("Remove descriptor").clicked()
-                {
-                    remove = Some(index);
-                }
-                ui.separator();
-            });
-        }
-        if let Some(index) = remove {
-            self.import_flow.descriptors.remove(index);
-        }
-        if ui.button("Add descriptor or split").clicked() {
-            self.import_flow
+            }
+            if descriptor_changed {
+                self.import_flow.invalidate_yolo_inspection();
+            }
+            if inspect_after_edit {
+                self.request_yolo_descriptor_inspection();
+            }
+            let descriptor_selected = self
+                .import_flow
                 .descriptors
-                .push(descriptor_draft(self.import_flow.profile));
+                .first()
+                .is_some_and(|descriptor| !descriptor.descriptor_file_id.trim().is_empty());
+            let inspect_label = if self.import_flow.yolo_inspection_error.is_some() {
+                "Retry split inspection"
+            } else if self.import_flow.yolo_inspected_descriptor_file_id.is_some() {
+                "Refresh splits"
+            } else {
+                "Inspect YAML splits"
+            };
+            if ui
+                .add_enabled(
+                    descriptor_selected && !self.import_flow.yolo_inspection_loading,
+                    egui::Button::new(inspect_label),
+                )
+                .clicked()
+            {
+                self.request_yolo_descriptor_inspection();
+            }
+            ui.label(RichText::new("Splits to import").strong());
+            if self.import_flow.yolo_inspection_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Inspecting the staged YAML...");
+                });
+            }
+            for split in &mut self.import_flow.yolo_splits {
+                ui.add_enabled(
+                    split.usable,
+                    egui::Checkbox::new(&mut split.selected, &split.name),
+                );
+                if let Some(issue) = &split.issue {
+                    ui.small(issue);
+                }
+            }
+            if descriptor_selected
+                && !self.import_flow.yolo_inspection_loading
+                && self.import_flow.yolo_splits.is_empty()
+                && self.import_flow.yolo_inspection_error.is_none()
+            {
+                ui.small("Inspect the YAML to discover its train, val, and test splits.");
+            }
+            ui.separator();
         }
-        let descriptors_valid = self.import_descriptors_valid();
-        if !descriptors_valid {
-            theme::inline_message(
-                ui,
-                theme::Intent::Warning,
-                if coco {
-                    "Every descriptor needs a unique registered source file, a split, and an exact registered COCO image root."
-                } else {
-                    "Every descriptor needs a unique registered source file and a split."
-                },
-            );
+        if let Some(target) = open_picker {
+            self.open_import_source_picker(target);
+        }
+        let descriptor_error = self.import_descriptor_error();
+        if let Some(error) = &descriptor_error {
+            theme::inline_message(ui, theme::Intent::Warning, error);
         }
         if theme::primary_button(
             ui,
-            !self.import_flow.busy && descriptors_valid,
+            !self.import_flow.busy && descriptor_error.is_none(),
             egui::Button::new("Seal source and run preflight"),
         )
         .clicked()
@@ -1603,17 +1797,32 @@ impl LabelloApp {
         else {
             return;
         };
-        if !self.import_descriptors_valid() {
-            self.import_flow.error = Some(
-                "Select unique registered descriptors, splits, and exact COCO image roots."
-                    .to_string(),
-            );
+        if let Some(error) = self.import_descriptor_error() {
+            self.import_flow.error = Some(error);
             return;
         }
         self.import_flow.busy = true;
         self.import_flow.error = None;
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("seal", request.request_id);
+        let yolo = !is_coco_profile(self.import_flow.profile);
+        let selected_splits = if yolo {
+            self.import_flow
+                .yolo_splits
+                .iter()
+                .filter(|split| split.usable && split.selected)
+                .map(|split| split.name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            self.import_flow
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.split.trim().to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        let yolo_descriptor_split = selected_splits.first().cloned().unwrap_or_default();
         let descriptors = self
             .import_flow
             .descriptors
@@ -1622,19 +1831,17 @@ impl LabelloApp {
                 descriptor_file_id: descriptor.descriptor_file_id.trim().to_string(),
                 kind: descriptor.kind,
                 release: descriptor.release.trim().to_string(),
-                split: descriptor.split.trim().to_string(),
+                split: if yolo {
+                    yolo_descriptor_split.clone()
+                } else {
+                    descriptor.split.trim().to_string()
+                },
                 image_root_file_id: (!descriptor.image_root_file_id.trim().is_empty())
                     .then(|| descriptor.image_root_file_id.trim().to_string()),
                 pairing_group: (!descriptor.pairing_group.trim().is_empty())
                     .then(|| descriptor.pairing_group.trim().to_string()),
             })
             .collect::<Vec<_>>();
-        let selected_splits = descriptors
-            .iter()
-            .map(|descriptor| descriptor.split.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
         self.queue_command(UiCommand::SealImport {
             request,
             import_id,
@@ -1649,6 +1856,334 @@ impl LabelloApp {
             },
             idempotency_key: key,
         });
+    }
+
+    pub(crate) fn request_yolo_descriptor_inspection(&mut self) {
+        let Some(import_id) = self
+            .import_flow
+            .job
+            .as_ref()
+            .map(|job| job.import_id.clone())
+        else {
+            return;
+        };
+        let Some(descriptor_file_id) = self
+            .import_flow
+            .descriptors
+            .first()
+            .map(|descriptor| descriptor.descriptor_file_id.trim().to_string())
+            .filter(|reference| !reference.is_empty())
+        else {
+            return;
+        };
+        if self.import_flow.yolo_inspection_loading {
+            return;
+        }
+        self.import_flow.invalidate_yolo_inspection();
+        self.import_flow.yolo_inspection_loading = true;
+        let request = self.import_request_identity(Some(import_id.clone()));
+        self.import_flow.pending_yolo_inspection_request_id = Some(request.request_id);
+        self.queue_command(UiCommand::InspectYoloDescriptor {
+            request,
+            import_id,
+            descriptor_file_id: descriptor_file_id.clone(),
+            body: labello_client::InspectYoloDescriptorRequest { descriptor_file_id },
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn request_yolo_descriptor_inspection_after_upload(&mut self) {
+        if self.import_flow.yolo_inspection_loading {
+            self.import_flow.yolo_inspection_retry_after_current = true;
+        } else {
+            self.request_yolo_descriptor_inspection();
+        }
+    }
+
+    pub(crate) fn open_import_source_picker(&mut self, target: ImportSourcePickerTarget) {
+        self.import_flow.source_picker = ImportSourcePickerState {
+            target: Some(target),
+            ..Default::default()
+        };
+        let initial_path = match target {
+            ImportSourcePickerTarget::DatasetFolder => String::new(),
+            ImportSourcePickerTarget::Descriptor(_)
+            | ImportSourcePickerTarget::CocoImageRoot(_) => {
+                match self.import_flow.server_relative_path.as_str() {
+                    "" | "." => String::new(),
+                    path => path.to_string(),
+                }
+            }
+        };
+        self.request_import_source_browse(initial_path, 0);
+    }
+
+    fn request_import_source_browse(&mut self, relative_path: String, offset: u32) {
+        let Some(target) = self.import_flow.source_picker.target else {
+            return;
+        };
+        if self.import_flow.source_picker.loading {
+            return;
+        }
+        let request = match target {
+            ImportSourcePickerTarget::DatasetFolder => self.import_request_identity(None),
+            ImportSourcePickerTarget::Descriptor(_)
+            | ImportSourcePickerTarget::CocoImageRoot(_) => {
+                let import_id = self
+                    .import_flow
+                    .job
+                    .as_ref()
+                    .map(|job| job.import_id.clone());
+                self.import_request_identity(import_id)
+            }
+        };
+        self.import_flow.source_picker.loading = true;
+        self.import_flow.source_picker.error = None;
+        self.import_flow.source_picker.pending_request_id = Some(request.request_id);
+        self.import_flow.source_picker.pending_append = offset > 0;
+        if offset == 0 {
+            self.import_flow.source_picker.relative_path = relative_path.clone();
+        }
+        match target {
+            ImportSourcePickerTarget::DatasetFolder => {
+                let root_id = self.import_flow.server_root_id.clone();
+                if root_id.is_empty() {
+                    self.import_flow.source_picker.loading = false;
+                    self.import_flow.source_picker.error =
+                        Some("Choose a server import root first.".to_string());
+                    return;
+                }
+                self.queue_command(UiCommand::BrowseImportRoot {
+                    request,
+                    root_id,
+                    body: labello_client::BrowseServerImportRootRequest {
+                        relative_path,
+                        offset,
+                    },
+                });
+            }
+            ImportSourcePickerTarget::Descriptor(_)
+            | ImportSourcePickerTarget::CocoImageRoot(_) => {
+                let Some(import_id) = self
+                    .import_flow
+                    .job
+                    .as_ref()
+                    .map(|job| job.import_id.clone())
+                else {
+                    self.import_flow.source_picker.loading = false;
+                    return;
+                };
+                let mode = match target {
+                    ImportSourcePickerTarget::Descriptor(_) => {
+                        labello_client::ImportSourceBrowseMode::Descriptors
+                    }
+                    ImportSourcePickerTarget::CocoImageRoot(_) => {
+                        labello_client::ImportSourceBrowseMode::Images
+                    }
+                    ImportSourcePickerTarget::DatasetFolder => unreachable!(),
+                };
+                self.queue_command(UiCommand::BrowseImportSource {
+                    request,
+                    import_id,
+                    body: labello_client::BrowseImportSourceRequest {
+                        relative_path,
+                        offset,
+                        mode,
+                    },
+                });
+            }
+        }
+    }
+
+    fn import_source_picker_modal(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.import_flow.source_picker.target else {
+            return;
+        };
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 32.0).clamp(1.0, 680.0);
+        let max_height = (screen.height() - 32.0).max(1.0);
+        let page = self.import_flow.source_picker.page.clone();
+        let requested_path = self.import_flow.source_picker.relative_path.clone();
+        let loading = self.import_flow.source_picker.loading;
+        let error = self.import_flow.source_picker.error.clone();
+        let mut navigate = None;
+        let mut select_folder = false;
+        let mut selected_folder = None;
+        let mut selected_file = None;
+        let mut load_more = None;
+        let mut close = false;
+        let response = theme::modal(ctx, egui::Id::new("import-source-picker")).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.set_max_height(max_height);
+            ui.heading(match target {
+                ImportSourcePickerTarget::DatasetFolder => "Choose dataset folder",
+                ImportSourcePickerTarget::Descriptor(_) => "Choose descriptor file",
+                ImportSourcePickerTarget::CocoImageRoot(_) => "Choose an image in the COCO root",
+            });
+            let current = page
+                .as_ref()
+                .map(|page| page.relative_path.as_str())
+                .unwrap_or(&requested_path);
+            ui.label(format!(
+                "Current folder: {}",
+                if current.is_empty() { "/" } else { current }
+            ));
+            ui.horizontal_wrapped(|ui| {
+                if !current.is_empty() && ui.button("Up one folder").clicked() {
+                    navigate = Some(parent_source_directory(current));
+                }
+                if target == ImportSourcePickerTarget::DatasetFolder
+                    && theme::primary_button(ui, true, egui::Button::new("Select this folder"))
+                        .clicked()
+                {
+                    select_folder = true;
+                }
+            });
+            if let Some(error) = &error {
+                theme::inline_message(ui, theme::Intent::Warning, error);
+                if ui.button("Retry").clicked() {
+                    navigate = Some(current.to_string());
+                }
+            }
+            if loading && page.is_none() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading server source...");
+                });
+            }
+            let entries = page
+                .as_ref()
+                .map(|page| page.entries.as_slice())
+                .unwrap_or(&[]);
+            egui::ScrollArea::vertical()
+                .id_salt("import-source-picker-entries")
+                .max_height((max_height - 180.0).max(1.0))
+                .show(ui, |ui| {
+                    if entries.is_empty() && !loading && error.is_none() {
+                        ui.label("This folder has no matching entries.");
+                    }
+                    for entry in entries {
+                        match entry.kind {
+                            labello_client::ImportBrowseEntryKind::Directory => {
+                                if target == ImportSourcePickerTarget::DatasetFolder {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .button(format!("Open folder {}", entry.name))
+                                            .on_hover_text(&entry.relative_path)
+                                            .clicked()
+                                        {
+                                            navigate = Some(entry.relative_path.clone());
+                                        }
+                                        if ui
+                                            .button(format!("Select folder {}", entry.name))
+                                            .on_hover_text(&entry.relative_path)
+                                            .clicked()
+                                        {
+                                            selected_folder = Some(entry.relative_path.clone());
+                                        }
+                                    });
+                                } else if ui
+                                    .add_sized(
+                                        [ui.available_width(), 44.0],
+                                        egui::Button::new(format!("Open folder {}", entry.name)),
+                                    )
+                                    .on_hover_text(&entry.relative_path)
+                                    .clicked()
+                                {
+                                    navigate = Some(entry.relative_path.clone());
+                                }
+                            }
+                            labello_client::ImportBrowseEntryKind::File => {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 44.0],
+                                        egui::Button::new(format!("Select {}", entry.name)),
+                                    )
+                                    .on_hover_text(&entry.relative_path)
+                                    .clicked()
+                                {
+                                    selected_file = Some(entry.clone());
+                                }
+                            }
+                        }
+                    }
+                });
+            if let Some(offset) = page.as_ref().and_then(|page| page.next_offset)
+                && ui
+                    .add_enabled(!loading, egui::Button::new("Load more"))
+                    .clicked()
+            {
+                load_more = Some((current.to_string(), offset));
+            }
+            if ui.button("Close picker").clicked() {
+                close = true;
+            }
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Window, true, "Server source picker")
+        });
+        if select_folder {
+            let selected = page
+                .as_ref()
+                .map(|page| page.relative_path.clone())
+                .unwrap_or(requested_path);
+            self.import_flow.server_relative_path = if selected.is_empty() {
+                ".".to_string()
+            } else {
+                selected
+            };
+            close = true;
+        }
+        if let Some(selected) = selected_folder {
+            self.import_flow.server_relative_path = selected;
+            close = true;
+        }
+        if let Some(entry) = selected_file
+            && let Some(file_id) = entry.file_id
+        {
+            let selected_path = RegisteredImportPath {
+                client_file_id: String::new(),
+                file_id: file_id.clone(),
+                relative_path: entry.relative_path,
+            };
+            if let Some(existing) = self
+                .import_flow
+                .registered_paths
+                .iter_mut()
+                .find(|path| path.file_id == file_id)
+            {
+                *existing = selected_path;
+            } else {
+                self.import_flow.registered_paths.push(selected_path);
+            }
+            match target {
+                ImportSourcePickerTarget::DatasetFolder => {}
+                ImportSourcePickerTarget::Descriptor(index) => {
+                    if let Some(descriptor) = self.import_flow.descriptors.get_mut(index) {
+                        descriptor.descriptor_file_id = file_id;
+                    }
+                    if !is_coco_profile(self.import_flow.profile) {
+                        self.import_flow.invalidate_yolo_inspection();
+                        self.request_yolo_descriptor_inspection();
+                    }
+                }
+                ImportSourcePickerTarget::CocoImageRoot(index) => {
+                    if let Some(descriptor) = self.import_flow.descriptors.get_mut(index) {
+                        descriptor.image_root_file_id = file_id;
+                    }
+                }
+            }
+            close = true;
+        }
+        if let Some(path) = navigate {
+            self.import_flow.source_picker.page = None;
+            self.request_import_source_browse(path, 0);
+        } else if let Some((path, offset)) = load_more {
+            self.request_import_source_browse(path, offset);
+        }
+        if close || response.should_close() {
+            self.import_flow.source_picker = Default::default();
+        }
     }
 
     pub(crate) fn request_preflight_import(&mut self, restart: bool) {
@@ -2436,19 +2971,72 @@ impl LabelloApp {
         }
     }
 
+    #[cfg(test)]
     fn import_descriptors_valid(&self) -> bool {
+        self.import_descriptor_error().is_none()
+    }
+
+    fn import_descriptor_error(&self) -> Option<String> {
         let coco = is_coco_profile(self.import_flow.profile);
+        if !valid_identity_component(&self.import_flow.source_namespace) {
+            return Some(
+                "Source namespace must use only letters, numbers, '.', '_', or '-'.".to_string(),
+            );
+        }
+        let reference_valid =
+            |reference: &str| {
+                !reference.trim().is_empty()
+                    && (self.import_flow.transport == ImportTransport::ServerDirectory
+                        || self.import_flow.registered_paths.iter().any(|path| {
+                            path.file_id == reference || path.client_file_id == reference
+                        }))
+            };
+        if !coco {
+            let Some(descriptor) = self.import_flow.descriptors.first() else {
+                return Some("Select one Dataset YAML.".to_string());
+            };
+            if self.import_flow.descriptors.len() != 1
+                || descriptor.kind != ImportDescriptorKind::YoloDataset
+            {
+                return Some("YOLO imports require exactly one Dataset YAML.".to_string());
+            }
+            if !reference_valid(&descriptor.descriptor_file_id) {
+                return Some("Select a registered Dataset YAML.".to_string());
+            }
+            if !valid_identity_component(&descriptor.release) {
+                return Some(
+                    "Release must use only letters, numbers, '.', '_', or '-'.".to_string(),
+                );
+            }
+            if self.import_flow.yolo_inspection_loading {
+                return Some("Wait for YAML split inspection to finish.".to_string());
+            }
+            if let Some(error) = &self.import_flow.yolo_inspection_error {
+                return Some(error.clone());
+            }
+            if self
+                .import_flow
+                .yolo_inspected_descriptor_file_id
+                .as_deref()
+                .map(str::trim)
+                != Some(descriptor.descriptor_file_id.trim())
+            {
+                return Some("Inspect the selected YAML before sealing the source.".to_string());
+            }
+            if !self
+                .import_flow
+                .yolo_splits
+                .iter()
+                .any(|split| split.usable && split.selected)
+            {
+                return Some("Select at least one usable YAML split.".to_string());
+            }
+            return None;
+        }
         let mut descriptor_references = std::collections::BTreeSet::new();
         let mut descriptor_identities = std::collections::BTreeSet::new();
-        !self.import_flow.descriptors.is_empty()
+        let valid = !self.import_flow.descriptors.is_empty()
             && self.import_flow.descriptors.iter().all(|descriptor| {
-                let reference_valid = |reference: &str| {
-                    !reference.trim().is_empty()
-                        && (self.import_flow.transport == ImportTransport::ServerDirectory
-                            || self.import_flow.registered_paths.iter().any(|path| {
-                                path.file_id == reference || path.client_file_id == reference
-                            }))
-                };
                 descriptor_kind_allowed(self.import_flow.profile, descriptor.kind)
                     && reference_valid(&descriptor.descriptor_file_id)
                     && descriptor_references.insert(descriptor.descriptor_file_id.trim())
@@ -2464,11 +3052,11 @@ impl LabelloApp {
                     ))
                     && (!coco || reference_valid(&descriptor.image_root_file_id))
             })
-            && valid_identity_component(&self.import_flow.source_namespace)
-            && (!matches!(
-                self.import_flow.profile,
-                ImportProfile::UltralyticsYoloDetectV1 | ImportProfile::UltralyticsYoloPoseV1
-            ) || self.import_flow.descriptors.len() == 1)
+            && valid_identity_component(&self.import_flow.source_namespace);
+        (!valid).then(|| {
+            "Every COCO descriptor needs a unique registered JSON file, valid release and split, and an exact registered image root."
+                .to_string()
+        })
     }
 
     fn import_mappings_complete(&self) -> bool {
@@ -2651,32 +3239,54 @@ fn source_file_selector(
     label: &str,
     selected: &mut String,
     paths: &[RegisteredImportPath],
-    browser_transport: bool,
     include: impl Fn(&str) -> bool,
-) {
-    if browser_transport {
-        egui::ComboBox::from_label(label)
-            .selected_text(
-                paths
-                    .iter()
-                    .find(|path| path.file_id == *selected || path.client_file_id == *selected)
-                    .map(|path| path.relative_path.as_str())
-                    .unwrap_or("Choose a registered file"),
-            )
-            .show_ui(ui, |ui| {
-                for path in paths.iter().filter(|path| include(&path.relative_path)) {
-                    let reference = if path.file_id.is_empty() {
-                        &path.client_file_id
-                    } else {
-                        &path.file_id
-                    };
-                    ui.selectable_value(selected, reference.clone(), &path.relative_path);
-                }
-            });
-    } else {
-        theme::labeled_text_field(ui, label, selected, theme::COMPACT_TEXT_FIELD_HEIGHT);
-        ui.small("Enter an exact relative path from the registered server source.");
-    }
+) -> bool {
+    let previous = selected.clone();
+    egui::ComboBox::from_label(label)
+        .selected_text(
+            paths
+                .iter()
+                .find(|path| path.file_id == *selected || path.client_file_id == *selected)
+                .map(|path| path.relative_path.as_str())
+                .unwrap_or("Choose a registered file"),
+        )
+        .show_ui(ui, |ui| {
+            for path in paths.iter().filter(|path| include(&path.relative_path)) {
+                let reference = if path.file_id.is_empty() {
+                    &path.client_file_id
+                } else {
+                    &path.file_id
+                };
+                ui.selectable_value(selected, reference.clone(), &path.relative_path);
+            }
+        });
+    *selected != previous
+}
+
+fn server_source_file_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &str,
+    paths: &[RegisteredImportPath],
+    button_label: &str,
+) -> bool {
+    let display = paths
+        .iter()
+        .find(|path| path.file_id == selected)
+        .map(|path| path.relative_path.as_str())
+        .unwrap_or(if selected.is_empty() {
+            "Not selected"
+        } else {
+            "Selected staged file"
+        });
+    status_row(ui, label, display);
+    ui.button(button_label).clicked()
+}
+
+fn parent_source_directory(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
 }
 
 fn descriptor_path_matches(profile: ImportProfile, path: &str) -> bool {
@@ -2737,7 +3347,7 @@ fn descriptor_kind_label(kind: ImportDescriptorKind) -> &'static str {
 
 fn is_image_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
+    [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]
         .iter()
         .any(|extension| lower.ends_with(extension))
 }
@@ -3211,6 +3821,15 @@ pub(crate) mod browser {
 mod tests {
     use super::*;
 
+    #[test]
+    fn import_flow_defaults_to_yolo_detect_with_a_matching_descriptor() {
+        let flow = ImportFlowState::default();
+
+        assert_eq!(flow.profile, ImportProfile::UltralyticsYoloDetectV1);
+        assert_eq!(flow.descriptors.len(), 1);
+        assert_eq!(flow.descriptors[0].kind, ImportDescriptorKind::YoloDataset);
+    }
+
     fn category(key: &str, source_id: &str, class_id: &str) -> ImportCategoryDraft {
         ImportCategoryDraft {
             selected: true,
@@ -3475,6 +4094,69 @@ mod tests {
                 ImportDescriptorKind::CocoKeypoints
             ]
         );
+    }
+
+    #[test]
+    fn yolo_seal_uses_one_descriptor_and_all_checked_discovered_splits() {
+        let mut app = LabelloApp::default();
+        app.import_flow.profile = ImportProfile::UltralyticsYoloDetectV1;
+        app.import_flow.transport = ImportTransport::ServerDirectory;
+        app.import_flow.descriptors = vec![ImportDescriptorDraft {
+            descriptor_file_id: "dataset.yaml".to_string(),
+            kind: ImportDescriptorKind::YoloDataset,
+            release: "v1".to_string(),
+            ..Default::default()
+        }];
+        app.import_flow.yolo_inspected_descriptor_file_id = Some("dataset.yaml".to_string());
+        app.import_flow.yolo_splits = vec![
+            ImportYoloSplitDraft {
+                name: "train".to_string(),
+                usable: true,
+                selected: true,
+                issue: None,
+            },
+            ImportYoloSplitDraft {
+                name: "val".to_string(),
+                usable: true,
+                selected: true,
+                issue: None,
+            },
+            ImportYoloSplitDraft {
+                name: "test".to_string(),
+                usable: false,
+                selected: false,
+                issue: Some("invalid split".to_string()),
+            },
+        ];
+        app.import_flow.job = Some(ImportJob {
+            import_id: labello_domain::ImportId::from("imp-yolo"),
+            owner_user_id: labello_domain::UserId::from("admin"),
+            destination_dataset_id: DatasetId::from("imported-yolo"),
+            destination_name: "Imported YOLO".to_string(),
+            profile: app.import_flow.profile,
+            transport: app.import_flow.transport,
+            lifecycle: ImportLifecycle::Uploading,
+            progress: Default::default(),
+            failure: None,
+            source_fingerprint: None,
+            plan_hash: None,
+            preflight_report: None,
+            can_cancel: true,
+            created_at: labello_domain::now(),
+            updated_at: labello_domain::now(),
+            expires_at: None,
+            recovery: None,
+        });
+
+        assert!(app.import_descriptors_valid());
+        app.request_seal_import();
+
+        let UiCommand::SealImport { body, .. } = app.runtime.commands.pop_back().unwrap() else {
+            panic!("seal command was not queued");
+        };
+        assert_eq!(body.source.descriptors.len(), 1);
+        assert_eq!(body.source.descriptors[0].split, "train");
+        assert_eq!(body.source.selected_splits, vec!["train", "val"]);
     }
 
     #[test]

@@ -508,9 +508,12 @@ pub(super) struct CallCounts {
     pub(super) create_snapshot: usize,
     pub(super) get_snapshot_file: usize,
     pub(super) import_capabilities: usize,
+    pub(super) browse_server_import_root: usize,
     pub(super) create_import: usize,
     pub(super) register_import_files: usize,
     pub(super) upload_import_chunk: usize,
+    pub(super) browse_import_source: usize,
+    pub(super) inspect_yolo_descriptor: usize,
     pub(super) seal_import: usize,
     pub(super) preflight_import: usize,
     pub(super) update_import_plan: usize,
@@ -683,6 +686,24 @@ impl ImportApi for SpyApi {
         ready(Ok(test_import_capabilities()))
     }
 
+    fn browse_server_import_root<'a>(
+        &'a self,
+        _root_id: &'a str,
+        request: labello_client::BrowseServerImportRootRequest,
+    ) -> ApiFuture<'a, labello_client::ImportBrowsePage> {
+        self.state.borrow_mut().counts.browse_server_import_root += 1;
+        ready(Ok(labello_client::ImportBrowsePage {
+            relative_path: request.relative_path,
+            entries: vec![labello_client::ImportBrowseEntry {
+                name: "release-2026".to_string(),
+                relative_path: "release-2026".to_string(),
+                kind: labello_client::ImportBrowseEntryKind::Directory,
+                file_id: None,
+            }],
+            next_offset: None,
+        }))
+    }
+
     fn create_import<'a>(
         &'a self,
         request: labello_client::CreateImportRequest,
@@ -758,6 +779,54 @@ impl ImportApi for SpyApi {
             accepted_offset: upload.offset + upload.length,
             complete: true,
             file_blake3: Some(upload.digest),
+        }))
+    }
+
+    fn browse_import_source<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        request: labello_client::BrowseImportSourceRequest,
+    ) -> ApiFuture<'a, labello_client::ImportBrowsePage> {
+        self.state.borrow_mut().counts.browse_import_source += 1;
+        let (name, relative_path, file_id) = match request.mode {
+            labello_client::ImportSourceBrowseMode::Descriptors => {
+                ("dataset.yaml", "dataset.yaml", "file-yaml")
+            }
+            labello_client::ImportSourceBrowseMode::Images => {
+                ("example.jpg", "images/example.jpg", "file-image")
+            }
+        };
+        ready(Ok(labello_client::ImportBrowsePage {
+            relative_path: request.relative_path,
+            entries: vec![labello_client::ImportBrowseEntry {
+                name: name.to_string(),
+                relative_path: relative_path.to_string(),
+                kind: labello_client::ImportBrowseEntryKind::File,
+                file_id: Some(file_id.to_string()),
+            }],
+            next_offset: None,
+        }))
+    }
+
+    fn inspect_yolo_descriptor<'a>(
+        &'a self,
+        _import_id: &'a ImportId,
+        _request: labello_client::InspectYoloDescriptorRequest,
+    ) -> ApiFuture<'a, labello_client::YoloDescriptorInspection> {
+        self.state.borrow_mut().counts.inspect_yolo_descriptor += 1;
+        ready(Ok(labello_client::YoloDescriptorInspection {
+            splits: vec![
+                labello_client::YoloSplitInspection {
+                    name: "train".to_string(),
+                    usable: true,
+                    issue: None,
+                },
+                labello_client::YoloSplitInspection {
+                    name: "val".to_string(),
+                    usable: true,
+                    issue: None,
+                },
+            ],
         }))
     }
 

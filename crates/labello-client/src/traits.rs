@@ -72,6 +72,12 @@ pub trait DatasetApi {
 pub trait ImportApi {
     fn import_capabilities<'a>(&'a self) -> ApiFuture<'a, crate::ImportCapabilities>;
 
+    fn browse_server_import_root<'a>(
+        &'a self,
+        root_id: &'a str,
+        request: crate::BrowseServerImportRootRequest,
+    ) -> ApiFuture<'a, crate::ImportBrowsePage>;
+
     fn create_import<'a>(
         &'a self,
         request: crate::CreateImportRequest,
@@ -94,6 +100,18 @@ pub trait ImportApi {
         upload: crate::ImportChunkUpload,
         idempotency_key: &'a str,
     ) -> ApiFuture<'a, crate::ImportChunkResult>;
+
+    fn browse_import_source<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::BrowseImportSourceRequest,
+    ) -> ApiFuture<'a, crate::ImportBrowsePage>;
+
+    fn inspect_yolo_descriptor<'a>(
+        &'a self,
+        import_id: &'a ImportId,
+        request: crate::InspectYoloDescriptorRequest,
+    ) -> ApiFuture<'a, crate::YoloDescriptorInspection>;
 
     fn seal_import<'a>(
         &'a self,

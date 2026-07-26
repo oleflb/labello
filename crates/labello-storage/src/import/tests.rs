@@ -39,8 +39,19 @@ async fn browser_job(
     dataset_id: &str,
     files: BTreeMap<&str, Vec<u8>>,
 ) -> (UserId, ImportJob) {
+    let (owner, job) = browser_uploading_job(service, profile, dataset_id, files).await;
+    let job = service.seal(&job.import_id, &owner).await.unwrap();
+    (owner, job)
+}
+
+async fn browser_uploading_job(
+    service: &ImportService,
+    profile: ImportProfile,
+    dataset_id: &str,
+    files: BTreeMap<&str, Vec<u8>>,
+) -> (UserId, ImportJob) {
     let owner = UserId::from("admin");
-    let mut job = service
+    let job = service
         .create_job(
             owner.clone(),
             CreateImportRequest {
@@ -79,7 +90,6 @@ async fn browser_job(
             .await
             .unwrap();
     }
-    job = service.seal(&job.import_id, &owner).await.unwrap();
     (owner, job)
 }
 
@@ -1021,6 +1031,111 @@ async fn clipping_and_templates_remain_derived_pending_geometry() {
             .values()
             .all(|coverage| *coverage == labello_domain::ImportCoverage::Incomplete)
     );
+}
+
+#[tokio::test]
+async fn yolo_boundary_rounding_is_normalized_but_real_overflow_still_blocks() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let mut files = yolo_detect_files();
+    files.insert(
+        "labels/train/a.txt",
+        b"0 0.499999 0.5 1 0.5\n0 0.500001 0.5 1 0.5\n0 0.5 0.249999 0.5 0.5\n0 0.5 0.750001 0.5 0.5\n"
+            .to_vec(),
+    );
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "rounded-boundary",
+        files,
+    )
+    .await;
+    let plan = service
+        .preflight(
+            &job.import_id,
+            &owner,
+            request(ImportProfile::UltralyticsYoloDetectV1),
+        )
+        .await
+        .unwrap();
+    assert!(plan.committable(), "{:?}", plan.diagnostics);
+    assert!(plan.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "yolo_boundary_rounding_normalized"
+            && diagnostic.severity == DiagnosticSeverity::Info
+            && !diagnostic.blocks_commit
+    }));
+    assert!(!plan.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "geometry_clipped" || diagnostic.code == "geometry_out_of_bounds"
+    }));
+    let result = service
+        .commit(&job.import_id, &owner, &plan.plan_hash)
+        .await
+        .unwrap();
+    let dataset_path = result.dataset_path;
+    let source_objects = std::fs::read_to_string(
+        dataset_path
+            .join(crate::paths::IMPORTS_DIR)
+            .join(job.import_id.as_str())
+            .join(crate::paths::IMPORT_SOURCE_OBJECTS_FILE),
+    )
+    .unwrap();
+    assert_eq!(source_objects.lines().count(), 4);
+    assert!(source_objects.lines().all(|line| {
+        let record: serde_json::Value = serde_json::from_str(line).unwrap();
+        record["normalization"]["transformId"] == "yolo_boundary_rounding_v1"
+            && record["normalization"]["tolerance"] == 1e-6
+    }));
+    let repository = DatasetRepository::new(dataset_path);
+    let image = repository
+        .load_images_index()
+        .await
+        .unwrap()
+        .images_by_hash
+        .into_values()
+        .next()
+        .unwrap();
+    let state = repository.load_image_state(&image.image_id).await.unwrap();
+    assert_eq!(state.active_annotations().count(), 4);
+    for annotation in state.active_annotations() {
+        let labello_domain::AnnotationGeometry::BoundingBox(bbox) = annotation.geometry else {
+            panic!("expected bounding box");
+        };
+        assert!(bbox.x >= 0.0 && bbox.y >= 0.0);
+        assert!(bbox.x + bbox.width <= 1.0);
+        assert!(bbox.y + bbox.height <= 1.0);
+        assert!(matches!(
+            annotation.origin,
+            labello_domain::AnnotationOrigin::Imported {
+                imported: labello_domain::ImportedOrigin {
+                    geometry_provenance: labello_domain::ImportGeometryProvenance::Direct,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    let mut files = yolo_detect_files();
+    files.insert("labels/train/a.txt", b"0 0.499998 0.5 1 1\n".to_vec());
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "real-boundary-overflow",
+        files,
+    )
+    .await;
+    let plan = service
+        .preflight(
+            &job.import_id,
+            &owner,
+            request(ImportProfile::UltralyticsYoloDetectV1),
+        )
+        .await
+        .unwrap();
+    assert!(!plan.committable());
+    assert!(plan.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "geometry_out_of_bounds" && diagnostic.blocks_commit
+    }));
 }
 
 #[tokio::test]
@@ -2082,6 +2197,115 @@ async fn duplicate_bytes_compare_missing_label_facts() {
 }
 
 #[tokio::test]
+async fn yolo_descriptor_inspection_discovers_usable_splits_in_canonical_order() {
+    let files = BTreeMap::from([(
+        "dataset.yaml",
+        b"path: .\nval: [images/val-a, images/val-b]\ntrain: images/train\ntest: 7\nnames: [person]\nmetadata: ignored\n"
+            .to_vec(),
+    )]);
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (owner, job) = browser_uploading_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "inspect-yolo",
+        files,
+    )
+    .await;
+
+    let inspection = service
+        .inspect_yolo_descriptor(&job.import_id, &owner, "dataset.yaml")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        inspection
+            .splits
+            .iter()
+            .map(|split| (split.name.as_str(), split.usable))
+            .collect::<Vec<_>>(),
+        vec![("train", true), ("val", true), ("test", false)]
+    );
+    assert!(inspection.splits[2].issue.is_some());
+
+    service.seal(&job.import_id, &owner).await.unwrap();
+    let sealed_inspection = service
+        .inspect_yolo_descriptor(&job.import_id, &owner, "dataset.yaml")
+        .await
+        .unwrap();
+    assert_eq!(sealed_inspection, inspection);
+
+    let _first_worker = service
+        .descriptor_inspection_workers
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let _second_worker = service
+        .descriptor_inspection_workers
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let error = service
+        .inspect_yolo_descriptor(&job.import_id, &owner, "dataset.yaml")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, StorageError::Import { code, .. } if code == "descriptor_inspection_busy")
+    );
+}
+
+#[tokio::test]
+async fn yolo_descriptor_inspection_rejects_incomplete_files_and_non_yolo_jobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let owner = UserId::from("admin");
+    let job = service
+        .create_job(
+            owner.clone(),
+            CreateImportRequest {
+                destination_dataset_id: DatasetId::from("inspect-incomplete"),
+                destination_name: "Imported".to_string(),
+                profile: ImportProfile::UltralyticsYoloDetectV1,
+                transport: ImportTransport::Browser,
+            },
+        )
+        .await
+        .unwrap();
+    let descriptor = b"train: images/train\nnames: [person]\n";
+    service
+        .register_browser_files(
+            &job.import_id,
+            &owner,
+            vec![BrowserFileRegistration {
+                relative_path: "dataset.yaml".to_string(),
+                byte_size: descriptor.len() as u64,
+                blake3: blake3::hash(descriptor).to_hex().to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+    let error = service
+        .inspect_yolo_descriptor(&job.import_id, &owner, "dataset.yaml")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Import { code, .. } if code == "source_file_incomplete"));
+
+    let files = BTreeMap::from([("annotations.json", b"{}".to_vec())]);
+    let (owner, job) = browser_uploading_job(
+        &service,
+        ImportProfile::CocoInstancesGtV1,
+        "inspect-coco",
+        files,
+    )
+    .await;
+    let error = service
+        .inspect_yolo_descriptor(&job.import_id, &owner, "annotations.json")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Import { code, .. } if code == "yolo_profile_mismatch"));
+}
+
+#[tokio::test]
 async fn duplicate_bytes_compare_crowd_facts_even_when_crowds_are_blocked() {
     let descriptor = serde_json::json!({
         "images": [
@@ -2301,6 +2525,106 @@ async fn server_directory_rejects_symlinks_and_hardlinks() {
         .unwrap_err();
     assert!(
         matches!(error, StorageError::Import { ref code, .. } if code == "server_source_hardlink")
+    );
+}
+
+#[tokio::test]
+async fn server_source_browser_lists_folders_and_staged_descriptor_files() {
+    let datasets = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(source.path().join("release/images")).unwrap();
+    std::fs::write(
+        source.path().join("release/dataset.yaml"),
+        b"train: release/images\nnames: [person]\n",
+    )
+    .unwrap();
+    std::fs::write(source.path().join("release/images/example.gif"), b"image").unwrap();
+    let owner = UserId::from("admin");
+    let service = ImportService::new(
+        datasets.path(),
+        ImportConfig {
+            enabled: true,
+            import_roots: vec![ImportRoot {
+                root_id: "releases".to_string(),
+                path: source.path().to_path_buf(),
+                allowed_owners: vec![owner.clone()],
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let root = service
+        .browse_server_root("releases", &owner, "", 0)
+        .await
+        .unwrap();
+    assert_eq!(root.relative_path, "");
+    assert_eq!(root.entries.len(), 1);
+    assert_eq!(root.entries[0].relative_path, "release");
+    assert_eq!(root.entries[0].kind, ImportBrowseEntryKind::Directory);
+    let error = service
+        .browse_server_root("releases", &owner, "../outside", 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Import { code, .. } if code == "source_path_invalid"));
+    let error = service
+        .browse_server_root("releases", &UserId::from("other"), "", 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Import { code, .. } if code == "import_root_forbidden"));
+
+    let job = service
+        .create_job(
+            owner.clone(),
+            CreateImportRequest {
+                destination_dataset_id: DatasetId::from("browse-source"),
+                destination_name: "Browse source".to_string(),
+                profile: ImportProfile::UltralyticsYoloDetectV1,
+                transport: ImportTransport::ServerDirectory,
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .copy_server_directory(
+            &job.import_id,
+            &owner,
+            ServerDirectorySelection {
+                root_id: "releases".to_string(),
+                relative_directory: "release".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let descriptors = service
+        .browse_staged_source(
+            &job.import_id,
+            &owner,
+            "release",
+            0,
+            ImportBrowseMode::Descriptors,
+        )
+        .await
+        .unwrap();
+    assert_eq!(descriptors.entries.len(), 1);
+    assert_eq!(descriptors.entries[0].relative_path, "release/dataset.yaml");
+    assert_eq!(descriptors.entries[0].kind, ImportBrowseEntryKind::File);
+    assert!(descriptors.entries[0].file_id.is_some());
+
+    let images = service
+        .browse_staged_source(
+            &job.import_id,
+            &owner,
+            "release/images",
+            0,
+            ImportBrowseMode::Images,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        images.entries[0].relative_path,
+        "release/images/example.gif"
     );
 }
 

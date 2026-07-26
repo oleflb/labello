@@ -4875,11 +4875,16 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
     let yolo_detect = BTreeMap::from([
         (
             "dataset.yaml".to_string(),
-            b"path: .\ntrain: images/train\nnames: [person]\n".to_vec(),
+            b"path: .\ntrain: images/train\nval: images/val\nnames: [person]\n".to_vec(),
         ),
         ("images/train/a.png".to_string(), png.clone()),
+        ("images/val/b.png".to_string(), png_bytes(5, 4)),
         (
             "labels/train/a.txt".to_string(),
+            b"0 0.5 0.5 0.5 0.5\n".to_vec(),
+        ),
+        (
+            "labels/val/b.txt".to_string(),
             b"0 0.5 0.5 0.5 0.5\n".to_vec(),
         ),
     ]);
@@ -5153,6 +5158,18 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
             let path = files.keys().nth(client_index).unwrap();
             file_ids.insert(path.clone(), file["fileId"].as_str().unwrap().to_string());
         }
+        if case_index == 0 {
+            let incomplete = import_json_request(
+                &app,
+                "POST",
+                &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+                "admin",
+                None,
+                json!({ "descriptorFileId": file_ids["dataset.yaml"] }),
+            )
+            .await;
+            assert_eq!(incomplete.0, StatusCode::UNPROCESSABLE_ENTITY);
+        }
         for (file_index, (path, bytes)) in files.iter().enumerate() {
             let digest = blake3::hash(bytes).to_hex().to_string();
             let response = app
@@ -5181,6 +5198,44 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
             assert_eq!(response.status(), StatusCode::OK, "upload {path}");
         }
         app = restarted_import_router(temp.path()).await;
+        if descriptor_kind == "yolo_dataset" {
+            let inspection = import_json_request(
+                &app,
+                "POST",
+                &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+                "admin",
+                None,
+                json!({ "descriptorFileId": file_ids[descriptor_path] }),
+            )
+            .await;
+            assert_eq!(inspection.0, StatusCode::OK, "{}", inspection.1);
+            assert_eq!(inspection.1["splits"][0]["name"], "train");
+            assert_eq!(inspection.1["splits"][0]["usable"], true);
+            if case_index == 0 {
+                assert_eq!(inspection.1["splits"][1]["name"], "val");
+                assert_eq!(inspection.1["splits"][1]["usable"], true);
+                let wrong_owner = import_json_request(
+                    &app,
+                    "POST",
+                    &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+                    "other",
+                    None,
+                    json!({ "descriptorFileId": file_ids[descriptor_path] }),
+                )
+                .await;
+                assert_eq!(wrong_owner.0, StatusCode::NOT_FOUND);
+                let forbidden = import_json_request(
+                    &app,
+                    "POST",
+                    &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+                    "viewer",
+                    None,
+                    json!({ "descriptorFileId": file_ids[descriptor_path] }),
+                )
+                .await;
+                assert_eq!(forbidden.0, StatusCode::FORBIDDEN);
+            }
+        }
         let uploading = app
             .clone()
             .oneshot(
@@ -5235,6 +5290,11 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
                 "pairingGroup": null
             }])
         };
+        let selected_splits = if case_index == 0 {
+            json!(["train", "val"])
+        } else {
+            json!(["train"])
+        };
         let sealed = import_json_request(
             &app,
             "POST",
@@ -5245,7 +5305,7 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
                 "source": {
                     "sourceNamespace": format!("fixture-{case_index}"),
                     "descriptors": descriptors,
-                    "selectedSplits": ["train"],
+                    "selectedSplits": selected_splits,
                     "selectedCategoryKeys": []
                 },
                 "attestations": {
@@ -5346,7 +5406,7 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
                     .contains(&json!("skeleton"))
             );
         }
-        let expected_geometry_tasks = if matches!(case_index, 1 | 3 | 4) {
+        let expected_geometry_tasks = if matches!(case_index, 0 | 1 | 3 | 4) {
             2
         } else {
             1
@@ -5362,7 +5422,7 @@ async fn imports_all_profiles_publish_atomically_and_remain_accessible_after_res
         assert_eq!(preflight.1["preflightReport"]["coverage"]["incomplete"], 0);
         assert_eq!(
             preflight.1["preflightReport"]["coverageByGeometry"]["boundingBoxes"]["complete"],
-            if case_index == 4 { 2 } else { 1 }
+            if matches!(case_index, 0 | 4) { 2 } else { 1 }
         );
         assert_eq!(
             preflight.1["preflightReport"]["coverageByGeometry"]["skeletons"]["complete"],
@@ -5813,6 +5873,29 @@ async fn server_directory_import_copies_selected_source_and_publishes() {
     .await
     .unwrap();
     let app = router(ApiState::new(datasets.path()).with_import_service(service));
+    let browsed_root = import_json_request(
+        &app,
+        "POST",
+        "/import-roots/releases/browse",
+        "admin",
+        None,
+        json!({ "relativePath": "", "offset": 0 }),
+    )
+    .await;
+    assert_eq!(browsed_root.0, StatusCode::OK, "{}", browsed_root.1);
+    assert!(
+        browsed_root.1["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["kind"] == "directory")
+    );
+    assert!(
+        !browsed_root
+            .1
+            .to_string()
+            .contains(source.path().to_str().unwrap())
+    );
     let created = import_json_request(
         &app,
         "POST",
@@ -5838,6 +5921,36 @@ async fn server_directory_import_copies_selected_source_and_publishes() {
     assert_eq!(created.0, StatusCode::OK, "{}", created.1);
     assert_eq!(created.1["lifecycle"], "uploading");
     let import_id = created.1["importId"].as_str().unwrap();
+    let browsed_source = import_json_request(
+        &app,
+        "POST",
+        &format!("/imports/{import_id}/source/browse"),
+        "admin",
+        None,
+        json!({ "relativePath": "", "offset": 0, "mode": "descriptors" }),
+    )
+    .await;
+    assert_eq!(browsed_source.0, StatusCode::OK, "{}", browsed_source.1);
+    let descriptor_file_id = browsed_source.1["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["relativePath"] == "dataset.yaml")
+        .and_then(|entry| entry["fileId"].as_str())
+        .unwrap()
+        .to_string();
+    let inspection = import_json_request(
+        &app,
+        "POST",
+        &format!("/imports/{import_id}/yolo-descriptor/inspect"),
+        "admin",
+        None,
+        json!({ "descriptorFileId": descriptor_file_id }),
+    )
+    .await;
+    assert_eq!(inspection.0, StatusCode::OK, "{}", inspection.1);
+    assert_eq!(inspection.1["splits"][0]["name"], "train");
+    assert_eq!(inspection.1["splits"][0]["usable"], true);
     let sealed = import_json_request(
         &app,
         "POST",
@@ -5848,7 +5961,7 @@ async fn server_directory_import_copies_selected_source_and_publishes() {
             "source": {
                 "sourceNamespace": "server-release",
                 "descriptors": [{
-                    "descriptorFileId": "dataset.yaml",
+                    "descriptorFileId": descriptor_file_id,
                     "kind": "yolo_dataset",
                     "release": "v1",
                     "split": "train"

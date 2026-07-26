@@ -66,6 +66,15 @@ pub(crate) enum UiMessage {
         request: ImportRequestIdentity,
         result: Result<labello_client::RegisterImportFilesResult, String>,
     },
+    ImportSourceBrowsed {
+        request: ImportRequestIdentity,
+        result: Result<labello_client::ImportBrowsePage, String>,
+    },
+    YoloDescriptorInspected {
+        request: ImportRequestIdentity,
+        descriptor_file_id: String,
+        result: Result<labello_client::YoloDescriptorInspection, String>,
+    },
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     ImportChunkUploaded {
         request: ImportRequestIdentity,
@@ -256,6 +265,22 @@ pub(crate) enum UiCommand {
         import_id: labello_domain::ImportId,
         body: labello_client::RegisterImportFilesRequest,
         idempotency_key: String,
+    },
+    BrowseImportRoot {
+        request: ImportRequestIdentity,
+        root_id: String,
+        body: labello_client::BrowseServerImportRootRequest,
+    },
+    BrowseImportSource {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        body: labello_client::BrowseImportSourceRequest,
+    },
+    InspectYoloDescriptor {
+        request: ImportRequestIdentity,
+        import_id: labello_domain::ImportId,
+        descriptor_file_id: String,
+        body: labello_client::InspectYoloDescriptorRequest,
     },
     SealImport {
         request: ImportRequestIdentity,
@@ -465,6 +490,9 @@ impl UiCommand {
             | Self::CreateImport { .. }
             | Self::GetImport { .. }
             | Self::RegisterImportFiles { .. }
+            | Self::BrowseImportRoot { .. }
+            | Self::BrowseImportSource { .. }
+            | Self::InspectYoloDescriptor { .. }
             | Self::SealImport { .. }
             | Self::PreflightImport { .. }
             | Self::UpdateImportPlan { .. }
@@ -510,6 +538,9 @@ impl UiCommand {
             | Self::CreateImport { request, .. }
             | Self::GetImport { request, .. }
             | Self::RegisterImportFiles { request, .. }
+            | Self::BrowseImportRoot { request, .. }
+            | Self::BrowseImportSource { request, .. }
+            | Self::InspectYoloDescriptor { request, .. }
             | Self::SealImport { request, .. }
             | Self::PreflightImport { request, .. }
             | Self::UpdateImportPlan { request, .. }
@@ -527,6 +558,8 @@ impl UiMessage {
             Self::ImportCapabilitiesLoaded { .. }
             | Self::ImportJobLoaded { .. }
             | Self::ImportFilesRegistered { .. }
+            | Self::ImportSourceBrowsed { .. }
+            | Self::YoloDescriptorInspected { .. }
             | Self::ImportChunkUploaded { .. }
             | Self::ImportSealed { .. }
             | Self::ImportPlanUpdated { .. }
@@ -574,6 +607,8 @@ impl UiMessage {
             Self::ImportCapabilitiesLoaded { request, .. }
             | Self::ImportJobLoaded { request, .. }
             | Self::ImportFilesRegistered { request, .. }
+            | Self::ImportSourceBrowsed { request, .. }
+            | Self::YoloDescriptorInspected { request, .. }
             | Self::ImportChunkUploaded { request, .. }
             | Self::ImportSealed { request, .. }
             | Self::ImportPlanUpdated { request, .. }

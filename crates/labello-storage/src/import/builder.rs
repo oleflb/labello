@@ -56,7 +56,16 @@ struct SourceObjectRecord<'a> {
     source_bbox: Option<&'a [f64]>,
     source_area: Option<f64>,
     clipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normalization: Option<SourceObjectNormalization>,
     output: ImportedObjectMapping,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceObjectNormalization {
+    transform_id: &'static str,
+    tolerance: f64,
 }
 
 pub(super) async fn build(
@@ -1512,6 +1521,12 @@ fn write_source_objects(
             source_bbox: object.source_bbox.as_deref(),
             source_area: object.source_area,
             clipped: object.clipped,
+            normalization: object.boundary_rounding_normalized.then_some(
+                SourceObjectNormalization {
+                    transform_id: "yolo_boundary_rounding_v1",
+                    tolerance: super::formats::YOLO_BOUNDARY_ROUNDING_TOLERANCE,
+                },
+            ),
             output: outputs.get(&object.source_object_key).cloned().unwrap_or(
                 ImportedObjectMapping {
                     source_object_key: object.source_object_key.clone(),
