@@ -17,7 +17,7 @@ use labello_domain::{
     UserId, migration_target_set_hash,
 };
 
-use crate::app::{AppView, CorrectionDraft, LabelloApp, PendingTransition};
+use crate::app::{AppView, CorrectionDraft, LabelloApp, PendingTransition, SetupSection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectorPreset {
@@ -315,6 +315,7 @@ fn migration_deleted_guide_preset(ctx: &egui::Context) -> LabelloApp {
 
 fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
     let mut app = setup_preset();
+    app.setup.section = SetupSection::Import;
     app.import_flow.capabilities = Some(import_capabilities());
     app.import_flow.open = true;
     app.import_flow.screen = screen;
