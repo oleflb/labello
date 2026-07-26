@@ -24,7 +24,6 @@ pub(crate) struct ManualMigrationState {
     pub next_hidden: bool,
     pub exclusion_reason: MigrationExclusionReason,
     pub exclusion_note: String,
-    pub full_image_confirmed: bool,
     pub review_index: usize,
     pub progress: Option<labello_client::ManualMigrationProgress>,
     pub busy: bool,
@@ -42,7 +41,6 @@ impl Default for ManualMigrationState {
             next_hidden: false,
             exclusion_reason: MigrationExclusionReason::NoValidSkeleton,
             exclusion_note: String::new(),
-            full_image_confirmed: false,
             review_index: 0,
             progress: None,
             busy: false,
@@ -114,7 +112,6 @@ impl LabelloApp {
             self.work.migration.keypoint_index = 0;
             self.work.migration.next_hidden = false;
             self.work.migration.exclusion_note.clear();
-            self.work.migration.full_image_confirmed = false;
         }
         if self.view == AppView::Review {
             self.work.migration.review_index = self.canonical_migration_review_index();
@@ -565,19 +562,22 @@ impl LabelloApp {
             "Object selection is fixed by canonical replay order; canvas clicks do not change it.",
         );
         self.migration_status_list(ui);
-        let confirmation_label = if expected == 0 {
-            "I confirm this image has zero canonical guides and no skeletons are required"
+        let (confirmation, button_label) = if expected == 0 {
+            (
+                "Confirm that this image has no canonical guides and needs no skeletons.",
+                "Confirm no guides & finish",
+            )
         } else {
-            "I checked every canonical guide, skeleton or exclusion, and the full image"
+            (
+                "Confirm that every canonical guide is resolved and the full image was checked.",
+                "Confirm all guides & finish",
+            )
         };
-        ui.checkbox(
-            &mut self.work.migration.full_image_confirmed,
-            confirmation_label,
-        );
+        ui.label(confirmation);
         if theme::primary_button(
             ui,
-            self.work.migration.full_image_confirmed && !self.work.migration.busy,
-            egui::Button::new("Confirm full image & finish"),
+            !self.work.migration.busy,
+            egui::Button::new(button_label),
         )
         .clicked()
         {

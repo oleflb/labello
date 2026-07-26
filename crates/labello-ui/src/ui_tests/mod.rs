@@ -632,12 +632,51 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     );
     assert!(
         full_image
+            .query_by_label("Confirm all guides & finish")
+            .is_some()
+    );
+    assert!(
+        full_image
+            .query_by_role(egui::accesskit::Role::CheckBox)
+            .is_none()
+    );
+    assert!(full_image.query_by_label("Start correction pass").is_some());
+
+    let mut no_guides_app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    let task_id = no_guides_app.selected_task_id.clone().unwrap();
+    let state = no_guides_app.current_state.as_mut().unwrap();
+    state
+        .migration_target_sets
+        .get_mut(&task_id)
+        .unwrap()
+        .targets
+        .clear();
+    state
+        .migration_dispositions
+        .get_mut(&task_id)
+        .unwrap()
+        .clear();
+    no_guides_app.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
+    no_guides_app.migration.progress = None;
+    let mut no_guides = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| no_guides_app);
+    no_guides.step();
+    assert!(
+        no_guides
+            .query_by_label("Confirm no guides & finish")
+            .is_some()
+    );
+    assert!(
+        no_guides
             .query_by_label(
-                "I checked every canonical guide, skeleton or exclusion, and the full image"
+                "Confirm that this image has no canonical guides and needs no skeletons."
             )
             .is_some()
     );
-    assert!(full_image.query_by_label("Start correction pass").is_some());
 
     let mut deleted = Harness::builder()
         .with_size(egui::vec2(390.0, 667.0))

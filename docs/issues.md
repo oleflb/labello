@@ -45,7 +45,7 @@ Only after that continue with the next issue.
 - [x] Fix horizontal clipping in the migration inspector when canonical bounding-box guides are present.
   - The annotation canvas must not overlap or obscure the left edge of the inspector.
   - Validate the fix in the native inspector at desktop and mobile widths.
-- [ ] Replace the redundant full-image migration confirmation checkbox and button with one explicit confirmation button.
+- [x] Replace the redundant full-image migration confirmation checkbox and button with one explicit confirmation button.
   - Use context-specific wording for images with no guides and images whose guides were resolved.
 - [ ] Support removing placed migration keypoints with both Delete and Undo.
   - Match normal annotation behavior without allowing edits to the canonical bounding-box guide.

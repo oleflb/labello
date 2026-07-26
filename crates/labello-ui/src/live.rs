@@ -320,7 +320,6 @@ impl LabelloApp {
                             self.work.migration.draft = None;
                             self.work.migration.draft_group = None;
                             self.work.migration.keypoint_index = 0;
-                            self.work.migration.full_image_confirmed = false;
                             self.work.migration.error = None;
                             if self.view == AppView::Review {
                                 self.work.migration.review_index =
