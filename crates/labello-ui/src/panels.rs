@@ -1,5 +1,7 @@
 use eframe::egui::{self, RichText};
-use labello_domain::{AdjudicationDecision, AnnotationGeometry, KeypointState, ReviewDecision};
+use labello_domain::{
+    AdjudicationDecision, AnnotationGeometry, AnnotationType, KeypointState, ReviewDecision,
+};
 
 use crate::{
     app::{
@@ -680,39 +682,31 @@ impl LabelloApp {
             !self.loading.saving && !self.loading.image && self.pending_transition.is_none();
         for workflow in workflows {
             let selected = self.selected_task_id.as_ref() == Some(&workflow.task_id);
-            let frame = theme::selected_card_frame(selected);
-            frame.show(ui, |ui| {
-                if ui
-                    .add_enabled(
-                        ready,
-                        egui::Button::selectable(
-                            selected,
-                            RichText::new(workflow.label()).strong(),
-                        ),
-                    )
-                    .on_hover_text(format!(
-                        "Previous: {} · Next: {}",
-                        self.shortcut_text(
-                            ui.ctx(),
-                            labello_domain::UserAction::SelectPreviousWorkflow,
-                        ),
-                        self.shortcut_text(
-                            ui.ctx(),
-                            labello_domain::UserAction::SelectNextWorkflow,
-                        )
-                    ))
-                    .clicked()
-                    && !selected
-                {
-                    self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
-                }
-                theme::badge(
-                    ui,
-                    annotation_type_label(&workflow.annotation_type),
-                    theme::Intent::Info,
-                );
-            });
-            ui.add_space(6.0);
+            let icon_id = ui.id().with(("workflow-type", &workflow.task_id));
+            let button = egui::Button::new((
+                egui::Atom::custom(icon_id, egui::vec2(28.0, 28.0)),
+                RichText::new(workflow.label()).strong(),
+            ))
+            .selected(selected)
+            .frame(true)
+            .frame_when_inactive(true)
+            .corner_radius(theme::SURFACE_RADIUS)
+            .min_size(egui::vec2(ui.available_width(), 52.0))
+            .gap(theme::SPACE_2)
+            .truncate();
+            let choice = ui.add_enabled_ui(ready, |ui| button.atom_ui(ui)).inner;
+            if let Some(icon_rect) = choice.rect(icon_id) {
+                workflow_type_icon(ui, icon_id, icon_rect, &workflow.annotation_type);
+            }
+            let response = choice.response.on_hover_text(format!(
+                "{} workflow\nPrevious: {} · Next: {}",
+                annotation_type_label(&workflow.annotation_type),
+                self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectPreviousWorkflow,),
+                self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextWorkflow,)
+            ));
+            if response.clicked() && !selected {
+                self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
+            }
         }
         ui.separator();
         ui.label(RichText::new("Assignment").strong());
@@ -2297,6 +2291,71 @@ fn action_description(action: labello_domain::UserAction) -> &'static str {
         | UserAction::SelectKeypointTool
         | UserAction::ToggleOfflineMode => "No longer used.",
     }
+}
+
+fn workflow_type_icon(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    rect: egui::Rect,
+    annotation_type: &AnnotationType,
+) {
+    let color = match annotation_type {
+        AnnotationType::BoundingBox => theme::INFO,
+        AnnotationType::Skeleton => theme::PRELABEL,
+    };
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(7),
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 36),
+    );
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(7),
+        egui::Stroke::new(1.0, color.gamma_multiply(0.55)),
+        egui::StrokeKind::Inside,
+    );
+    match annotation_type {
+        AnnotationType::BoundingBox => {
+            painter.rect_stroke(
+                rect.shrink2(egui::vec2(6.0, 7.0)),
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(1.75, color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        AnnotationType::Skeleton => {
+            let center = rect.center();
+            let head = center + egui::vec2(0.0, -8.0);
+            let neck = center + egui::vec2(0.0, -3.0);
+            let left_hand = center + egui::vec2(-7.0, 0.0);
+            let right_hand = center + egui::vec2(7.0, 0.0);
+            let hip = center + egui::vec2(0.0, 4.0);
+            let left_foot = center + egui::vec2(-5.0, 9.0);
+            let right_foot = center + egui::vec2(5.0, 9.0);
+            for [start, end] in [
+                [head, neck],
+                [left_hand, neck],
+                [neck, right_hand],
+                [neck, hip],
+                [hip, left_foot],
+                [hip, right_foot],
+            ] {
+                painter.line_segment([start, end], egui::Stroke::new(1.5, color));
+            }
+            for point in [head, left_hand, right_hand, left_foot, right_foot] {
+                painter.circle_filled(point, 1.75, color);
+            }
+        }
+    }
+    ui.interact(rect, id.with("semantics"), egui::Sense::hover())
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Label,
+                true,
+                format!("{} annotation type", annotation_type_label(annotation_type)),
+            )
+        });
 }
 
 fn format_chord(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> String {

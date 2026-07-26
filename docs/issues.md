@@ -54,10 +54,17 @@ Only after that continue with the next issue.
 - [x] Complete live migration exercises for TSpot and XSpot and verify that their skeleton annotations persist.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
-- [ ] Redesign and compact the left-panel workflow selector.
+- [x] Redesign and compact the left-panel workflow selector.
   - Make every workflow card narrow and the same full width within the panel.
   - Replace annotation-type text pills with representative icons.
   - Place each type pill next to the workflow name and assign type-specific colors.
+  - Group workflows by class rather than annotation type.
+- [ ] Show assignment availability in the workflow selector.
+  - Add one authenticated batch endpoint for the current assignment kind; do not issue one request per workflow or infer availability from dataset statistics.
+  - Reuse the claim path's task, image-state, reservation, review, adjudication, migration, and imbalance eligibility rules so availability does not drift from actual assignment claims.
+  - Load availability when a workspace opens or its assignment kind changes, refresh it after claim/release/complete/reopen transitions, and poll lightly so assignments released by other users become selectable.
+  - Keep unknown or failed availability enabled. Grey out and skip unavailable workflows in keyboard cycling, with an accessible explanation and a manual retry path.
+  - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Run focused regression checks and review the complete integration diff.
 - [ ] Clean up disposable integration processes, data, and temporary configuration files without touching unrelated services or user files.
 - [ ] Perform a full deep-dive integration test of every import UI stage and element.

@@ -2318,6 +2318,61 @@ fn workers_select_class_specific_workflows() {
 }
 
 #[test]
+fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    let mut skeleton = harness.state().tasks[0].clone();
+    skeleton.task_id = TaskId::from("skeleton:person");
+    skeleton.name = "Person skeleton with a deliberately long workflow name".to_string();
+    skeleton.annotation_type = AnnotationType::Skeleton;
+    skeleton.skeleton = Some(SkeletonSpec {
+        keypoints: vec![KeypointSpec {
+            name: "head".to_string(),
+            required: true,
+        }],
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: true,
+    });
+    harness.state_mut().tasks.push(skeleton);
+    harness.step();
+
+    let bounding_box = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
+        .rect();
+    let vehicle = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Vehicle boxes")
+        .rect();
+    let skeleton = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Person skeleton with a deliberately long workflow name",
+        )
+        .rect();
+    assert_eq!(bounding_box.width(), vehicle.width());
+    assert_eq!(bounding_box.width(), skeleton.width());
+    assert_eq!(bounding_box.height(), vehicle.height());
+    assert_eq!(bounding_box.height(), skeleton.height());
+    assert!(bounding_box.width() >= 220.0);
+    assert!(bounding_box.height() <= 52.0);
+    assert!(
+        skeleton.top() - bounding_box.bottom() <= 8.0,
+        "bounding_box={bounding_box:?} skeleton={skeleton:?}"
+    );
+    assert!(
+        vehicle.top() - skeleton.bottom() <= 8.0,
+        "skeleton={skeleton:?} vehicle={vehicle:?}"
+    );
+    assert!(
+        harness
+            .query_all_by_label("bounding box annotation type")
+            .next()
+            .is_some()
+    );
+    assert!(harness.query_by_label("skeleton annotation type").is_some());
+}
+
+#[test]
 fn missing_workflow_is_actionable() {
     let api = Rc::new(SpyApi::new());
     api.clear_workflows();

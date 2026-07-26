@@ -603,17 +603,27 @@ impl LabelloApp {
 
     pub(crate) fn workflow_choices(&self) -> Vec<WorkflowChoice> {
         let mut choices = Vec::new();
-        for task in &self.tasks {
+        for (task_order, task) in self.tasks.iter().enumerate() {
             if !valid_workflow(task) {
                 continue;
             }
-            choices.push(WorkflowChoice {
-                task_id: task.task_id.clone(),
-                task_name: task.name.clone(),
-                annotation_type: task.annotation_type.clone(),
-            });
+            let class_order = self
+                .classes
+                .iter()
+                .position(|class| Some(&class.class_id) == task.class_ids.first())
+                .unwrap_or(usize::MAX);
+            choices.push((
+                class_order,
+                task_order,
+                WorkflowChoice {
+                    task_id: task.task_id.clone(),
+                    task_name: task.name.clone(),
+                    annotation_type: task.annotation_type.clone(),
+                },
+            ));
         }
-        choices
+        choices.sort_by_key(|(class_order, task_order, _)| (*class_order, *task_order));
+        choices.into_iter().map(|(_, _, choice)| choice).collect()
     }
 
     pub(crate) fn selected_workflow(&self) -> Option<WorkflowChoice> {
