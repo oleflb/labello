@@ -2290,6 +2290,7 @@ async fn yolo_parallel_image_validation_is_deterministic() {
         &job,
         preflight.clone(),
         &serial_limits,
+        &service.decoded_image_memory,
         &cancelled,
     )
     .unwrap();
@@ -2299,6 +2300,7 @@ async fn yolo_parallel_image_validation_is_deterministic() {
         &job,
         preflight,
         &service.config.limits,
+        &service.decoded_image_memory,
         &cancelled,
     )
     .unwrap();
@@ -2315,6 +2317,17 @@ async fn preflight_cancellation_and_worker_limits_are_enforced() {
     let temp = tempfile::tempdir().unwrap();
     let mut invalid_config = enabled_config();
     invalid_config.limits.image_validation_workers = MAX_IMAGE_VALIDATION_WORKERS + 1;
+    let error = ImportService::new(temp.path(), invalid_config)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        StorageError::Import { ref code, .. } if code == "import_limit_invalid"
+    ));
+    let mut invalid_config = enabled_config();
+    invalid_config.limits.decoded_image_memory_bytes =
+        invalid_config.limits.decoded_image_bytes - 1;
     let error = ImportService::new(temp.path(), invalid_config)
         .await
         .err()
@@ -2342,6 +2355,7 @@ async fn preflight_cancellation_and_worker_limits_are_enforced() {
         &job,
         request(ImportProfile::UltralyticsYoloDetectV1),
         &service.config.limits,
+        &service.decoded_image_memory,
         &cancelled,
     )
     .err()
@@ -2534,6 +2548,7 @@ async fn yolo_label_failure_stops_before_later_validation_batches() {
         &job,
         preflight.clone(),
         &serial_limits,
+        &service.decoded_image_memory,
         &cancelled,
     )
     .unwrap();
@@ -2543,6 +2558,7 @@ async fn yolo_label_failure_stops_before_later_validation_batches() {
         &job,
         preflight,
         &service.config.limits,
+        &service.decoded_image_memory,
         &cancelled,
     )
     .unwrap();

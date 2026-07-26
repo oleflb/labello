@@ -63,6 +63,7 @@ pub struct ImportService {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     active_builds: Arc<Mutex<BTreeSet<ImportId>>>,
     descriptor_inspection_workers: Arc<tokio::sync::Semaphore>,
+    decoded_image_memory: Arc<image_validation::DecodedImageMemoryLimiter>,
     capabilities: ImportCapabilities,
     #[cfg(test)]
     fail_create_after_reservation: Arc<std::sync::atomic::AtomicBool>,
@@ -153,6 +154,9 @@ impl ImportService {
             atomic_publication,
             secure_server_open,
         };
+        let decoded_image_memory = Arc::new(image_validation::DecodedImageMemoryLimiter::new(
+            config.limits.decoded_image_memory_bytes,
+        ));
         Ok(Self {
             datasets_root: Arc::new(datasets_root),
             datasets_display_root: Arc::new(datasets_display_root),
@@ -164,6 +168,7 @@ impl ImportService {
             descriptor_inspection_workers: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_DESCRIPTOR_INSPECTIONS,
             )),
+            decoded_image_memory,
             capabilities,
             #[cfg(test)]
             fail_create_after_reservation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -654,6 +659,7 @@ impl ImportService {
         let parse_job_dir = self.job_dir(import_id);
         let parse_job = job.clone();
         let parse_limits = self.config.limits.clone();
+        let decoded_image_memory = self.decoded_image_memory.clone();
         let parser_cancelled = Arc::new(AtomicBool::new(false));
         let _cancellation_guard = ParserCancellationGuard(parser_cancelled.clone());
         let worker_cancelled = parser_cancelled.clone();
@@ -664,6 +670,7 @@ impl ImportService {
                 &parse_job,
                 request,
                 &parse_limits,
+                &decoded_image_memory,
                 &worker_cancelled,
             )
         });
@@ -1373,6 +1380,18 @@ fn validate_config(datasets_root: &Path, config: &ImportConfig) -> StorageResult
         return Err(import_error(
             "import_limit_invalid",
             "image validation workers must be within the supported range",
+        ));
+    }
+    let minimum_image_memory = config
+        .limits
+        .decoded_image_bytes
+        .checked_mul(2)
+        .and_then(|decoded| decoded.checked_add(config.limits.single_source_file_bytes));
+    if minimum_image_memory.is_none_or(|minimum| config.limits.decoded_image_memory_bytes < minimum)
+    {
+        return Err(import_error(
+            "import_limit_invalid",
+            "decoded image memory budget must cover one maximum-size animated image",
         ));
     }
     let datasets = std::fs::canonicalize(datasets_root).with_path(datasets_root)?;

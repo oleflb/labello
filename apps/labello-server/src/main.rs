@@ -58,6 +58,7 @@ struct ImportFileConfig {
 struct ImportLimitsFileConfig {
     concurrent_build_jobs: u64,
     image_validation_workers: u64,
+    decoded_image_memory_bytes: u64,
     concurrent_browser_upload_jobs: u64,
     active_reservations_per_owner: u64,
     browser_source_files: u64,
@@ -103,6 +104,7 @@ impl Default for ImportLimitsFileConfig {
                 .expect("default concurrent_build_jobs fits in u64"),
             image_validation_workers: u64::try_from(limits.image_validation_workers)
                 .expect("default image_validation_workers fits in u64"),
+            decoded_image_memory_bytes: limits.decoded_image_memory_bytes,
             concurrent_browser_upload_jobs: u64::try_from(limits.concurrent_browser_upload_jobs)
                 .expect("default concurrent_browser_upload_jobs fits in u64"),
             active_reservations_per_owner: u64::try_from(limits.active_reservations_per_owner)
@@ -379,6 +381,7 @@ fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<Impo
     let values = [
         ("concurrentBuildJobs", config.concurrent_build_jobs),
         ("imageValidationWorkers", config.image_validation_workers),
+        ("decodedImageMemoryBytes", config.decoded_image_memory_bytes),
         (
             "concurrentBrowserUploadJobs",
             config.concurrent_browser_upload_jobs,
@@ -483,6 +486,17 @@ fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<Impo
         config.yolo_line_bytes,
         "yoloLineBytes",
     )?;
+    let minimum_image_memory = config
+        .decoded_image_bytes
+        .checked_mul(2)
+        .and_then(|decoded| decoded.checked_add(config.single_source_file_bytes))
+        .ok_or_else(|| anyhow::anyhow!("import image validation memory limits overflow"))?;
+    validate_limit_order(
+        minimum_image_memory,
+        "singleSourceFileBytes plus twice decodedImageBytes",
+        config.decoded_image_memory_bytes,
+        "decodedImageMemoryBytes",
+    )?;
     validate_limit_order(
         config.total_source_bytes,
         "totalSourceBytes",
@@ -510,6 +524,7 @@ fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<Impo
             config.image_validation_workers,
             "imageValidationWorkers",
         )?,
+        decoded_image_memory_bytes: config.decoded_image_memory_bytes,
         concurrent_browser_upload_jobs: usize_import_limit(
             config.concurrent_browser_upload_jobs,
             "concurrentBrowserUploadJobs",
@@ -701,6 +716,7 @@ localAdminLogin = false
             "concurrentBuildJobs = 3\n",
             r#"concurrentBuildJobs = 3
 imageValidationWorkers = 6
+decodedImageMemoryBytes = 90000
 concurrentBrowserUploadJobs = 4
 activeReservationsPerOwner = 5
 browserSourceFiles = 600
@@ -738,6 +754,7 @@ diagnosticExamplesPerCode = 7
             ImportLimits {
                 concurrent_build_jobs: 3,
                 image_validation_workers: 6,
+                decoded_image_memory_bytes: 90000,
                 concurrent_browser_upload_jobs: 4,
                 active_reservations_per_owner: 5,
                 browser_source_files: 600,
@@ -784,10 +801,16 @@ diagnosticExamplesPerCode = 7
         for (field, value, expected) in [
             ("concurrentBuildJobs", 0, "must be greater than zero"),
             ("imageValidationWorkers", 0, "must be greater than zero"),
+            ("decodedImageMemoryBytes", 0, "must be greater than zero"),
             (
                 "imageValidationWorkers",
                 u64::try_from(labello_storage::MAX_IMAGE_VALIDATION_WORKERS).unwrap() + 1,
                 "exceeds the supported maximum",
+            ),
+            (
+                "decodedImageMemoryBytes",
+                ImportLimits::default().decoded_image_bytes - 1,
+                "singleSourceFileBytes plus twice decodedImageBytes cannot exceed import.limits.decodedImageMemoryBytes",
             ),
             (
                 "descriptorBytes",

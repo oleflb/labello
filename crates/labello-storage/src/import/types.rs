@@ -53,6 +53,7 @@ pub struct ImportRoot {
 pub struct ImportLimits {
     pub concurrent_build_jobs: usize,
     pub image_validation_workers: usize,
+    pub decoded_image_memory_bytes: u64,
     pub concurrent_browser_upload_jobs: usize,
     pub active_reservations_per_owner: usize,
     pub browser_source_files: usize,
@@ -86,7 +87,8 @@ impl Default for ImportLimits {
     fn default() -> Self {
         Self {
             concurrent_build_jobs: 1,
-            image_validation_workers: 4,
+            image_validation_workers: 8,
+            decoded_image_memory_bytes: 5 * 1024 * 1024 * 1024,
             concurrent_browser_upload_jobs: 2,
             active_reservations_per_owner: 2,
             browser_source_files: 25_000,

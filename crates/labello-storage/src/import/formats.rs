@@ -15,7 +15,7 @@ use labello_domain::{
 use serde_json::Value;
 
 use super::{
-    image_validation::validate_image,
+    image_validation::{DecodedImageMemoryLimiter, validate_image},
     ir::{F64Box, ImportIr, IrCategory, IrImage, IrKeypoint, IrObject},
     source::{
         SourceAccess, SourceIndex, import_error, join_source_path, parent_source_path,
@@ -61,6 +61,7 @@ pub(super) fn preflight(
     job: &ImportJob,
     mut request: PreflightRequest,
     limits: &ImportLimits,
+    decoded_memory: &DecodedImageMemoryLimiter,
     cancelled: &AtomicBool,
 ) -> StorageResult<PreflightOutput> {
     check_cancelled(cancelled)?;
@@ -80,22 +81,36 @@ pub(super) fn preflight(
             limits,
             false,
             &mut diagnostics,
+            decoded_memory,
             cancelled,
         ),
-        ImportProfile::UltralyticsYoloPoseV1 => {
-            parse_yolo(&source, &request, limits, true, &mut diagnostics, cancelled)
-        }
+        ImportProfile::UltralyticsYoloPoseV1 => parse_yolo(
+            &source,
+            &request,
+            limits,
+            true,
+            &mut diagnostics,
+            decoded_memory,
+            cancelled,
+        ),
         ImportProfile::CocoInstancesGtV1 => parse_coco(
             &source,
             &request,
             limits,
             false,
             &mut diagnostics,
+            decoded_memory,
             cancelled,
         ),
-        ImportProfile::CocoKeypointsGtV1 => {
-            parse_coco(&source, &request, limits, true, &mut diagnostics, cancelled)
-        }
+        ImportProfile::CocoKeypointsGtV1 => parse_coco(
+            &source,
+            &request,
+            limits,
+            true,
+            &mut diagnostics,
+            decoded_memory,
+            cancelled,
+        ),
     };
     let mut ir = match parsed {
         Ok(ir) => ir,
@@ -326,6 +341,7 @@ fn validate_images(
     work: Vec<ImageValidationWork>,
     worker_limit: usize,
     limits: &ImportLimits,
+    decoded_memory: &DecodedImageMemoryLimiter,
     cancelled: &AtomicBool,
 ) -> StorageResult<BTreeMap<String, StorageResult<super::image_validation::ValidatedImage>>> {
     check_cancelled(cancelled)?;
@@ -343,6 +359,7 @@ fn validate_images(
                         &work.source_path,
                         &work.registered,
                         limits,
+                        decoded_memory,
                         cancelled,
                     )
                 });
@@ -381,6 +398,7 @@ fn validate_images(
                             &item.source_path,
                             &item.registered,
                             limits,
+                            decoded_memory,
                             cancelled,
                         )
                     });
@@ -417,6 +435,7 @@ fn parse_yolo(
     limits: &ImportLimits,
     pose: bool,
     diagnostics: &mut Diagnostics,
+    decoded_memory: &DecodedImageMemoryLimiter,
     cancelled: &AtomicBool,
 ) -> StorageResult<ImportIr> {
     if request.descriptor_paths.len() != 1 || request.selected_splits.is_empty() {
@@ -556,6 +575,7 @@ fn parse_yolo(
             validation_work,
             limits.image_validation_workers,
             limits,
+            decoded_memory,
             cancelled,
         )?;
         for selection in selection_batch {
@@ -910,6 +930,7 @@ fn parse_coco(
     limits: &ImportLimits,
     keypoints_profile: bool,
     diagnostics: &mut Diagnostics,
+    decoded_memory: &DecodedImageMemoryLimiter,
     cancelled: &AtomicBool,
 ) -> StorageResult<ImportIr> {
     if request.coco_descriptors.is_empty() {
@@ -1076,6 +1097,7 @@ fn parse_coco(
                     &image_path,
                     file,
                     limits,
+                    decoded_memory,
                     cancelled,
                 )?;
                 IrImage {

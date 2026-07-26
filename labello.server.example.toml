@@ -23,6 +23,8 @@ localAdminLogin = true
 # Every field in this optional section may be overridden independently.
 # [import.limits]
 # concurrentBuildJobs = 1
+# imageValidationWorkers = 8
+# decodedImageMemoryBytes = 5_368_709_120
 # concurrentBrowserUploadJobs = 2
 # activeReservationsPerOwner = 2
 # browserSourceFiles = 25_000
