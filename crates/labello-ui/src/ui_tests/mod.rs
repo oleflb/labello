@@ -45,7 +45,7 @@ use support::*;
 
 use crate::app::{
     AdminSection, AppConfig, AppView, Drawer, FolderUploadProgress, IMAGE_QUEUE_SIZE, LabelloApp,
-    LayoutMode, RequestIdentity, SaveStatus, UiCommand, UiMessage,
+    LayoutMode, RequestIdentity, SaveStatus, SetupSection, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
 use crate::persistence::{StoredCanvasTransform, StoredView, WorkspacePreference};
@@ -120,7 +120,7 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
 
     harness.set_size(egui::vec2(1500.0, 1200.0));
     harness.step();
-    click(&mut harness, "Create a dataset");
+    select_setup_section(&mut harness, "Create");
     harness.state_mut().setup.create_dataset_id = "new-dataset".to_string();
     harness.state_mut().setup.create_dataset_name = "New dataset".to_string();
     harness.step();
@@ -144,18 +144,48 @@ fn setup_create_open_and_admin_workflows_use_live_commands() {
 }
 
 #[test]
-fn setup_only_offers_dataset_creation_to_permitted_accounts() {
+fn setup_sections_are_permission_gated_responsive_and_preserve_import_state() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
 
     harness.state_mut().auth.can_create_datasets = false;
     harness.step();
-    assert!(harness.query_by_label("Create a dataset").is_none());
+    for label in ["Create", "Import"] {
+        assert!(harness.query_by_label(label).is_none());
+    }
 
     harness.state_mut().auth.can_create_datasets = true;
     harness.step();
-    assert!(harness.query_by_label("Create a dataset").is_some());
+    for label in ["Datasets", "Connection", "Create", "Import"] {
+        assert!(harness.query_by_label(label).is_some());
+    }
+    assert!(harness.query_by_label("Setup navigation").is_some());
+    click_accesskit_button(&mut harness, "Import");
+    assert_eq!(harness.state().setup.section, SetupSection::Import);
+    assert!(harness.state().import_flow.open);
+
+    harness.set_size(egui::vec2(900.0, 780.0));
+    harness.step();
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::ComboBox, "Setup section")
+            .is_some()
+    );
+    harness.state_mut().import_flow.destination_id = "active-import".to_string();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::ComboBox, "Setup section")
+        .click_accesskit();
+    harness.step();
+    click_accesskit_button(&mut harness, "Connection");
+    assert_eq!(harness.state().setup.section, SetupSection::Connection);
+    assert!(harness.state().import_flow.open);
+    assert_eq!(harness.state().import_flow.destination_id, "active-import");
+
+    harness.state_mut().setup.section = SetupSection::Import;
+    harness.state_mut().auth.can_create_datasets = false;
+    harness.step();
+    assert_eq!(harness.state().setup.section, SetupSection::Datasets);
 }
 
 #[test]
@@ -163,11 +193,12 @@ fn setup_import_blocks_mapping_when_real_category_contract_is_absent() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api.clone());
     harness.set_size(egui::vec2(1180.0, 2600.0));
-    step_until(&mut harness, 12, |app| {
-        app.import_flow.capabilities.is_some() && !app.datasets.summaries.is_empty()
-    });
+    step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
 
-    click(&mut harness, "Import a dataset");
+    select_setup_section(&mut harness, "Import");
+    step_until(&mut harness, 12, |app| {
+        app.import_flow.capabilities.is_some()
+    });
     {
         let flow = &mut harness.state_mut().import_flow;
         flow.open = true;
@@ -231,12 +262,14 @@ fn setup_import_blocks_mapping_when_real_category_contract_is_absent() {
 fn import_capability_is_bootstrap_admin_gated_and_stale_epochs_are_ignored() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
+    step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
+    select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
         app.import_flow.capabilities.is_some()
     });
     harness.state_mut().auth.can_create_datasets = false;
     harness.step();
-    assert!(harness.query_by_label("Import a dataset").is_none());
+    assert!(harness.query_by_label("Import").is_none());
 
     let app = harness.state_mut();
     app.auth.can_create_datasets = true;
@@ -366,6 +399,8 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     });
     api.set_import_job(recovered.clone());
     let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+    select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 8, |app| {
         app.import_flow.capabilities.is_some()
     });
@@ -444,6 +479,8 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api.clone());
     harness.set_size(egui::vec2(1180.0, 2600.0));
+    step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
+    select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
         app.import_flow.capabilities.is_some()
     });
@@ -497,6 +534,8 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
 fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api.clone());
+    step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
+    select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
         app.import_flow.capabilities.is_some()
     });
@@ -804,7 +843,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     harness.step();
 
     assert!(harness.query_by_label("Dataset Admin").is_some());
-    click_accesskit_button(&mut harness, "Images");
+    select_admin_section(&mut harness, "Images");
     click(&mut harness, "Pick folder and upload");
     harness.step();
     assert!(!harness.state().loading.uploading);
@@ -828,10 +867,10 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
 
     click_accesskit_button(&mut harness, "Add image root");
     harness.step();
-    click_accesskit_button(&mut harness, "Schema");
+    select_admin_section(&mut harness, "Schema");
     click_accesskit_button(&mut harness, "Add bounding box class workflow");
     harness.step();
-    click_accesskit_button(&mut harness, "Automation");
+    select_admin_section(&mut harness, "Automation");
     click_accesskit_button(&mut harness, "Add browser prelabel config");
     harness.step();
     let config = harness.state().datasets.admin_config.as_ref().unwrap();
@@ -896,7 +935,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     assert_eq!(api.counts().list_images, 1);
     assert_eq!(api.counts().list_snapshots, 1);
     assert!(harness.query_by_label("one.png").is_none());
-    click_accesskit_button(&mut harness, "Images");
+    select_admin_section(&mut harness, "Images");
     assert!(harness.query_by_label("one.png").is_some());
     assert!(
         harness
@@ -946,7 +985,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     });
     assert_eq!(api.last_image_query().unwrap().page, 2);
 
-    click_accesskit_button(&mut harness, "Backups");
+    select_admin_section(&mut harness, "Backups");
     click_accesskit_button(&mut harness, "Create snapshot");
     step_until(&mut harness, 8, |app| !app.loading.creating_snapshot);
     assert_eq!(api.counts().create_snapshot, 1);
@@ -982,7 +1021,7 @@ fn admin_classes_and_workflows_use_compact_desktop_editors() {
     let mut harness = loaded_admin_harness(api);
     harness.set_size(egui::vec2(1300.0, 8000.0));
     harness.step();
-    click_accesskit_button(&mut harness, "Schema");
+    select_admin_section(&mut harness, "Schema");
 
     let class_name_fields = harness
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "Name")
@@ -1065,6 +1104,8 @@ fn session_is_restored_before_datasets_load_and_logout_clears_it() {
     assert!(harness.state().datasets.summaries.is_empty());
     assert!(harness.state().drawer.is_none());
     assert!(!harness.state().show_tutorial);
+    assert_eq!(harness.state().setup.section, SetupSection::Connection);
+    assert!(harness.query_by_label("Sign in with GitHub").is_some());
 }
 
 #[test]
@@ -1079,7 +1120,8 @@ fn signed_out_setup_offers_advertised_login_methods_without_raw_credentials() {
         .with_max_steps(20)
         .build_eframe(|_| app);
     step_until(&mut harness, 8, |app| app.auth.checked);
-
+    assert_eq!(harness.state().setup.section, SetupSection::Connection);
+    assert!(harness.query_by_label("Datasets").is_none());
     assert!(harness.query_by_label("Sign in with GitHub").is_some());
     assert!(harness.query_by_label("Continue as local admin").is_some());
     assert!(harness.query_by_label("Dev token").is_none());
@@ -1216,7 +1258,7 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     harness.step();
 
     assert!(harness.query_by_label("People").is_some());
-    click_accesskit_button(&mut harness, "People");
+    select_admin_section(&mut harness, "People");
     assert!(harness.query_by_label("Reviewer Person").is_some());
     let role_bounds = ["Annotator", "Reviewer", "Adjudicator", "Data admin"].map(|role| {
         harness
@@ -1580,9 +1622,9 @@ fn admin_staged_changes_can_be_discarded_without_a_server_reload() {
         .name = "Unsaved rename".to_string();
     harness.step();
 
-    click_accesskit_button(&mut harness, "Schema");
+    select_admin_section(&mut harness, "Schema");
     assert_eq!(harness.state().admin_tools.section, AdminSection::Schema);
-    click_accesskit_button(&mut harness, "Overview");
+    select_admin_section(&mut harness, "Overview");
     assert_eq!(
         harness.state().datasets.admin_config.as_ref().unwrap().name,
         "Unsaved rename"
@@ -1642,7 +1684,7 @@ fn admin_destructive_edits_require_confirmation() {
     let mut harness = loaded_admin_harness(api);
     harness.set_size(egui::vec2(1300.0, 4000.0));
     harness.step();
-    click_accesskit_button(&mut harness, "Schema");
+    select_admin_section(&mut harness, "Schema");
     let classes = harness
         .state()
         .datasets
@@ -1738,7 +1780,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     assert!(status.left() > title.right());
     assert!(reload.left() > title.right());
     assert!(
-        status.right().max(reload.right()) >= 1330.0,
+        status.right().max(reload.right()) >= 1250.0,
         "status={status:?}, reload={reload:?}"
     );
 
@@ -1754,7 +1796,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     ] {
         let card = harness.get_by_label(label).rect();
         assert!(card.width() >= 900.0, "{label} was only {card:?}");
-        assert!(card.right() >= 1330.0, "{label} was only {card:?}");
+        assert!(card.right() >= 1250.0, "{label} was only {card:?}");
     }
     let scrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
     assert!((unscrolled_admin_x - scrolled_admin_x).abs() <= 0.5);
@@ -1764,7 +1806,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     for label in ["Prelabels card", "Assignment Balance card"] {
         let card = harness.get_by_label(label).rect();
         assert!(card.width() >= 900.0, "{label} was only {card:?}");
-        assert!(card.right() >= 1330.0, "{label} was only {card:?}");
+        assert!(card.right() >= 1250.0, "{label} was only {card:?}");
     }
     for label in ["Name", "Model name", "Location"] {
         let field = harness
@@ -1879,6 +1921,13 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     );
 
     harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.set_size(egui::vec2(900.0, 780.0));
+    harness.step();
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::ComboBox, "Admin section")
+            .is_some()
+    );
     harness.set_size(egui::vec2(320.0, 568.0));
     harness.step();
     assert!(
@@ -2296,9 +2345,9 @@ fn draft_recovery_modal_blocks_background_controls() {
         .with_size(egui::vec2(1500.0, 780.0))
         .build_eframe(|_| LabelloApp::default());
     let menu = harness
-        .query_all_by_label_contains("Navigation")
+        .query_all_by_label_contains("Open settings")
         .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
-        .expect("application menu button")
+        .expect("settings button")
         .rect()
         .center();
     let metadata = SpyApi::new().metadata();
@@ -2358,7 +2407,9 @@ fn overlays_and_menus_block_background_shortcuts() {
     harness.state_mut().drawer = None;
     harness.step();
 
-    click(&mut harness, "Navigation");
+    harness.set_size(egui::vec2(320.0, 568.0));
+    harness.step();
+    click(&mut harness, "More application actions");
     harness.key_press(egui::Key::ArrowRight);
     harness.step();
     assert_eq!(api.counts().complete_assignment, 0);
@@ -2426,27 +2477,45 @@ fn long_status_messages_keep_their_complete_accessible_text() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
         let dataset = harness.get_by_label("Dataset Demo Dataset").rect();
-        let status = harness.get_by_label(message).rect();
-        let layout = LayoutMode::for_width(width);
-        let left_action = if layout == LayoutMode::Wide {
-            "Navigation"
-        } else {
-            "Menu"
-        };
-        let menu = harness.get_by_label(left_action).rect();
+        let status_label = format!("Status: Idle. Error: {message}");
+        let status = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, &status_label)
+            .rect();
+        let left_action = harness
+            .query_by_label("More application actions")
+            .or_else(|| {
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate")
+                    .next()
+            })
+            .expect("top-bar navigation control")
+            .rect();
         assert!((dataset.center().x - width / 2.0).abs() <= 1.0);
-        assert!(menu.right() <= dataset.left() + 0.5);
+        assert!(left_action.right() <= dataset.left() + 0.5);
         assert!(dataset.right() <= status.left() + 0.5);
-        if width >= LayoutMode::COMPACT_MAX_WIDTH {
-            let save = harness.get_by_label("Idle").rect();
-            assert!(status.right() <= save.left() + 0.5);
-            if layout == LayoutMode::Wide {
-                let sign_out = harness.get_by_label("Sign out").rect();
-                assert!(save.right() <= sign_out.left() + 0.5);
-            }
-        }
         assert_visible_controls_clamped(&harness, width, height);
     }
+    let status_label = format!("Status: Idle. Error: {message}");
+    click_accesskit_button(&mut harness, &status_label);
+    assert!(
+        harness
+            .query_all_by_label_contains(message)
+            .any(|node| node.accesskit_node().role() == egui::accesskit::Role::Label)
+    );
+
+    harness.key_press(egui::Key::Escape);
+    harness.state_mut().runtime.error = None;
+    harness.state_mut().save_status = SaveStatus::Dirty;
+    let notice = "Dataset catalog refreshed";
+    harness.state_mut().runtime.notice = Some(notice.to_string());
+    harness.step();
+    assert!(harness.query_by_label(notice).is_none());
+    click_accesskit_button(&mut harness, &format!("Status: Unsaved. Update: {notice}"));
+    assert!(
+        harness
+            .query_all_by_label_contains(notice)
+            .any(|node| node.accesskit_node().role() == egui::accesskit::Role::Label)
+    );
 }
 
 #[test]
@@ -3188,7 +3257,7 @@ fn setup_describes_a_data_admin_recommendation_as_statistics() {
 }
 
 #[test]
-fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
+fn signed_in_setup_sections_label_and_size_inputs() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
@@ -3198,7 +3267,7 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
     assert!(harness.state().setup.create_dataset_id.is_empty());
     assert!(harness.state().setup.create_dataset_name.is_empty());
 
-    click(&mut harness, "Advanced connection settings");
+    select_setup_section(&mut harness, "Connection");
     let api_url = harness
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
         .next()
@@ -3208,7 +3277,7 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
     assert!(harness.query_by_label("Dev token").is_none());
     harness.set_size(egui::vec2(900.0, 1200.0));
     harness.step();
-    click(&mut harness, "Create a dataset");
+    select_setup_section(&mut harness, "Create");
     for label in ["Dataset ID", "Dataset name"] {
         let field = harness
             .get_by_role_and_label(egui::accesskit::Role::TextInput, label)
@@ -3218,6 +3287,7 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
 
     harness.set_size(egui::vec2(390.0, 844.0));
     harness.step();
+    select_setup_section(&mut harness, "Connection");
     let compact_api_url = harness
         .query_all_by_role_and_label(egui::accesskit::Role::TextInput, "API URL")
         .next()
@@ -3228,10 +3298,11 @@ fn signed_in_setup_collapses_advanced_fields_and_labels_inputs() {
 
 #[test]
 fn api_url_focus_loss_does_not_reconnect_and_enter_commits() {
-    let app = LabelloApp {
+    let mut app = LabelloApp {
         view: AppView::Setup,
         ..Default::default()
     };
+    app.setup.section = SetupSection::Connection;
     let original_url = app.config.api_base_url.clone();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 780.0))
@@ -3247,8 +3318,8 @@ fn api_url_focus_loss_does_not_reconnect_and_enter_commits() {
     harness.step();
     let auth_epoch = harness.state().auth_epoch;
 
-    let datasets = harness.get_by_label("Datasets").rect().center();
-    click_at(&mut harness, datasets);
+    let connection = harness.get_by_label("Connection").rect().center();
+    click_at(&mut harness, connection);
     assert_eq!(harness.state().config.api_base_url, original_url);
     assert_eq!(harness.state().auth_epoch, auth_epoch);
     assert!(harness.query_by_label("Reconnect").is_some());
@@ -3264,7 +3335,10 @@ fn api_url_focus_loss_does_not_reconnect_and_enter_commits() {
     harness.step();
     assert_eq!(harness.state().config.api_base_url, "not a URL");
     assert!(harness.state().auth_epoch > auth_epoch);
-    assert!(harness.query_by_label("Connection unavailable").is_some());
+    harness.state_mut().setup.section = SetupSection::Datasets;
+    harness.step();
+    assert_eq!(harness.state().setup.section, SetupSection::Connection);
+    assert!(harness.query_by_label("Reconnect").is_some());
     assert!(
         harness
             .query_by_label("Checking dataset access...")
@@ -3680,9 +3754,8 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
     );
     harness.set_size(egui::vec2(600.0, 800.0));
     harness.step();
-    click(&mut harness, "Menu");
-    click_accesskit_button(&mut harness, "Navigation");
-    for label in ["Annotate", "Review", "Adjudicate", "Admin", "Stats"] {
+    click(&mut harness, "More application actions");
+    for label in ["Annotate", "Review", "Adjudicate", "Admin", "Statistics"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
             "missing authorized {label} destination"
@@ -3698,9 +3771,8 @@ fn annotator_and_reviewer_roles_are_independent_capabilities() {
 
     harness.set_size(egui::vec2(600.0, 800.0));
     harness.step();
-    click(&mut harness, "Menu");
-    click_accesskit_button(&mut harness, "Navigation");
-    for label in ["Annotate", "Review", "Stats"] {
+    click(&mut harness, "More application actions");
+    for label in ["Annotate", "Review", "Statistics"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
             "missing authorized {label} destination"
@@ -3775,6 +3847,40 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
 }
 
 #[test]
+fn desktop_app_bar_shows_direct_navigation_and_accessible_icon_actions() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.set_size(egui::vec2(1500.0, 780.0));
+    harness.step();
+
+    for label in ["Annotate", "Review", "Adjudicate", "Statistics", "Admin"] {
+        assert_control_inside(
+            &harness,
+            label,
+            egui::accesskit::Role::Button,
+            1500.0,
+            780.0,
+        );
+    }
+    assert!(harness.query_by_label("More application actions").is_none());
+    assert!(harness.query_by_label("Navigation").is_none());
+    assert!(harness.query_by_label("Workspace").is_none());
+    assert!(harness.query_by_label("Desktop navigation").is_none());
+
+    for label in ["Open setup", "Open tutorial", "Open settings", "Sign out"] {
+        let action = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, label)
+            .rect();
+        assert!(action.width() >= 43.0 && action.height() >= 43.0);
+        assert!(
+            action.width() <= 45.0 && (action.width() - action.height()).abs() <= 1.0,
+            "{label} is not square: {action:?}",
+        );
+    }
+    assert!(harness.get_by_label("Admin User").rect().width() <= 96.5);
+}
+
+#[test]
 fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
@@ -3795,19 +3901,22 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
         assert!(harness.query_all_by_label(&image_name).next().is_some());
         assert!(harness.query_all_by_label(&workflow_label).next().is_some());
         let dataset_badge = harness.get_by_label("Dataset Demo Dataset").rect();
-        let status_badge = harness.get_by_label("Idle").rect();
+        let status_badge = harness.get_by_label("Status: Idle").rect();
         assert!(
             dataset_badge.height() > 0.0,
             "dataset badge is missing at {width}x{height}",
         );
         assert!(status_badge.height() > 0.0);
         let layout = LayoutMode::for_width(width);
-        let left_action = if layout == LayoutMode::Wide {
-            "Navigation"
-        } else {
-            "Menu"
-        };
-        let menu = harness.get_by_label(left_action).rect();
+        let menu = harness
+            .query_by_label("More application actions")
+            .or_else(|| {
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate")
+                    .next()
+            })
+            .expect("top-bar navigation control")
+            .rect();
         assert!((dataset_badge.center().x - width / 2.0).abs() <= 1.0);
         assert!(menu.right() <= dataset_badge.left() + 0.5);
         assert!(dataset_badge.right() <= status_badge.left() + 0.5);
@@ -3844,9 +3953,9 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             canvas.rect(),
         );
         let wide_baseline = match (width as u32, height as u32) {
-            (1288, 820) => Some((676.0, 593.0)),
-            (1366, 768) => Some((754.0, 541.0)),
-            (1440, 900) => Some((828.0, 673.0)),
+            (1288, 820) => Some((668.0, 593.0)),
+            (1366, 768) => Some((746.0, 541.0)),
+            (1440, 900) => Some((820.0, 673.0)),
             _ => None,
         };
         if let Some((baseline_width, baseline_height)) = wide_baseline {
@@ -3913,23 +4022,31 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     ] {
         harness.state_mut().save_status = status;
         harness.step();
-        assert!(harness.query_by_label(label).is_some());
+        let status_label = format!("Status: {label}");
+        assert!(harness.query_by_label(&status_label).is_some());
         assert_visible_controls_clamped(&harness, 320.0, 568.0);
     }
 
-    click(&mut harness, "Menu");
-    for label in ["Navigation", "Workspace", "Sign out"] {
-        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
-    }
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "More application actions")
+            .count(),
+        1
+    );
+    click(&mut harness, "More application actions");
+    assert!(harness.query_by_label("Navigation").is_none());
+    assert!(harness.query_by_label("Workspace").is_none());
     assert!(harness.query_by_label("Status").is_none());
-    click_accesskit_button(&mut harness, "Navigation");
     for label in [
         "Setup",
         "Annotate",
         "Review",
         "Adjudicate",
-        "Stats",
+        "Statistics",
         "Admin",
+        "Tutorial",
+        "Settings",
+        "Sign out",
     ] {
         let item = harness
             .get_by_role_and_label(egui::accesskit::Role::Button, label)
@@ -3939,8 +4056,20 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
             item.width() >= 200.0,
             "{label} has narrow menu bounds: {item:?}"
         );
-        assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 568.0);
     }
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Sign out")
+        .scroll_to_me();
+    for _ in 0..4 {
+        harness.step();
+    }
+    assert_control_inside(
+        &harness,
+        "Sign out",
+        egui::accesskit::Role::Button,
+        320.0,
+        568.0,
+    );
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
     harness.key_press(egui::Key::Escape);
     harness.step();
@@ -4053,31 +4182,24 @@ fn setup_geometry_stays_clamped_at_supported_viewports() {
         harness.set_size(egui::vec2(width, height));
         harness.step();
         assert_label_inside(&harness, "Choose where to work", width, height);
-        if LayoutMode::for_width(width) == LayoutMode::Wide {
-            assert!(harness.query_by_label("Menu").is_none());
-            assert!(harness.query_by_label("Desktop navigation").is_some());
-            assert_control_inside(
-                &harness,
-                "Setup",
-                egui::accesskit::Role::Button,
-                width,
-                height,
-            );
+        assert!(harness.query_by_label("Desktop navigation").is_none());
+        let setup_control = if harness.query_by_label("Open setup").is_some() {
+            "Open setup"
         } else {
-            assert_control_inside(
-                &harness,
-                "Menu",
-                egui::accesskit::Role::Button,
-                width,
-                height,
-            );
-        }
+            "More application actions"
+        };
+        assert_control_inside(
+            &harness,
+            setup_control,
+            egui::accesskit::Role::Button,
+            width,
+            height,
+        );
         assert_visible_controls_clamped(&harness, width, height);
     }
 
     harness.set_size(egui::vec2(1440.0, 320.0));
     harness.step();
-    assert!(harness.query_by_label("Menu").is_none());
     assert_control_inside(
         &harness,
         "Sign out",
@@ -5239,7 +5361,7 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     let mut harness = loaded_work_harness(api.clone());
     assert_eq!(api.counts().dataset_stats, 0);
 
-    click_application_menu_item(&mut harness, "Stats");
+    click_application_menu_item(&mut harness, "Statistics");
     release_and_switch(&mut harness);
     step_until(&mut harness, 8, |app| app.view == AppView::Stats);
     harness.step();
@@ -5250,7 +5372,7 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 
     harness.set_size(egui::vec2(390.0, 760.0));
     harness.step();
-    assert!(harness.query_by_label("Menu").is_some());
+    assert!(harness.query_by_label("More application actions").is_some());
 
     harness.set_size(egui::vec2(1280.0, 820.0));
     harness.step();

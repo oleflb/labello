@@ -2,13 +2,28 @@ use eframe::egui::{self, RichText};
 use labello_domain::{DatasetId, DatasetRole};
 
 use crate::{
-    app::{AppView, LabelloApp, PendingTransition},
+    app::{AppView, LabelloApp, LayoutMode, PendingTransition, SetupSection},
     theme,
 };
 
+impl SetupSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Datasets => "Datasets",
+            Self::Connection => "Connection",
+            Self::Create => "Create",
+            Self::Import => "Import",
+        }
+    }
+}
+
 impl LabelloApp {
-    pub(crate) fn setup_view(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn setup_view(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let signed_in = self.auth.account.is_some();
+        let sections = self.setup_sections();
+        if !sections.contains(&self.setup.section) {
+            self.setup.section = sections[0];
+        }
         ui.vertical_centered(|ui| {
             let (title, subtitle) = if signed_in {
                 (
@@ -26,35 +41,103 @@ impl LabelloApp {
         });
         ui.add_space(theme::SPACE_4);
 
-        if signed_in {
-            self.datasets_section(ui);
-            ui.add_space(theme::SPACE_5);
-            egui::CollapsingHeader::new("Advanced connection settings")
-                .show(ui, |ui| self.connection_section(ui));
-            if self.auth.can_create_datasets {
-                ui.add_space(theme::SPACE_3);
-                ui.horizontal_wrapped(|ui| {
+        if layout == LayoutMode::Wide {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(160.0);
+                    self.setup_navigation(ui, &sections, layout);
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    self.setup_section(ui);
+                });
+            });
+        } else {
+            self.setup_navigation(ui, &sections, layout);
+            ui.add_space(theme::SPACE_4);
+            self.setup_section(ui);
+        }
+    }
+
+    fn setup_sections(&self) -> Vec<SetupSection> {
+        if self.auth.account.is_none() {
+            return vec![SetupSection::Connection];
+        }
+        let mut sections = vec![SetupSection::Datasets, SetupSection::Connection];
+        if self.auth.can_create_datasets {
+            sections.extend([SetupSection::Create, SetupSection::Import]);
+        }
+        sections
+    }
+
+    fn setup_navigation(
+        &mut self,
+        ui: &mut egui::Ui,
+        sections: &[SetupSection],
+        layout: LayoutMode,
+    ) {
+        let response = ui.vertical(|ui| {
+            if layout == LayoutMode::Wide {
+                ui.label(
+                    RichText::new("Setup sections")
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add_space(theme::SPACE_1);
+                for section in sections {
                     if ui
                         .add_sized(
-                            [ui.available_width().min(260.0), 44.0],
-                            egui::Button::selectable(self.setup.show_create, "Create a dataset"),
+                            [ui.available_width(), 44.0],
+                            egui::Button::selectable(
+                                self.setup.section == *section,
+                                section.label(),
+                            ),
                         )
                         .clicked()
                     {
-                        self.setup.show_create = !self.setup.show_create;
-                        self.import_flow.open = false;
+                        self.setup.section = *section;
                     }
-                });
-                if self.setup.show_create {
-                    self.create_dataset_section(ui);
                 }
+            } else {
+                let label = ui.label("Setup section");
+                egui::ComboBox::from_id_salt("setup-section")
+                    .width(ui.available_width())
+                    .selected_text(self.setup.section.label())
+                    .show_ui(ui, |ui| {
+                        for section in sections {
+                            ui.selectable_value(&mut self.setup.section, *section, section.label());
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+            }
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Setup navigation")
+        });
+    }
+
+    fn setup_section(&mut self, ui: &mut egui::Ui) {
+        match self.setup.section {
+            SetupSection::Datasets => self.datasets_section(ui),
+            SetupSection::Connection => self.connection_section(ui),
+            SetupSection::Create if self.auth.can_create_datasets => {
+                ui.heading("Create a dataset");
+                ui.label(
+                    RichText::new("Start an empty dataset and configure it in Admin.")
+                        .color(theme::TEXT_MUTED),
+                );
                 ui.add_space(theme::SPACE_2);
+                self.create_dataset_section(ui);
+            }
+            SetupSection::Import if self.auth.can_create_datasets => {
                 self.import_setup_section(ui);
             }
-        } else {
-            self.connection_section(ui);
-            ui.add_space(theme::SPACE_4);
-            self.datasets_section(ui);
+            SetupSection::Create | SetupSection::Import => {
+                self.setup.section = SetupSection::Datasets;
+                self.datasets_section(ui);
+            }
         }
     }
 
@@ -368,85 +451,8 @@ impl LabelloApp {
         });
     }
 
-    pub(crate) fn navigation_menu_contents(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(theme::MENU_WIDTH);
-        for (view, label) in self.navigation_destinations() {
-            if ui
-                .add(
-                    egui::Button::selectable(self.view == view, label)
-                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
-                )
-                .clicked()
-            {
-                self.open_view(view);
-                ui.close();
-            }
-        }
-    }
-
-    pub(crate) fn desktop_navigation(&mut self, ui: &mut egui::Ui) {
-        let account = self
-            .auth
-            .account
-            .as_ref()
-            .map(|account| account.display_name.clone());
-        let footer_height = if account.is_some() { 132.0 } else { 0.0 };
-        let footer_gap = if account.is_some() {
-            ui.spacing().item_spacing.y
-        } else {
-            0.0
-        };
-        let navigation_height = (ui.available_height() - footer_height - footer_gap).max(0.0);
-        let response = ui.vertical(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), navigation_height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_height(navigation_height);
-                    ui.set_max_height(navigation_height);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.heading("Navigate");
-                        ui.add_space(theme::SPACE_1);
-                        for (view, label) in self.navigation_destinations() {
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 44.0],
-                                    egui::Button::selectable(self.view == view, label),
-                                )
-                                .clicked()
-                            {
-                                self.open_view(view);
-                            }
-                        }
-                    });
-                },
-            );
-
-            if let Some(account) = account {
-                ui.label(RichText::new("Account").strong().color(theme::TEXT_MUTED));
-                ui.separator();
-                ui.add_sized(
-                    [ui.available_width(), 44.0],
-                    egui::Label::new(&account).truncate(),
-                );
-                if theme::quiet_button(
-                    ui,
-                    !self.loading.logout,
-                    egui::Button::new("Sign out").min_size(egui::vec2(ui.available_width(), 44.0)),
-                )
-                .clicked()
-                {
-                    self.request_logout();
-                }
-            }
-        });
-        response.response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Desktop navigation")
-        });
-    }
-
-    fn navigation_destinations(&self) -> Vec<(AppView, &'static str)> {
-        let mut destinations = vec![(AppView::Setup, "Setup")];
+    pub(crate) fn primary_navigation_destinations(&self) -> Vec<(AppView, &'static str)> {
+        let mut destinations = Vec::new();
         for (view, role, label) in [
             (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
             (AppView::Review, DatasetRole::Reviewer, "Review"),
@@ -457,7 +463,7 @@ impl LabelloApp {
             }
         }
         if self.datasets.metadata.is_some() {
-            destinations.push((AppView::Stats, "Stats"));
+            destinations.push((AppView::Stats, "Statistics"));
         }
         if self.can_admin() {
             destinations.push((AppView::Admin, "Admin"));

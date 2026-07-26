@@ -259,7 +259,7 @@ impl LabelloApp {
 
     fn admin_navigation(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         let response = ui.vertical(|ui| match layout {
-            LayoutMode::Compact => {
+            LayoutMode::Compact | LayoutMode::Medium => {
                 let label = ui.label("Admin section");
                 egui::ComboBox::from_id_salt("admin-section")
                     .width(ui.available_width())
@@ -275,24 +275,6 @@ impl LabelloApp {
                     })
                     .response
                     .labelled_by(label.id);
-            }
-            LayoutMode::Medium => {
-                ui.horizontal_wrapped(|ui| {
-                    for section in AdminSection::ALL {
-                        if ui
-                            .add_sized(
-                                [110.0, 44.0],
-                                egui::Button::selectable(
-                                    self.admin_tools.section == section,
-                                    section.label(),
-                                ),
-                            )
-                            .clicked()
-                        {
-                            self.admin_tools.section = section;
-                        }
-                    }
-                });
             }
             LayoutMode::Wide => {
                 ui.label(

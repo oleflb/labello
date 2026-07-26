@@ -9,7 +9,7 @@ use web_time::{Duration, Instant};
 
 use crate::app::{
     AppView, ImportRequestIdentity, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage,
-    RequestIdentity, SaveStatus, UiCommand, UiMessage,
+    RequestIdentity, SaveStatus, SetupSection, UiCommand, UiMessage,
 };
 
 impl LabelloApp {
@@ -373,6 +373,7 @@ impl LabelloApp {
                             );
                             self.auth.account = Some(account);
                             self.auth.can_create_datasets = session.can_create_datasets;
+                            self.setup.section = SetupSection::Datasets;
                             self.runtime.error = None;
                             self.initialize_browser_workspace();
                             self.request_dataset_list();

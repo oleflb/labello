@@ -34,7 +34,7 @@ Only after that continue with the next issue.
 - [x] Allow users to return to the previous skipped or submitted assignment to correct accidental skips or submissions.
 - [x] Selecting a role in Admin > People briefly flashes red lines across the interface.
 - [x] Remove the lower Admin unsaved-changes bar, replace its staged-change header text with a compact accessible indicator, move icon-only save and discard actions into the Admin header, and use the global save action for both configuration and People permission changes.
-- [ ] Navigation improvements:
+- [x] Navigation improvements:
   - The main view navigation should move back to the top bar. Both navigation and workspace menus should be dissolved.
   - The setup, tutoiral and settings buttons should all move to the right side of the bar.
   - The user name should be made narrower, the green text next to the status pill should be moved to hover or tap on the pill.

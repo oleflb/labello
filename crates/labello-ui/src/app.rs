@@ -201,6 +201,15 @@ pub(crate) enum AdminSection {
     Backups,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetupSection {
+    #[default]
+    Datasets,
+    Connection,
+    Create,
+    Import,
+}
+
 pub(crate) struct AdminToolsState {
     pub dataset_id: Option<DatasetId>,
     pub section: AdminSection,
@@ -256,7 +265,7 @@ pub(crate) struct SetupState {
     pub create_dataset_id: String,
     pub create_dataset_name: String,
     pub started: bool,
-    pub show_create: bool,
+    pub section: SetupSection,
 }
 
 pub(crate) struct AuthState {
@@ -476,7 +485,7 @@ impl LabelloApp {
             create_dataset_id: config.dataset_id.to_string(),
             create_dataset_name: "Demo Dataset".to_string(),
             started: true,
-            show_create: false,
+            section: SetupSection::default(),
         };
         let work = WorkState {
             classes,
@@ -2048,12 +2057,6 @@ impl eframe::App for LabelloApp {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| self.right_panel(ui, true));
                 });
-        } else if !self.work_view() && layout == LayoutMode::Wide {
-            egui::Panel::left("desktop_navigation")
-                .resizable(false)
-                .exact_size(176.0)
-                .frame(theme::side_frame())
-                .show(ui, |ui| self.desktop_navigation(ui));
         }
         let central_frame = if self.work_view() {
             theme::central_frame().inner_margin(egui::Margin::symmetric(8, 8))

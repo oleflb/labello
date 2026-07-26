@@ -454,6 +454,19 @@ impl LabelloApp {
     }
 
     pub(crate) fn import_setup_section(&mut self, ui: &mut egui::Ui) {
+        if !self.import_flow.open {
+            self.import_flow.open = true;
+            if self.import_flow.destination_id.is_empty() {
+                self.import_flow.destination_id = "imported-dataset".to_string();
+                self.import_flow.destination_name = "Imported dataset".to_string();
+            }
+        }
+        ui.heading("Import a dataset");
+        ui.label(
+            RichText::new("Register, validate, and import an existing dataset.")
+                .color(theme::TEXT_MUTED),
+        );
+        ui.add_space(theme::SPACE_2);
         self.request_import_capabilities();
         let Some(capabilities) = self.import_flow.capabilities.clone() else {
             if self.import_flow.capabilities_loading {
@@ -472,25 +485,6 @@ impl LabelloApp {
             }
             return;
         }
-
-        if ui
-            .add_sized(
-                [ui.available_width().min(260.0), 44.0],
-                egui::Button::selectable(self.import_flow.open, "Import a dataset"),
-            )
-            .clicked()
-        {
-            self.import_flow.open = !self.import_flow.open;
-            self.setup.show_create = false;
-            if self.import_flow.open && self.import_flow.destination_id.is_empty() {
-                self.import_flow.destination_id = "imported-dataset".to_string();
-                self.import_flow.destination_name = "Imported dataset".to_string();
-            }
-        }
-        if !self.import_flow.open {
-            return;
-        }
-        ui.add_space(theme::SPACE_2);
         theme::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             self.import_flow_contents(ui, &capabilities);

@@ -207,15 +207,50 @@ pub(super) fn click(harness: &mut Harness<'static, LabelloApp>, label: &str) {
 }
 
 pub(super) fn click_application_menu_item(harness: &mut Harness<'static, LabelloApp>, label: &str) {
-    if click_visible(harness, "Menu") {
-        harness.step();
-    }
-    let section = match label {
-        "Setup" | "Annotate" | "Review" | "Adjudicate" | "Admin" | "Stats" => "Navigation",
-        _ => "Workspace",
+    let direct_label = match label {
+        "Setup" => "Open setup",
+        "Tutorial" => "Open tutorial",
+        "Settings" => "Open settings",
+        other => other,
     };
-    click(harness, section);
+    if click_visible(harness, direct_label) {
+        harness.step();
+        return;
+    }
+    click(harness, "More application actions");
     click_accesskit_button(harness, label);
+}
+
+pub(super) fn select_setup_section(harness: &mut Harness<'static, LabelloApp>, label: &str) {
+    harness.state_mut().setup.section = match label {
+        "Datasets" => SetupSection::Datasets,
+        "Connection" => SetupSection::Connection,
+        "Create" => SetupSection::Create,
+        "Import" => SetupSection::Import,
+        _ => panic!("unknown setup section {label:?}"),
+    };
+    harness.step();
+}
+
+pub(super) fn select_admin_section(harness: &mut Harness<'static, LabelloApp>, label: &str) {
+    let section = match label {
+        "Overview" => AdminSection::Overview,
+        "People" => AdminSection::People,
+        "Images" => AdminSection::Images,
+        "Schema" => AdminSection::Schema,
+        "Automation" => AdminSection::Automation,
+        "Backups" => AdminSection::Backups,
+        _ => panic!("unknown Admin section {label:?}"),
+    };
+    if harness
+        .query_by_role_and_label(egui::accesskit::Role::ComboBox, "Admin section")
+        .is_some()
+    {
+        harness.state_mut().admin_tools.section = section;
+        harness.step();
+    } else {
+        click_accesskit_button(harness, label);
+    }
 }
 
 pub(super) fn click_at(harness: &mut Harness<'static, LabelloApp>, pos: egui::Pos2) {
@@ -289,8 +324,11 @@ pub(super) fn step_until(
     }
     assert!(
         predicate(harness.state()),
-        "view={:?} current={:?} assignment={:?} loading(dataset={}, image={}, saving={}) pending={:?} error={:?}",
+        "view={:?} setup={:?} import(open={}, capabilities_loading={}) current={:?} assignment={:?} loading(dataset={}, image={}, saving={}) pending={:?} error={:?}",
         harness.state().view,
+        harness.state().setup.section,
+        harness.state().import_flow.open,
+        harness.state().import_flow.capabilities_loading,
         harness
             .state()
             .current
