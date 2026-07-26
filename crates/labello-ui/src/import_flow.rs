@@ -1377,19 +1377,39 @@ impl LabelloApp {
     }
 
     fn import_preflight_step(&mut self, ui: &mut egui::Ui) {
+        let previous_report = self.import_flow.plan.is_none()
+            && self.import_flow.pending_plan_request.is_none()
+            && self
+                .import_flow
+                .job
+                .as_ref()
+                .is_some_and(|job| job.preflight_report.is_some());
         let report = self
             .import_flow
-            .plan
-            .as_ref()
-            .map(|plan| &plan.report)
-            .or_else(|| {
+            .pending_plan_request
+            .is_none()
+            .then(|| {
                 self.import_flow
-                    .job
+                    .plan
                     .as_ref()
-                    .and_then(|job| job.preflight_report.as_ref())
+                    .map(|plan| &plan.report)
+                    .or_else(|| {
+                        self.import_flow
+                            .job
+                            .as_ref()
+                            .and_then(|job| job.preflight_report.as_ref())
+                    })
             })
+            .flatten()
             .cloned();
         if let Some(report) = report {
+            if previous_report {
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Warning,
+                    "This is the last accepted preflight and does not include the current unsaved mappings.",
+                );
+            }
             ui.label(RichText::new("Preflight summary").strong());
             status_row(ui, "Images", report.source.images.to_string());
             status_row(ui, "Objects", report.source.objects.to_string());
@@ -1600,10 +1620,30 @@ impl LabelloApp {
                 ] {
                     theme::labeled_text_field(ui, label, value, theme::COMPACT_TEXT_FIELD_HEIGHT);
                 }
-                if (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                    && self.import_flow.direct_bounding_boxes)
-                    || self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1
-                {
+                let category_specific = !category.geometry_mappings.is_empty();
+                let active_target = |target| {
+                    category.geometry_mappings.iter().any(|mapping| {
+                        mapping.target_geometry == target
+                            && mapping.policy != ImportGeometryPolicy::Omit
+                    })
+                };
+                let bounding_box_task = if category_specific {
+                    active_target(ImportGeometryKind::BoundingBox)
+                } else {
+                    (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
+                        && self.import_flow.direct_bounding_boxes)
+                        || self.import_flow.geometry_policy
+                            == ImportGeometryPolicy::ManualBoxGuideV1
+                };
+                let skeleton_task = if category_specific {
+                    active_target(ImportGeometryKind::Skeleton)
+                } else {
+                    (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
+                        && self.import_flow.direct_skeletons)
+                        || self.import_flow.geometry_policy
+                            == ImportGeometryPolicy::ManualBoxGuideV1
+                };
+                if bounding_box_task {
                     theme::labeled_text_field(
                         ui,
                         "Bounding-box task ID",
@@ -1617,10 +1657,7 @@ impl LabelloApp {
                         theme::COMPACT_TEXT_FIELD_HEIGHT,
                     );
                 }
-                if (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                    && self.import_flow.direct_skeletons)
-                    || self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1
-                {
+                if skeleton_task {
                     theme::labeled_text_field(
                         ui,
                         "Skeleton task ID",
@@ -1670,6 +1707,9 @@ impl LabelloApp {
                                     mapping.source_geometry,
                                     mapping.target_geometry,
                                     &direct_geometry,
+                                    self.import_flow.capabilities.as_ref().is_some_and(
+                                        |capabilities| capabilities.manual_box_guide_migration,
+                                    ),
                                 ) {
                                     ui.selectable_value(
                                         &mut mapping.policy,
@@ -1741,6 +1781,25 @@ impl LabelloApp {
             .categories
             .iter()
             .any(|category| !category.geometry_mappings.is_empty());
+        let manual_categories = self
+            .import_flow
+            .categories
+            .iter()
+            .filter(|category| {
+                category.selected
+                    && category
+                        .geometry_mappings
+                        .iter()
+                        .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1)
+            })
+            .count();
+        if category_specific && manual_categories > 1 {
+            theme::inline_message(
+                ui,
+                theme::Intent::Error,
+                "Only one selected category may use manual box-guide migration.",
+            );
+        }
         if category_specific
             && self.import_flow.categories.iter().any(|category| {
                 category.selected
@@ -2536,6 +2595,8 @@ impl LabelloApp {
         self.import_flow.busy = true;
         self.import_flow.plan = None;
         self.import_flow.accepted_plan_request = None;
+        self.import_flow.diagnostics.clear();
+        self.import_flow.diagnostics_cursor = None;
         self.import_flow.pending_plan_request = Some(body.clone());
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("plan", request.request_id);
@@ -3413,6 +3474,28 @@ impl LabelloApp {
             .categories
             .iter()
             .any(|category| !category.geometry_mappings.is_empty());
+        let manual_categories = if category_specific {
+            self.import_flow
+                .categories
+                .iter()
+                .filter(|category| {
+                    category.selected
+                        && category
+                            .geometry_mappings
+                            .iter()
+                            .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1)
+                })
+                .count()
+        } else if manual {
+            selected
+        } else {
+            0
+        };
+        let manual_available = self
+            .import_flow
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.manual_box_guide_migration);
         let has_seed_workflow = if category_specific {
             self.import_flow.categories.iter().any(|category| {
                 category.selected
@@ -3425,6 +3508,42 @@ impl LabelloApp {
             && self.import_flow.categories.len() == discovered
             && selected > 0
             && self.import_flow.categories.iter().all(|category| {
+                let active_targets = category
+                    .geometry_mappings
+                    .iter()
+                    .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                    .map(|mapping| mapping.target_geometry)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let category_manual = category
+                    .geometry_mappings
+                    .iter()
+                    .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1);
+                let bounding_boxes = if category_specific {
+                    active_targets.contains(&ImportGeometryKind::BoundingBox)
+                } else {
+                    (direct && self.import_flow.direct_bounding_boxes) || manual
+                };
+                let skeletons = if category_specific {
+                    active_targets.contains(&ImportGeometryKind::Skeleton)
+                } else {
+                    (direct && self.import_flow.direct_skeletons) || manual
+                };
+                let skeleton_schema_valid = if category_specific {
+                    category.geometry_mappings.iter().all(|mapping| {
+                        mapping.policy == ImportGeometryPolicy::Omit
+                            || mapping.target_geometry != ImportGeometryKind::Skeleton
+                            || match mapping.source_geometry {
+                                ImportGeometryKind::Skeleton => category.source_skeleton.is_some(),
+                                ImportGeometryKind::BoundingBox => {
+                                    !split_csv(&category.target_keypoint_names).is_empty()
+                                }
+                            }
+                    })
+                } else if manual {
+                    !split_csv(&self.import_flow.keypoint_names).is_empty()
+                } else {
+                    !skeletons || category.source_skeleton.is_some()
+                };
                 !category.source_category_key.trim().is_empty()
                     && !category.source_category_id.trim().is_empty()
                     && ClassId::from(category.class_id.trim())
@@ -3434,38 +3553,32 @@ impl LabelloApp {
                     && valid_color(&category.class_color)
                     && source_keys.insert(category.source_category_key.trim())
                     && (!category.selected || class_ids.insert(category.class_id.trim()))
+                    && (!category.selected || !category_manual || bounding_boxes)
+                    && (!category.selected || !category_specific || bounding_boxes || skeletons)
                     && (!category.selected
-                        || !((direct && self.import_flow.direct_bounding_boxes) || manual)
+                        || !bounding_boxes
                         || (!category.bounding_box_task_name.trim().is_empty()
                             && TaskId::from(category.bounding_box_task_id.trim())
                                 .validate_path_segment()
                                 .is_ok()
                             && task_ids.insert(category.bounding_box_task_id.trim())))
                     && (!category.selected
-                        || !((direct && self.import_flow.direct_skeletons) || manual)
+                        || !skeletons
                         || (!category.skeleton_task_name.trim().is_empty()
                             && TaskId::from(category.skeleton_task_id.trim())
                                 .validate_path_segment()
                                 .is_ok()
                             && task_ids.insert(category.skeleton_task_id.trim())
-                            && if manual {
-                                !split_csv(&self.import_flow.keypoint_names).is_empty()
-                            } else {
-                                category.source_skeleton.is_some()
-                            }))
+                            && skeleton_schema_valid))
             })
-            && (!direct
+            && (category_specific
+                || !direct
                 || self.import_flow.direct_bounding_boxes
                 || self.import_flow.direct_skeletons)
-            && self.import_flow.geometry_policy != ImportGeometryPolicy::Omit
+            && (category_specific || self.import_flow.geometry_policy != ImportGeometryPolicy::Omit)
             && (!has_seed_workflow || self.import_flow.seed_workflow_confirmed)
-            && (!manual
-                || self
-                    .import_flow
-                    .capabilities
-                    .as_ref()
-                    .is_some_and(|capabilities| capabilities.manual_box_guide_migration))
-            && (!manual || selected == 1)
+            && (manual_categories == 0 || manual_available)
+            && manual_categories <= 1
     }
 
     fn import_plan_is_current(&self) -> bool {
@@ -3491,14 +3604,36 @@ impl LabelloApp {
             .iter()
             .filter(|category| category.selected)
             .count() as u64;
-        let tasks_per_category =
-            if self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1 {
-                2
-            } else {
-                u64::from(self.import_flow.direct_bounding_boxes)
-                    + u64::from(self.import_flow.direct_skeletons)
-            };
-        let required_tasks = selected.saturating_mul(tasks_per_category);
+        let category_specific = self
+            .import_flow
+            .categories
+            .iter()
+            .any(|category| !category.geometry_mappings.is_empty());
+        let required_tasks = if category_specific {
+            self.import_flow
+                .categories
+                .iter()
+                .filter(|category| category.selected)
+                .map(|category| {
+                    category
+                        .geometry_mappings
+                        .iter()
+                        .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                        .map(|mapping| mapping.target_geometry)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len() as u64
+                })
+                .sum()
+        } else {
+            let tasks_per_category =
+                if self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1 {
+                    2
+                } else {
+                    u64::from(self.import_flow.direct_bounding_boxes)
+                        + u64::from(self.import_flow.direct_skeletons)
+                };
+            selected.saturating_mul(tasks_per_category)
+        };
         selected > 0
             && plan.report.output.classes == selected
             && plan.report.output.tasks >= required_tasks
@@ -4016,6 +4151,7 @@ fn policies_for_mapping(
     source: ImportGeometryKind,
     target: ImportGeometryKind,
     available: &[ImportGeometryKind],
+    manual_box_guide_available: bool,
 ) -> Vec<ImportGeometryPolicy> {
     let mut policies = Vec::new();
     if available.contains(&source) {
@@ -4029,7 +4165,9 @@ fn policies_for_mapping(
             }
             (ImportGeometryKind::BoundingBox, ImportGeometryKind::Skeleton) => {
                 policies.push(ImportGeometryPolicy::BoxRelativeTemplateV1);
-                policies.push(ImportGeometryPolicy::ManualBoxGuideV1);
+                if manual_box_guide_available {
+                    policies.push(ImportGeometryPolicy::ManualBoxGuideV1);
+                }
             }
         }
     }
@@ -4520,6 +4658,110 @@ mod tests {
                 .source_keypoint_names
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn category_specific_manual_mapping_allows_only_one_category() {
+        let mut app = LabelloApp::default();
+        app.import_flow.capabilities = Some(ImportCapabilities {
+            manual_box_guide_migration: true,
+            ..Default::default()
+        });
+        let report = labello_client::ImportPreflightReport {
+            source: labello_client::ImportSourceCounts {
+                categories: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.import_flow.plan = Some(ImportPlan {
+            report: report.clone(),
+            ..Default::default()
+        });
+        app.import_flow.job = Some(ImportJob {
+            import_id: labello_domain::ImportId::from("imp-test"),
+            owner_user_id: labello_domain::UserId::from("admin"),
+            destination_dataset_id: DatasetId::from("imported"),
+            destination_name: "Imported".to_string(),
+            profile: ImportProfile::UltralyticsYoloDetectV1,
+            transport: ImportTransport::BrowserFolder,
+            lifecycle: ImportLifecycle::AwaitingDecision,
+            progress: Default::default(),
+            failure: None,
+            source_fingerprint: Some("source".to_string()),
+            plan_hash: Some("plan".to_string()),
+            preflight_report: Some(report),
+            can_cancel: true,
+            created_at: labello_domain::now(),
+            updated_at: labello_domain::now(),
+            expires_at: None,
+            recovery: None,
+        });
+        let mut person = category("source:0", "0", "person");
+        person.direct_geometry = vec![ImportGeometryKind::BoundingBox];
+        person.source_skeleton = None;
+        person.geometry_mappings = vec![
+            ImportGeometryMappingRequest {
+                source_category_key: person.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::BoundingBox,
+                policy: ImportGeometryPolicy::Direct,
+                parameters: Vec::new(),
+            },
+            ImportGeometryMappingRequest {
+                source_category_key: person.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::Skeleton,
+                policy: ImportGeometryPolicy::ManualBoxGuideV1,
+                parameters: Vec::new(),
+            },
+        ];
+        let mut vehicle = category("source:1", "1", "vehicle");
+        vehicle.direct_geometry = vec![ImportGeometryKind::BoundingBox];
+        vehicle.source_skeleton = None;
+        vehicle.geometry_mappings = vec![
+            ImportGeometryMappingRequest {
+                source_category_key: vehicle.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::BoundingBox,
+                policy: ImportGeometryPolicy::Direct,
+                parameters: Vec::new(),
+            },
+            ImportGeometryMappingRequest {
+                source_category_key: vehicle.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::Skeleton,
+                policy: ImportGeometryPolicy::ManualBoxGuideV1,
+                parameters: Vec::new(),
+            },
+        ];
+        app.import_flow.categories = vec![person, vehicle];
+
+        assert!(!app.import_mappings_complete());
+
+        app.import_flow.categories[1].geometry_mappings[1].policy =
+            ImportGeometryPolicy::BoxRelativeTemplateV1;
+        assert!(app.import_mappings_complete());
+
+        app.import_flow.diagnostics = vec![labello_client::ImportDiagnostic::default()];
+        app.import_flow.diagnostics_cursor = Some("old".to_string());
+        app.request_update_import_plan();
+        assert!(app.import_flow.plan.is_none());
+        assert!(app.import_flow.pending_plan_request.is_some());
+        assert!(app.import_flow.diagnostics.is_empty());
+        assert!(app.import_flow.diagnostics_cursor.is_none());
+    }
+
+    #[test]
+    fn manual_policy_is_not_offered_without_server_capability() {
+        let policies = policies_for_mapping(
+            ImportGeometryKind::BoundingBox,
+            ImportGeometryKind::Skeleton,
+            &[ImportGeometryKind::BoundingBox],
+            false,
+        );
+
+        assert!(!policies.contains(&ImportGeometryPolicy::ManualBoxGuideV1));
     }
 
     #[test]

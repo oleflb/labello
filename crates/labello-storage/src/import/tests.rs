@@ -1734,6 +1734,22 @@ async fn multi_category_coco_plan_and_commit_have_exact_output_totals() {
     assert!(uncovered.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "authoritative_coverage_invalid" && diagnostic.blocks_commit
     }));
+    let mut non_exhaustive = request(ImportProfile::CocoInstancesGtV1);
+    non_exhaustive.exhaustive_attested = false;
+    non_exhaustive.coverage_scope = vec!["person".to_string(), "vehicle".to_string()];
+    let non_exhaustive = service
+        .preflight(&job.import_id, &owner, non_exhaustive)
+        .await
+        .unwrap();
+    assert_eq!(
+        non_exhaustive
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "authoritative_coverage_invalid")
+            .unwrap()
+            .count,
+        2
+    );
     let mut preflight = request(ImportProfile::CocoInstancesGtV1);
     preflight.coverage_scope = vec!["person".to_string(), "vehicle".to_string()];
     let plan = service

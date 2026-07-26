@@ -2552,12 +2552,9 @@ fn validate_mappings(ir: &ImportIr, request: &PreflightRequest, diagnostics: &mu
             .map(|mapping| mapping.source_category_key.clone())
             .collect()
     };
-    if !authoritative_categories.is_empty()
-        && (!request.exhaustive_attested
-            || authoritative_categories
-                .iter()
-                .any(|key| !ir.categories.contains_key(key) || !covered.contains(key)))
-    {
+    for _ in authoritative_categories.iter().filter(|key| {
+        !request.exhaustive_attested || !ir.categories.contains_key(*key) || !covered.contains(*key)
+    }) {
         diagnostics.add(
             "authoritative_coverage_invalid",
             DiagnosticSeverity::Error,

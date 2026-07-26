@@ -1293,7 +1293,11 @@ fn convert_preflight(
         source_release,
         coverage_scope: seal.attestations.coverage_scope.clone(),
         attestation_provenance: seal.attestations.provenance.clone(),
-        intent: storage::ImportIntent::AuthoritativeGroundTruth,
+        intent: if seal.attestations.exhaustive {
+            storage::ImportIntent::AuthoritativeGroundTruth
+        } else {
+            storage::ImportIntent::RequireApproval
+        },
         policies: storage::CompatibilityPolicies::default(),
         output: storage::OutputPolicy::defaults_for(job.profile),
         acknowledged_warning_codes: Vec::new(),
@@ -1586,15 +1590,18 @@ fn convert_plan_update(
                     || mapping.source_geometry != client::ImportGeometryKind::BoundingBox
                     || mapping.target_geometry != client::ImportGeometryKind::Skeleton
                     || matching_task.is_none()
-                    || manual_category
-                        .replace(mapping.source_category_key.clone())
-                        .is_some()
                 {
                     return Err(ApiError::Unprocessable(
                         "manual box-guide requires one box-to-skeleton category and task"
                             .to_string(),
                     ));
                 }
+                if manual_category.is_some() {
+                    return Err(ApiError::Unprocessable(
+                        "only one manual box-guide category is supported".to_string(),
+                    ));
+                }
+                manual_category = Some(mapping.source_category_key.clone());
                 bounding_boxes = true;
                 skeleton_output = true;
                 let skeleton = request
@@ -3259,6 +3266,10 @@ mod tests {
         .unwrap();
 
         let converted = convert_preflight(&job, &control, &seal).unwrap();
+        assert_eq!(
+            converted.intent,
+            storage::ImportIntent::AuthoritativeGroundTruth
+        );
         assert_eq!(converted.coco_descriptors.len(), 2);
         let descriptor = &converted.coco_descriptors[1];
         assert_eq!(descriptor.descriptor_path, "annotations/keypoints.json");
@@ -3271,6 +3282,17 @@ mod tests {
             labello_domain::ImportDescriptorKind::CocoKeypoints
         );
         assert_eq!(descriptor.pairing_group.as_deref(), Some("people"));
+
+        let mut non_exhaustive_control = control.clone();
+        non_exhaustive_control
+            .create_request
+            .attestations
+            .exhaustive = false;
+        let mut non_exhaustive_seal = seal.clone();
+        non_exhaustive_seal.attestations.exhaustive = false;
+        let converted =
+            convert_preflight(&job, &non_exhaustive_control, &non_exhaustive_seal).unwrap();
+        assert_eq!(converted.intent, storage::ImportIntent::RequireApproval);
 
         seal.source.descriptors[0].kind = client::ImportDescriptorKind::YoloDataset;
         assert!(convert_preflight(&job, &control, &seal).is_err());
@@ -3531,7 +3553,7 @@ mod tests {
         }]);
         let converted = convert_plan_update(
             current_preflight(),
-            serde_json::from_value(request).unwrap(),
+            serde_json::from_value(request.clone()).unwrap(),
         )
         .unwrap();
         assert_eq!(converted.geometry_mappings.len(), 3);
@@ -3546,6 +3568,43 @@ mod tests {
             mapping.source_category_key == "1"
                 && matches!(mapping.policy, labello_domain::ImportGeometryPolicy::Direct)
         }));
+
+        let mut second_manual = request;
+        second_manual["geometryMappings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "sourceCategoryKey": "1", "sourceGeometry": "bounding_box",
+                "targetGeometry": "skeleton", "policy": "manual_box_guide_v1",
+                "parameters": []
+            }));
+        let mut skeleton_task = second_manual["taskMappings"][1].clone();
+        skeleton_task["sourceCategoryKey"] = json!("1");
+        skeleton_task["task"]["taskId"] = json!("car-skeleton");
+        skeleton_task["task"]["name"] = json!("Car skeleton");
+        skeleton_task["task"]["classIds"] = json!(["car"]);
+        skeleton_task["task"]["manualBoxGuideMigration"]["guideTaskId"] = json!("car-box");
+        second_manual["taskMappings"]
+            .as_array_mut()
+            .unwrap()
+            .push(skeleton_task);
+        let mut skeleton_mapping = second_manual["skeletonMappings"][0].clone();
+        skeleton_mapping["sourceCategoryKey"] = json!("1");
+        skeleton_mapping["targetTaskId"] = json!("car-skeleton");
+        second_manual["skeletonMappings"]
+            .as_array_mut()
+            .unwrap()
+            .push(skeleton_mapping);
+        let error = convert_plan_update(
+            current_preflight(),
+            serde_json::from_value(second_manual).unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ApiError::Unprocessable(ref message)
+                if message == "only one manual box-guide category is supported"
+        ));
     }
 
     fn report_plan() -> storage::ImportPlan {

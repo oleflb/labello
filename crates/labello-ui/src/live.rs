@@ -373,6 +373,7 @@ impl LabelloApp {
                             }
                             self.import_flow.plan = Some(plan);
                             self.import_flow.error = None;
+                            self.request_import_diagnostics(true);
                         }
                         Err(error) => {
                             self.import_flow.pending_plan_request = None;
