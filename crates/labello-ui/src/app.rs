@@ -1731,12 +1731,14 @@ impl LabelloApp {
                     self.skip_migration_keypoint();
                     return;
                 }
+                UserAction::UndoEdit | UserAction::DeleteAnnotation => {
+                    self.remove_last_migration_keypoint();
+                    return;
+                }
                 UserAction::NextImage
                 | UserAction::PreviousImage
-                | UserAction::UndoEdit
                 | UserAction::RedoEdit
                 | UserAction::SaveAnnotations
-                | UserAction::DeleteAnnotation
                 | UserAction::SelectPreviousObject
                 | UserAction::SelectNextObject
                 | UserAction::SelectPreviousPrelabel

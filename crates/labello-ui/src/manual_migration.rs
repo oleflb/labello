@@ -467,6 +467,17 @@ impl LabelloApp {
         ui.label(format!(
             "Draft status: {placed} of {total} keypoints placed"
         ));
+        if ui
+            .add_enabled(
+                guide_valid && self.work.migration.keypoint_index > 0 && !self.work.migration.busy,
+                egui::Button::new("Undo last keypoint").shortcut_text(
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::UndoEdit),
+                ),
+            )
+            .clicked()
+        {
+            self.remove_last_migration_keypoint();
+        }
         if let Some(name) = next_name {
             ui.label(format!("Next keypoint: {name}"));
             ui.checkbox(&mut self.work.migration.next_hidden, "Place as hidden");
@@ -975,6 +986,43 @@ impl LabelloApp {
             self.work.migration.keypoint_index += 1;
             self.work.migration.next_hidden = false;
         }
+    }
+
+    pub(crate) fn remove_last_migration_keypoint(&mut self) {
+        if self.work.migration.busy || !self.migration_draft_editable() {
+            return;
+        }
+        let Some(index) = self.work.migration.keypoint_index.checked_sub(1) else {
+            return;
+        };
+        let Some(keypoint) = self
+            .work
+            .migration
+            .draft
+            .as_mut()
+            .and_then(|draft| draft.keypoints.get_mut(index))
+        else {
+            return;
+        };
+        keypoint.point = None;
+        keypoint.state = KeypointState::Absent;
+        self.work.migration.keypoint_index = index;
+        self.work.migration.next_hidden = false;
+    }
+
+    fn migration_draft_editable(&self) -> bool {
+        if self.view != AppView::Annotate {
+            return false;
+        }
+        let Some((_, target)) = self.migration_active_target() else {
+            return false;
+        };
+        let Some(state) = self.current_state.as_ref() else {
+            return false;
+        };
+        state
+            .current_annotation(&target.guide_annotation_id)
+            .is_some_and(|guide| !guide.deleted)
     }
 
     fn migration_draft_valid(&self) -> bool {

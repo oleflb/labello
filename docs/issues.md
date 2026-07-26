@@ -47,7 +47,7 @@ Only after that continue with the next issue.
   - Validate the fix in the native inspector at desktop and mobile widths.
 - [x] Replace the redundant full-image migration confirmation checkbox and button with one explicit confirmation button.
   - Use context-specific wording for images with no guides and images whose guides were resolved.
-- [ ] Support removing placed migration keypoints with both Delete and Undo.
+- [x] Support removing placed migration keypoints with both Delete and Undo.
   - Match normal annotation behavior without allowing edits to the canonical bounding-box guide.
 - [ ] Add focused UI regression tests for migration inspector layout, one-step confirmation, and keypoint removal.
 - [ ] Validate the migration workflow in the live inspector at desktop and mobile widths.

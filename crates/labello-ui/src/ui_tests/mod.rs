@@ -837,6 +837,107 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_draft_supports_undo_and_delete() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 1000.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
+        });
+    harness.step();
+
+    let place_first_keypoint = |app: &mut LabelloApp| {
+        let draft = app.migration.draft.as_mut().unwrap();
+        draft.keypoints[0].point = Some(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
+        draft.keypoints[0].state = labello_domain::KeypointState::Visible;
+        app.migration.keypoint_index = 1;
+    };
+
+    let task_id = harness.state().selected_task_id.clone().unwrap();
+    let guide_id = harness
+        .state()
+        .current_state
+        .as_ref()
+        .unwrap()
+        .migration_target_sets[&task_id]
+        .targets[0]
+        .guide_annotation_id
+        .clone();
+    let guide_before = harness
+        .state()
+        .current_state
+        .as_ref()
+        .unwrap()
+        .current_annotation(&guide_id)
+        .unwrap()
+        .clone();
+
+    place_first_keypoint(harness.state_mut());
+    harness.state_mut().migration.next_hidden = true;
+    harness.step();
+    click_accesskit_button(&mut harness, "Undo last keypoint");
+    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert!(
+        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_none()
+    );
+    assert!(!harness.state().migration.next_hidden);
+    assert_eq!(
+        harness
+            .state()
+            .current_state
+            .as_ref()
+            .unwrap()
+            .current_annotation(&guide_id),
+        Some(&guide_before)
+    );
+
+    place_first_keypoint(harness.state_mut());
+    harness.step();
+    harness.key_press(egui::Key::Delete);
+    harness.step();
+    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert!(
+        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_none()
+    );
+
+    place_first_keypoint(harness.state_mut());
+    harness
+        .state_mut()
+        .current_state
+        .as_mut()
+        .unwrap()
+        .annotations
+        .get_mut(&guide_id)
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .deleted = true;
+    harness.step();
+    assert!(
+        harness
+            .query_all_by_label_contains("Undo last keypoint")
+            .next()
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.key_press(egui::Key::Delete);
+    harness.step();
+    assert_eq!(harness.state().migration.keypoint_index, 1);
+    assert!(
+        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn assignment_reload_discards_stale_manual_cursor_pass_and_local_draft() {
     use crate::app::LoadedImage;
     use crate::inspector_presets::{self, InspectorPreset};
