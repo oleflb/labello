@@ -10,7 +10,8 @@ pub const PROFILE_YOLO_DETECT: &str = "ultralytics_yolo_detect_v1";
 pub const PROFILE_YOLO_POSE: &str = "ultralytics_yolo_pose_v1";
 pub const PROFILE_COCO_INSTANCES: &str = "coco_instances_gt_v1";
 pub const PROFILE_COCO_KEYPOINTS: &str = "coco_keypoints_gt_v1";
-pub const IMPORT_PARSER_VERSION: &str = "labello-storage-import-v1";
+pub const IMPORT_PARSER_VERSION: &str = "labello-storage-import-v2";
+pub const MAX_IMAGE_VALIDATION_WORKERS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +52,7 @@ pub struct ImportRoot {
 #[serde(rename_all = "camelCase")]
 pub struct ImportLimits {
     pub concurrent_build_jobs: usize,
+    pub image_validation_workers: usize,
     pub concurrent_browser_upload_jobs: usize,
     pub active_reservations_per_owner: usize,
     pub browser_source_files: usize,
@@ -84,6 +86,7 @@ impl Default for ImportLimits {
     fn default() -> Self {
         Self {
             concurrent_build_jobs: 1,
+            image_validation_workers: 4,
             concurrent_browser_upload_jobs: 2,
             active_reservations_per_owner: 2,
             browser_source_files: 25_000,

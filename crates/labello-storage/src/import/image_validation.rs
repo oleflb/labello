@@ -1,10 +1,10 @@
-use std::{fs::File, io::BufReader, path::Path};
+use std::{fs::File, io::BufReader, path::Path, sync::atomic::AtomicBool};
 
 use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader, metadata::Orientation};
 
 use super::{
-    source::{hash_file, import_error, source_extension},
-    types::ImportLimits,
+    source::{hash_file_cancellable, import_error, source_extension},
+    types::{ImportLimits, RegisteredFile},
 };
 use crate::error::{PathIo, StorageError, StorageResult};
 
@@ -21,9 +21,17 @@ pub(super) struct ValidatedImage {
 pub(super) fn validate_image(
     path: &Path,
     source_name: &str,
+    registered: &RegisteredFile,
     limits: &ImportLimits,
+    cancelled: &AtomicBool,
 ) -> StorageResult<ValidatedImage> {
     let metadata = std::fs::metadata(path).with_path(path)?;
+    if metadata.len() != registered.byte_size {
+        return Err(import_error(
+            "source_file_size_mismatch",
+            "staged source file size changed after verification",
+        ));
+    }
     if metadata.len() > limits.single_source_file_bytes {
         return Err(import_error(
             "image_encoded_bytes_limit",
@@ -59,9 +67,14 @@ pub(super) fn validate_image(
             "image format is not supported by the import profile",
         ));
     }
-    reject_animation(path, format)?;
     let mut decoder = reader
         .into_decoder()
+        .map_err(|source| StorageError::Image {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decoder
+        .set_limits(decoder_limits(limits))
         .map_err(|source| StorageError::Image {
             path: path.to_path_buf(),
             source,
@@ -82,6 +95,7 @@ pub(super) fn validate_image(
             "decoded image exceeds the memory limit",
         ));
     }
+    reject_animation(path, format, limits)?;
     let orientation = decoder
         .orientation()
         .map_err(|source| StorageError::Image {
@@ -118,8 +132,15 @@ pub(super) fn validate_image(
             "image extension does not match decoded format",
         ));
     }
+    let blake3 = hash_file_cancellable(path, cancelled)?;
+    if blake3 != registered.blake3 {
+        return Err(import_error(
+            "source_file_digest_mismatch",
+            "staged source file changed during image validation",
+        ));
+    }
     Ok(ValidatedImage {
-        blake3: hash_file(path)?,
+        blake3,
         byte_size: metadata.len(),
         width,
         height,
@@ -128,36 +149,60 @@ pub(super) fn validate_image(
     })
 }
 
-fn reject_animation(path: &Path, format: ImageFormat) -> StorageResult<()> {
+fn decoder_limits(limits: &ImportLimits) -> image::Limits {
+    let mut decoder_limits = image::Limits::default();
+    decoder_limits.max_alloc = Some(limits.decoded_image_bytes);
+    decoder_limits
+}
+
+fn reject_animation(path: &Path, format: ImageFormat, limits: &ImportLimits) -> StorageResult<()> {
     let animated = match format {
         ImageFormat::Gif => {
-            let decoder = image::codecs::gif::GifDecoder::new(BufReader::new(
+            let mut decoder = image::codecs::gif::GifDecoder::new(BufReader::new(
                 File::open(path).with_path(path)?,
             ))
             .map_err(|source| StorageError::Image {
                 path: path.to_path_buf(),
                 source,
             })?;
+            decoder
+                .set_limits(decoder_limits(limits))
+                .map_err(|source| StorageError::Image {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             decoder.into_frames().take(2).count() > 1
         }
         ImageFormat::WebP => {
-            let decoder = image::codecs::webp::WebPDecoder::new(BufReader::new(
+            let mut decoder = image::codecs::webp::WebPDecoder::new(BufReader::new(
                 File::open(path).with_path(path)?,
             ))
             .map_err(|source| StorageError::Image {
                 path: path.to_path_buf(),
                 source,
             })?;
+            decoder
+                .set_limits(decoder_limits(limits))
+                .map_err(|source| StorageError::Image {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             decoder.has_animation()
         }
         ImageFormat::Png => {
-            let decoder = image::codecs::png::PngDecoder::new(BufReader::new(
+            let mut decoder = image::codecs::png::PngDecoder::new(BufReader::new(
                 File::open(path).with_path(path)?,
             ))
             .map_err(|source| StorageError::Image {
                 path: path.to_path_buf(),
                 source,
             })?;
+            decoder
+                .set_limits(decoder_limits(limits))
+                .map_err(|source| StorageError::Image {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             decoder.is_apng().map_err(|source| StorageError::Image {
                 path: path.to_path_buf(),
                 source,

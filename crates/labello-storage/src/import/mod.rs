@@ -14,7 +14,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
 };
 
 use labello_domain::{DatasetId, ImportId, SCHEMA_VERSION, UserId, now};
@@ -36,6 +40,10 @@ const PREFLIGHT_FILE: &str = "spool/preflight-artifacts.json";
 const PREFLIGHT_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 const DESCRIPTOR_INSPECTION_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_CONCURRENT_DESCRIPTOR_INSPECTIONS: usize = 2;
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +71,14 @@ pub struct ImportService {
 struct ActiveBuildGuard {
     active: Arc<Mutex<BTreeSet<ImportId>>>,
     import_id: ImportId,
+}
+
+struct ParserCancellationGuard(Arc<AtomicBool>);
+
+impl Drop for ParserCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for ActiveBuildGuard {
@@ -557,7 +573,21 @@ impl ImportService {
         }
         let job_dir = self.job_dir(import_id);
         let mut index = source::load_source_index(&job_dir).await?;
+        let parser_version_migration = if job.phase == ImportJobPhase::Sealed {
+            validate_sealed_source_anchor(&job, &index)?
+        } else {
+            false
+        };
         let fingerprint = source::seal_source(&job_dir, &mut index, job.profile.id()).await?;
+        if job.phase == ImportJobPhase::Sealed
+            && job.source_fingerprint.as_deref() != Some(&fingerprint)
+            && !parser_version_migration
+        {
+            return Err(import_error(
+                "source_changed",
+                "sealed source no longer matches the import job",
+            ));
+        }
         job.phase = ImportJobPhase::Sealed;
         job.source_fingerprint = Some(fingerprint);
         update_job_counts(&mut job, &index);
@@ -571,6 +601,7 @@ impl ImportService {
         owner: &UserId,
         request: PreflightRequest,
     ) -> StorageResult<ImportPlan> {
+        let preflight_started = Instant::now();
         let mut job = self.load_owned_job(import_id, owner).await?;
         if !matches!(
             job.phase,
@@ -587,7 +618,9 @@ impl ImportService {
                 "ground-truth attestation is required",
             ));
         }
+        let source_verification_started = Instant::now();
         let mut source_index = source::load_source_index(&self.job_dir(import_id)).await?;
+        let parser_version_migration = validate_sealed_source_anchor(&job, &source_index)?;
         let verified_fingerprint = source::seal_source(
             &self.job_dir(import_id),
             &mut source_index,
@@ -595,11 +628,23 @@ impl ImportService {
         )
         .await?;
         if job.source_fingerprint.as_deref() != Some(&verified_fingerprint) {
-            return Err(import_error(
-                "source_changed",
-                "sealed source no longer matches the import job",
-            ));
+            if !parser_version_migration {
+                return Err(import_error(
+                    "source_changed",
+                    "sealed source no longer matches the import job",
+                ));
+            }
+            job.source_fingerprint = Some(verified_fingerprint);
+            job.plan_hash = None;
+            job.preflight_generation = None;
         }
+        let source_verification_ms = elapsed_ms(source_verification_started);
+        let source_file_count = source_index.files.len();
+        let source_byte_count = source_index
+            .files
+            .values()
+            .map(|file| file.byte_size)
+            .sum::<u64>();
         let generation = uuid::Uuid::new_v4().simple().to_string();
         job.phase = ImportJobPhase::Preflighting;
         job.plan_hash = None;
@@ -609,26 +654,38 @@ impl ImportService {
         let parse_job_dir = self.job_dir(import_id);
         let parse_job = job.clone();
         let parse_limits = self.config.limits.clone();
-        let result = match tokio::time::timeout(
-            PREFLIGHT_TIME_LIMIT,
-            tokio::task::spawn_blocking(move || {
-                formats::preflight(&parse_job_dir, &parse_job, request, &parse_limits)
-            }),
-        )
-        .await
-        {
+        let parser_cancelled = Arc::new(AtomicBool::new(false));
+        let _cancellation_guard = ParserCancellationGuard(parser_cancelled.clone());
+        let worker_cancelled = parser_cancelled.clone();
+        let mut parser_worker = tokio::task::spawn_blocking(move || {
+            formats::preflight(
+                &parse_job_dir,
+                &source_index,
+                &parse_job,
+                request,
+                &parse_limits,
+                &worker_cancelled,
+            )
+        });
+        let result = match tokio::time::timeout(PREFLIGHT_TIME_LIMIT, &mut parser_worker).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(import_error(
                 "parser_worker_failed",
                 "import parser worker terminated unexpectedly",
             )),
-            Err(_) => Err(import_error(
-                "parser_time_limit",
-                "import parsing exceeded the parser time budget",
-            )),
+            Err(_) => {
+                parser_cancelled.store(true, Ordering::Relaxed);
+                let _ = parser_worker.await;
+                Err(import_error(
+                    "parser_time_limit",
+                    "import parsing exceeded the parser time budget",
+                ))
+            }
         };
         match result {
-            Ok((plan, ir)) => {
+            Ok(output) => {
+                let formats::PreflightOutput { plan, ir, timings } = output;
+                let artifact_persistence_started = Instant::now();
                 write_json_atomic(
                     &self.job_dir(import_id).join(PREFLIGHT_FILE),
                     &PreflightArtifacts {
@@ -641,6 +698,25 @@ impl ImportService {
                 job.phase = ImportJobPhase::AwaitingDecision;
                 job.plan_hash = Some(plan.plan_hash.clone());
                 self.save_job(&job).await?;
+                let artifact_persistence_ms = elapsed_ms(artifact_persistence_started);
+                tracing::info!(
+                    event = "import.preflight.phases",
+                    import_id = %job.import_id,
+                    profile = job.profile.id(),
+                    elapsed_ms = elapsed_ms(preflight_started),
+                    source_verification_ms,
+                    parse_ms = timings.parse_ms,
+                    semantic_validation_ms = timings.semantic_validation_ms,
+                    plan_assembly_ms = timings.plan_assembly_ms,
+                    plan_hash_ms = timings.plan_hash_ms,
+                    artifact_persistence_ms,
+                    source_file_count,
+                    source_byte_count,
+                    image_count = plan.totals.images,
+                    source_object_count = plan.totals.source_objects,
+                    output_annotation_count = plan.totals.output_annotations,
+                    "import preflight phases completed"
+                );
                 Ok(plan)
             }
             Err(error) => {
@@ -1261,7 +1337,44 @@ fn validate_destination_id(dataset_id: &DatasetId) -> StorageResult<()> {
     Ok(())
 }
 
+fn validate_sealed_source_anchor(job: &ImportJob, index: &SourceIndex) -> StorageResult<bool> {
+    if !index.sealed {
+        return Err(import_error(
+            "source_changed",
+            "sealed import job has an unsealed source index",
+        ));
+    }
+    if job.source_fingerprint == index.source_fingerprint {
+        return Ok(index
+            .parser_version
+            .as_deref()
+            .unwrap_or("labello-storage-import-v1")
+            != IMPORT_PARSER_VERSION);
+    }
+    if index.parser_version.as_deref() == Some(IMPORT_PARSER_VERSION) {
+        let mut ordered = index.files.values().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let legacy =
+            source::source_fingerprint(&ordered, job.profile.id(), "labello-storage-import-v1")?;
+        if job.source_fingerprint.as_deref() == Some(&legacy) {
+            return Ok(true);
+        }
+    }
+    Err(import_error(
+        "source_changed",
+        "sealed source no longer matches the import job",
+    ))
+}
+
 fn validate_config(datasets_root: &Path, config: &ImportConfig) -> StorageResult<()> {
+    if config.limits.image_validation_workers == 0
+        || config.limits.image_validation_workers > MAX_IMAGE_VALIDATION_WORKERS
+    {
+        return Err(import_error(
+            "import_limit_invalid",
+            "image validation workers must be within the supported range",
+        ));
+    }
     let datasets = std::fs::canonicalize(datasets_root).with_path(datasets_root)?;
     let server_state = datasets.join(SERVER_STATE_DIR);
     let mut roots = Vec::new();

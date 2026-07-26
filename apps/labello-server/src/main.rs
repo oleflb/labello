@@ -57,6 +57,7 @@ struct ImportFileConfig {
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct ImportLimitsFileConfig {
     concurrent_build_jobs: u64,
+    image_validation_workers: u64,
     concurrent_browser_upload_jobs: u64,
     active_reservations_per_owner: u64,
     browser_source_files: u64,
@@ -100,6 +101,8 @@ impl Default for ImportLimitsFileConfig {
         Self {
             concurrent_build_jobs: u64::try_from(limits.concurrent_build_jobs)
                 .expect("default concurrent_build_jobs fits in u64"),
+            image_validation_workers: u64::try_from(limits.image_validation_workers)
+                .expect("default image_validation_workers fits in u64"),
             concurrent_browser_upload_jobs: u64::try_from(limits.concurrent_browser_upload_jobs)
                 .expect("default concurrent_browser_upload_jobs fits in u64"),
             active_reservations_per_owner: u64::try_from(limits.active_reservations_per_owner)
@@ -375,6 +378,7 @@ fn storage_import_config(config: Option<&ImportFileConfig>) -> anyhow::Result<Im
 fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<ImportLimits> {
     let values = [
         ("concurrentBuildJobs", config.concurrent_build_jobs),
+        ("imageValidationWorkers", config.image_validation_workers),
         (
             "concurrentBrowserUploadJobs",
             config.concurrent_browser_upload_jobs,
@@ -417,6 +421,12 @@ fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<Impo
     ];
     if let Some((name, _)) = values.into_iter().find(|(_, value)| *value == 0) {
         bail!("import.limits.{name} must be greater than zero");
+    }
+    if config.image_validation_workers
+        > u64::try_from(labello_storage::MAX_IMAGE_VALIDATION_WORKERS)
+            .expect("maximum image validation workers fits in u64")
+    {
+        bail!("import.limits.imageValidationWorkers exceeds the supported maximum");
     }
 
     validate_limit_order(
@@ -495,6 +505,10 @@ fn storage_import_limits(config: &ImportLimitsFileConfig) -> anyhow::Result<Impo
         concurrent_build_jobs: usize_import_limit(
             config.concurrent_build_jobs,
             "concurrentBuildJobs",
+        )?,
+        image_validation_workers: usize_import_limit(
+            config.image_validation_workers,
+            "imageValidationWorkers",
         )?,
         concurrent_browser_upload_jobs: usize_import_limit(
             config.concurrent_browser_upload_jobs,
@@ -686,6 +700,7 @@ localAdminLogin = false
         let configured = configured.replace(
             "concurrentBuildJobs = 3\n",
             r#"concurrentBuildJobs = 3
+imageValidationWorkers = 6
 concurrentBrowserUploadJobs = 4
 activeReservationsPerOwner = 5
 browserSourceFiles = 600
@@ -722,6 +737,7 @@ diagnosticExamplesPerCode = 7
                 .limits,
             ImportLimits {
                 concurrent_build_jobs: 3,
+                image_validation_workers: 6,
                 concurrent_browser_upload_jobs: 4,
                 active_reservations_per_owner: 5,
                 browser_source_files: 600,
@@ -767,6 +783,12 @@ diagnosticExamplesPerCode = 7
 
         for (field, value, expected) in [
             ("concurrentBuildJobs", 0, "must be greater than zero"),
+            ("imageValidationWorkers", 0, "must be greater than zero"),
+            (
+                "imageValidationWorkers",
+                u64::try_from(labello_storage::MAX_IMAGE_VALIDATION_WORKERS).unwrap() + 1,
+                "exceeds the supported maximum",
+            ),
             (
                 "descriptorBytes",
                 ImportLimits::default().single_source_file_bytes + 1,

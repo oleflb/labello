@@ -49,6 +49,7 @@ localAdminLogin = true
 
 # [import.limits]
 # concurrentBuildJobs = 1
+# imageValidationWorkers = 4
 # concurrentBrowserUploadJobs = 2
 # activeReservationsPerOwner = 2
 # browserSourceFiles = 25_000
@@ -202,6 +203,7 @@ below correspond to the binary-size defaults used by storage.
 | Setting | Default | Enforced limit |
 | --- | ---: | --- |
 | `import.limits.concurrentBuildJobs` | `1` | Concurrent preflight/build jobs for the server. |
+| `import.limits.imageValidationWorkers` | `4` | YOLO image decoders used by one import preflight. Peak decoded-image memory is bounded by this value multiplied by `decodedImageBytes`. |
 | `import.limits.concurrentBrowserUploadJobs` | `2` | Concurrent browser upload jobs for the server. |
 | `import.limits.activeReservationsPerOwner` | `2` | Active destination reservations per owner. |
 | `import.limits.browserSourceFiles` | `25_000` | Files registered by one browser source. |

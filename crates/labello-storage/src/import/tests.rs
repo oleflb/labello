@@ -2164,6 +2164,390 @@ async fn zero_keypoint_yolo_objects_do_not_emit_skeleton_annotations() {
 }
 
 #[tokio::test]
+async fn yolo_split_overlap_processes_shared_image_once() {
+    let files = BTreeMap::from([
+        (
+            "dataset.yaml",
+            b"path: .\ntrain: images/shared\nval: images/shared\nnames: [person]\n".to_vec(),
+        ),
+        ("images/shared/a.png", png()),
+        ("labels/shared/a.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "shared-split-image",
+        files,
+    )
+    .await;
+    let mut preflight = request(ImportProfile::UltralyticsYoloDetectV1);
+    preflight.selected_splits = vec!["train".to_string(), "val".to_string()];
+    preflight.policies.cross_split_duplicates = CrossSplitDuplicatePolicy::MultipleMemberships;
+    preflight
+        .acknowledged_warning_codes
+        .push("yolo_split_overlap_membership".to_string());
+
+    let plan = service
+        .preflight(&job.import_id, &owner, preflight.clone())
+        .await
+        .unwrap();
+    let overlap = plan
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "yolo_split_overlap_membership")
+        .unwrap();
+    assert_eq!(overlap.count, 1);
+    assert!(!plan.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code.as_str(),
+            "yolo_duplicate_row" | "yolo_duplicate_row_deduplicated"
+        )
+    }));
+    assert_eq!(plan.totals.images, 1);
+    assert_eq!(plan.totals.source_objects, 1);
+    assert_eq!(plan.totals.output_annotations, 1);
+
+    let repeated = service
+        .preflight(&job.import_id, &owner, preflight)
+        .await
+        .unwrap();
+    assert_eq!(repeated.plan_hash, plan.plan_hash);
+    let committed = service
+        .commit(&job.import_id, &owner, &repeated.plan_hash)
+        .await
+        .unwrap();
+    let repository = DatasetRepository::new(committed.dataset_path);
+    let image = repository
+        .load_images_index()
+        .await
+        .unwrap()
+        .images_by_hash
+        .into_values()
+        .next()
+        .unwrap();
+    assert_eq!(
+        image.source_memberships,
+        Some(vec!["train".to_string(), "val".to_string()])
+    );
+    let state = repository.load_image_state(&image.image_id).await.unwrap();
+    assert_eq!(state.active_annotations().count(), 1);
+}
+
+#[tokio::test]
+async fn yolo_parallel_image_validation_is_deterministic() {
+    let files = BTreeMap::from([
+        (
+            "dataset.yaml",
+            b"path: .\ntrain: images/train\nnames: [person]\n".to_vec(),
+        ),
+        ("images/train/a.png", png_with_color([1, 0, 0, 255])),
+        ("images/train/b.png", png_with_color([2, 0, 0, 255])),
+        ("images/train/c.png", png_with_color([3, 0, 0, 255])),
+        ("images/train/d.png", png_with_color([4, 0, 0, 255])),
+        ("labels/train/a.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/b.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/c.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/d.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = enabled_config();
+    config.limits.image_validation_workers = 4;
+    let service = ImportService::new(temp.path(), config).await.unwrap();
+    let (_owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "parallel-images",
+        files,
+    )
+    .await;
+    let preflight = request(ImportProfile::UltralyticsYoloDetectV1);
+    let job_dir = service.job_dir(&job.import_id);
+    let index = source::load_source_index(&job_dir).await.unwrap();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let mut serial_limits = service.config.limits.clone();
+    serial_limits.image_validation_workers = 1;
+    let serial = formats::preflight(
+        &job_dir,
+        &index,
+        &job,
+        preflight.clone(),
+        &serial_limits,
+        &cancelled,
+    )
+    .unwrap();
+    let parallel = formats::preflight(
+        &job_dir,
+        &index,
+        &job,
+        preflight,
+        &service.config.limits,
+        &cancelled,
+    )
+    .unwrap();
+
+    assert_eq!(serial.plan.plan_hash, parallel.plan.plan_hash);
+    assert_eq!(serial.plan.diagnostics, parallel.plan.diagnostics);
+    assert_eq!(serial.ir, parallel.ir);
+    assert_eq!(parallel.plan.totals.images, 4);
+    assert_eq!(parallel.plan.totals.source_objects, 4);
+}
+
+#[tokio::test]
+async fn preflight_cancellation_and_worker_limits_are_enforced() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut invalid_config = enabled_config();
+    invalid_config.limits.image_validation_workers = MAX_IMAGE_VALIDATION_WORKERS + 1;
+    let error = ImportService::new(temp.path(), invalid_config)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        StorageError::Import { ref code, .. } if code == "import_limit_invalid"
+    ));
+
+    let service = service(temp.path()).await;
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "cancelled-preflight",
+        yolo_detect_files(),
+    )
+    .await;
+    let index = source::load_source_index(&service.job_dir(&job.import_id))
+        .await
+        .unwrap();
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let error = formats::preflight(
+        &service.job_dir(&job.import_id),
+        &index,
+        &job,
+        request(ImportProfile::UltralyticsYoloDetectV1),
+        &service.config.limits,
+        &cancelled,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        StorageError::Import { ref code, .. } if code == "parser_cancelled"
+    ));
+    assert_eq!(
+        service.job(&job.import_id, &owner).await.unwrap().phase,
+        job.phase
+    );
+}
+
+#[tokio::test]
+async fn preflight_reseals_a_verified_legacy_parser_source_without_recopying() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (owner, mut job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "legacy-parser-source",
+        yolo_detect_files(),
+    )
+    .await;
+    let job_dir = service.job_dir(&job.import_id);
+    let mut index = source::load_source_index(&job_dir).await.unwrap();
+    let mut ordered = index.files.values().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let legacy_fingerprint =
+        source::source_fingerprint(&ordered, job.profile.id(), "labello-storage-import-v1")
+            .unwrap();
+    index.source_fingerprint = Some(legacy_fingerprint.clone());
+    index.parser_version = None;
+    source::save_source_index(&job_dir, &index).await.unwrap();
+    job.source_fingerprint = Some(legacy_fingerprint.clone());
+    service.save_job(&job).await.unwrap();
+    let migrated_fingerprint = source::seal_source(&job_dir, &mut index, job.profile.id())
+        .await
+        .unwrap();
+    assert_ne!(migrated_fingerprint, legacy_fingerprint);
+
+    let plan = service
+        .preflight(
+            &job.import_id,
+            &owner,
+            request(ImportProfile::UltralyticsYoloDetectV1),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(plan.source_fingerprint, legacy_fingerprint);
+    let migrated_index = source::load_source_index(&job_dir).await.unwrap();
+    assert_eq!(
+        migrated_index.parser_version.as_deref(),
+        Some(IMPORT_PARSER_VERSION)
+    );
+    assert_eq!(
+        service
+            .job(&job.import_id, &owner)
+            .await
+            .unwrap()
+            .source_fingerprint,
+        Some(plan.source_fingerprint)
+    );
+}
+
+#[tokio::test]
+async fn preflight_rejects_coordinated_source_and_index_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "coordinated-mutation",
+        yolo_detect_files(),
+    )
+    .await;
+    let job_dir = service.job_dir(&job.import_id);
+    let mut index = source::load_source_index(&job_dir).await.unwrap();
+    let replacement = b"0 0.4 0.5 0.5 0.5\n";
+    let label = index
+        .files
+        .values_mut()
+        .find(|file| file.relative_path == "labels/train/a.txt")
+        .unwrap();
+    std::fs::write(
+        job_dir.join(source::SOURCE_DIR).join(&label.file_id),
+        replacement,
+    )
+    .unwrap();
+    label.byte_size = replacement.len() as u64;
+    label.accepted_bytes = replacement.len() as u64;
+    label.blake3 = blake3::hash(replacement).to_hex().to_string();
+    let mut ordered = index.files.values().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    index.source_fingerprint = Some(
+        source::source_fingerprint(&ordered, job.profile.id(), IMPORT_PARSER_VERSION).unwrap(),
+    );
+    source::save_source_index(&job_dir, &index).await.unwrap();
+
+    let seal_error = service.seal(&job.import_id, &owner).await.unwrap_err();
+    assert!(matches!(
+        seal_error,
+        StorageError::Import { ref code, .. } if code == "source_changed"
+    ));
+    let error = service
+        .preflight(
+            &job.import_id,
+            &owner,
+            request(ImportProfile::UltralyticsYoloDetectV1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        StorageError::Import { ref code, .. } if code == "source_changed"
+    ));
+}
+
+#[tokio::test]
+async fn preflight_rejects_an_unsealed_index_for_a_sealed_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "unsealed-index",
+        yolo_detect_files(),
+    )
+    .await;
+    let job_dir = service.job_dir(&job.import_id);
+    let mut index = source::load_source_index(&job_dir).await.unwrap();
+    index.sealed = false;
+    source::save_source_index(&job_dir, &index).await.unwrap();
+
+    let error = service
+        .preflight(
+            &job.import_id,
+            &owner,
+            request(ImportProfile::UltralyticsYoloDetectV1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        StorageError::Import { ref code, .. } if code == "source_changed"
+    ));
+}
+
+#[tokio::test]
+async fn yolo_label_failure_stops_before_later_validation_batches() {
+    let files = BTreeMap::from([
+        (
+            "dataset.yaml",
+            b"path: .\ntrain: images/train\nnames: [person]\n".to_vec(),
+        ),
+        ("images/train/a.png", png_with_color([1, 0, 0, 255])),
+        ("images/train/b.png", b"not an image".to_vec()),
+        ("images/train/c.png", png_with_color([3, 0, 0, 255])),
+        ("images/train/d.png", png_with_color([4, 0, 0, 255])),
+        ("images/train/e.png", b"not an image".to_vec()),
+        ("labels/train/a.txt", b"0 invalid 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/b.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/c.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/d.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+        ("labels/train/e.txt", b"0 0.5 0.5 0.5 0.5\n".to_vec()),
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path()).await;
+    let (_owner, job) = browser_job(
+        &service,
+        ImportProfile::UltralyticsYoloDetectV1,
+        "early-label-failure",
+        files,
+    )
+    .await;
+
+    let job_dir = service.job_dir(&job.import_id);
+    let index = source::load_source_index(&job_dir).await.unwrap();
+    let preflight = request(ImportProfile::UltralyticsYoloDetectV1);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let mut serial_limits = service.config.limits.clone();
+    serial_limits.image_validation_workers = 1;
+    let serial = formats::preflight(
+        &job_dir,
+        &index,
+        &job,
+        preflight.clone(),
+        &serial_limits,
+        &cancelled,
+    )
+    .unwrap();
+    let parallel = formats::preflight(
+        &job_dir,
+        &index,
+        &job,
+        preflight,
+        &service.config.limits,
+        &cancelled,
+    )
+    .unwrap();
+    assert_eq!(serial.plan.plan_hash, parallel.plan.plan_hash);
+    assert_eq!(serial.plan.diagnostics, parallel.plan.diagnostics);
+    let plan = parallel.plan;
+
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "yolo_number_invalid")
+    );
+    assert!(!plan.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code.as_str(),
+            "storage_image" | "image_format_unsupported"
+        )
+    }));
+}
+
+#[tokio::test]
 async fn duplicate_bytes_compare_missing_label_facts() {
     let image = png();
     let files = BTreeMap::from([

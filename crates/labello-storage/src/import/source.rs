@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use blake3::Hasher;
@@ -30,6 +31,8 @@ const BROWSE_SCAN_LIMIT: usize = 10_000;
 pub(super) struct SourceIndex {
     pub sealed: bool,
     pub source_fingerprint: Option<String>,
+    #[serde(default)]
+    pub parser_version: Option<String>,
     pub files: BTreeMap<String, RegisteredFile>,
 }
 
@@ -461,6 +464,7 @@ pub(super) fn copy_server_directory(
     Ok(SourceIndex {
         sealed: false,
         source_fingerprint: None,
+        parser_version: None,
         files,
     })
 }
@@ -690,6 +694,10 @@ pub(super) async fn seal_source(
     profile_id: &str,
 ) -> StorageResult<String> {
     let previous_fingerprint = index.source_fingerprint.clone();
+    let previous_parser_version = index
+        .parser_version
+        .as_deref()
+        .unwrap_or("labello-storage-import-v1");
     if index.files.is_empty() || index.files.values().any(|file| !file.complete) {
         return Err(import_error(
             "source_incomplete",
@@ -698,11 +706,7 @@ pub(super) async fn seal_source(
     }
     let mut ordered = index.files.values().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    let mut hasher = Hasher::new();
-    hasher.update(b"labello:import-source:v1\0");
-    hash_string(&mut hasher, profile_id);
-    hash_string(&mut hasher, super::types::IMPORT_PARSER_VERSION);
-    for file in ordered {
+    for file in &ordered {
         let path = job_dir.join(SOURCE_DIR).join(&file.file_id);
         if std::fs::metadata(&path).with_path(&path)?.len() != file.byte_size
             || hash_file(&path)? != file.blake3
@@ -712,23 +716,42 @@ pub(super) async fn seal_source(
                 "staged source changed before sealing",
             ));
         }
+    }
+    if index.sealed {
+        let expected_previous = source_fingerprint(&ordered, profile_id, previous_parser_version)?;
+        if previous_fingerprint.as_deref() != Some(&expected_previous) {
+            return Err(import_error(
+                "source_changed",
+                "sealed source fingerprint changed",
+            ));
+        }
+    }
+    let fingerprint =
+        source_fingerprint(&ordered, profile_id, super::types::IMPORT_PARSER_VERSION)?;
+    index.sealed = true;
+    index.source_fingerprint = Some(fingerprint.clone());
+    index.parser_version = Some(super::types::IMPORT_PARSER_VERSION.to_string());
+    save_source_index(job_dir, index).await?;
+    Ok(fingerprint)
+}
+
+pub(super) fn source_fingerprint(
+    ordered: &[&RegisteredFile],
+    profile_id: &str,
+    parser_version: &str,
+) -> StorageResult<String> {
+    let mut hasher = Hasher::new();
+    hasher.update(b"labello:import-source:v1\0");
+    hash_string(&mut hasher, profile_id);
+    hash_string(&mut hasher, parser_version);
+    for file in ordered {
         hash_string(&mut hasher, &file.relative_path);
         hasher.update(&file.byte_size.to_be_bytes());
         let digest = blake3::Hash::from_hex(&file.blake3)
             .map_err(|_| import_error("digest_invalid", "stored source digest is invalid"))?;
         hasher.update(digest.as_bytes());
     }
-    let fingerprint = hasher.finalize().to_hex().to_string();
-    if index.sealed && previous_fingerprint.as_deref() != Some(&fingerprint) {
-        return Err(import_error(
-            "source_changed",
-            "sealed source fingerprint changed",
-        ));
-    }
-    index.sealed = true;
-    index.source_fingerprint = Some(fingerprint.clone());
-    save_source_index(job_dir, index).await?;
-    Ok(fingerprint)
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 pub(super) async fn load_source_index(job_dir: &Path) -> StorageResult<SourceIndex> {
@@ -863,10 +886,24 @@ fn validate_digest(value: &str) -> StorageResult<()> {
 }
 
 pub(super) fn hash_file(path: &Path) -> StorageResult<String> {
+    hash_file_inner(path, None)
+}
+
+pub(super) fn hash_file_cancellable(path: &Path, cancelled: &AtomicBool) -> StorageResult<String> {
+    hash_file_inner(path, Some(cancelled))
+}
+
+fn hash_file_inner(path: &Path, cancelled: Option<&AtomicBool>) -> StorageResult<String> {
     let mut file = File::open(path).with_path(path)?;
     let mut hasher = Hasher::new();
     let mut buffer = [0_u8; 1024 * 1024];
     loop {
+        if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
+            return Err(import_error(
+                "parser_cancelled",
+                "source hashing was cancelled",
+            ));
+        }
         let read = file.read(&mut buffer).with_path(path)?;
         if read == 0 {
             break;

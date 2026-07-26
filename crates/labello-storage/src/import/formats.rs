@@ -1,6 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, Read},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Instant,
 };
 
 use labello_domain::{
@@ -11,7 +17,10 @@ use serde_json::Value;
 use super::{
     image_validation::validate_image,
     ir::{F64Box, ImportIr, IrCategory, IrImage, IrKeypoint, IrObject},
-    source::{SourceAccess, import_error, join_source_path, parent_source_path, source_extension},
+    source::{
+        SourceAccess, SourceIndex, import_error, join_source_path, parent_source_path,
+        source_extension,
+    },
     types::*,
 };
 use crate::{StorageError, StorageResult};
@@ -22,33 +31,70 @@ const MAX_YAML_ALIASES: usize = 0;
 const YOLO_SPLIT_KEYS: [&str; 3] = ["train", "val", "test"];
 pub(super) const YOLO_BOUNDARY_ROUNDING_TOLERANCE: f64 = 1e-6;
 
+pub(super) struct PreflightOutput {
+    pub plan: ImportPlan,
+    pub ir: ImportIr,
+    pub timings: PreflightTimings,
+}
+
+pub(super) struct PreflightTimings {
+    pub parse_ms: u64,
+    pub semantic_validation_ms: u64,
+    pub plan_assembly_ms: u64,
+    pub plan_hash_ms: u64,
+}
+
+struct ImageValidationWork {
+    source_path: String,
+    physical_path: PathBuf,
+    registered: RegisteredFile,
+}
+
+struct YoloImageSelection {
+    source_path: String,
+    split_memberships: BTreeSet<String>,
+}
+
 pub(super) fn preflight(
     job_dir: &std::path::Path,
+    index: &SourceIndex,
     job: &ImportJob,
     mut request: PreflightRequest,
     limits: &ImportLimits,
-) -> StorageResult<(ImportPlan, ImportIr)> {
-    let index = futures_lite_read_index(job_dir)?;
+    cancelled: &AtomicBool,
+) -> StorageResult<PreflightOutput> {
+    check_cancelled(cancelled)?;
     if !index.sealed || index.source_fingerprint.as_deref() != job.source_fingerprint.as_deref() {
         return Err(import_error(
             "source_not_sealed",
             "preflight requires the matching sealed source",
         ));
     }
-    let source = SourceAccess::new(job_dir, &index);
+    let source = SourceAccess::new(job_dir, index);
     let mut diagnostics = Diagnostics::new(job.profile, limits.diagnostic_examples_per_code);
+    let parse_started = Instant::now();
     let parsed = match job.profile {
-        ImportProfile::UltralyticsYoloDetectV1 => {
-            parse_yolo(&source, &request, limits, false, &mut diagnostics)
-        }
+        ImportProfile::UltralyticsYoloDetectV1 => parse_yolo(
+            &source,
+            &request,
+            limits,
+            false,
+            &mut diagnostics,
+            cancelled,
+        ),
         ImportProfile::UltralyticsYoloPoseV1 => {
-            parse_yolo(&source, &request, limits, true, &mut diagnostics)
+            parse_yolo(&source, &request, limits, true, &mut diagnostics, cancelled)
         }
-        ImportProfile::CocoInstancesGtV1 => {
-            parse_coco(&source, &request, limits, false, &mut diagnostics)
-        }
+        ImportProfile::CocoInstancesGtV1 => parse_coco(
+            &source,
+            &request,
+            limits,
+            false,
+            &mut diagnostics,
+            cancelled,
+        ),
         ImportProfile::CocoKeypointsGtV1 => {
-            parse_coco(&source, &request, limits, true, &mut diagnostics)
+            parse_coco(&source, &request, limits, true, &mut diagnostics, cancelled)
         }
     };
     let mut ir = match parsed {
@@ -73,18 +119,36 @@ pub(super) fn preflight(
             ImportIr::new()
         }
     };
+    let parse_ms = elapsed_ms(parse_started);
+    check_cancelled(cancelled)?;
+    let semantic_validation_started = Instant::now();
     resolve_coverage_scope(&ir, &mut request, &mut diagnostics);
     validate_mappings(&ir, &request, &mut diagnostics);
     validate_duplicate_images(&mut ir, &request, &mut diagnostics)?;
     enforce_ir_limits(&ir, &request, limits, &mut diagnostics);
+    check_cancelled(cancelled)?;
+    let semantic_validation_ms = elapsed_ms(semantic_validation_started);
+    let plan_assembly_started = Instant::now();
     let (class_ids, task_ids) = planned_ids(&ir, &request);
     let output_tasks = task_ids.values().map(Vec::len).sum();
     let output_annotations = estimated_annotations(&ir, &request, &class_ids);
-    let coverage = coverage_totals(&ir, &request, &task_ids);
+    let coverage = coverage_totals(&ir, &request, &task_ids, cancelled)?;
+    let mut direct_geometry_by_category = BTreeMap::<&str, (bool, bool)>::new();
+    for object in &ir.objects {
+        let direct = direct_geometry_by_category
+            .entry(&object.source_category_key)
+            .or_default();
+        direct.0 |= object.direct_bbox.is_some();
+        direct.1 |= object.direct_skeleton.is_some();
+    }
     let source_categories = ir
         .categories
         .iter()
         .map(|(key, category)| {
+            let direct = direct_geometry_by_category
+                .get(key.as_str())
+                .copied()
+                .unwrap_or_default();
             (
                 key.clone(),
                 ImportSourceCategory {
@@ -92,12 +156,8 @@ pub(super) fn preflight(
                     source_category_id: category.source_id.clone(),
                     source_name: category.name.clone(),
                     source_supercategory: category.supercategory.clone(),
-                    direct_bounding_boxes: ir.objects.iter().any(|object| {
-                        object.source_category_key == *key && object.direct_bbox.is_some()
-                    }),
-                    direct_skeletons: ir.objects.iter().any(|object| {
-                        object.source_category_key == *key && object.direct_skeleton.is_some()
-                    }),
+                    direct_bounding_boxes: direct.0,
+                    direct_skeletons: direct.1,
                     keypoint_names: category.keypoint_names.clone(),
                     edges: category.edges.clone(),
                     allow_hidden: category.allow_hidden,
@@ -197,6 +257,7 @@ pub(super) fn preflight(
     }
     let source_fingerprint = job.source_fingerprint.clone().expect("validated above");
     let diagnostics = diagnostics.finish();
+    check_cancelled(cancelled)?;
     let hash_input = serde_json::json!({
         "domain": "labello:import-plan:v1",
         "importId": job.import_id,
@@ -212,11 +273,14 @@ pub(super) fn preflight(
         "taskIds": task_ids,
         "diagnostics": diagnostics,
     });
+    let plan_assembly_ms = elapsed_ms(plan_assembly_started);
+    let plan_hash_started = Instant::now();
     let canonical = serde_json::to_vec(&hash_input).map_err(|source| StorageError::Json {
         path: job_dir.join("plan.json"),
         source,
     })?;
     let plan_hash = blake3::hash(&canonical).to_hex().to_string();
+    let plan_hash_ms = elapsed_ms(plan_hash_started);
     let plan = ImportPlan {
         schema_version: SCHEMA_VERSION,
         import_id: job.import_id.clone(),
@@ -231,16 +295,120 @@ pub(super) fn preflight(
         class_ids,
         task_ids,
     };
-    Ok((plan, ir))
+    Ok(PreflightOutput {
+        plan,
+        ir,
+        timings: PreflightTimings {
+            parse_ms,
+            semantic_validation_ms,
+            plan_assembly_ms,
+            plan_hash_ms,
+        },
+    })
 }
 
-fn futures_lite_read_index(job_dir: &std::path::Path) -> StorageResult<super::source::SourceIndex> {
-    let path = job_dir.join(super::source::SOURCE_INDEX_FILE);
-    let bytes = std::fs::read(&path).map_err(|source| StorageError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    serde_json::from_slice(&bytes).map_err(|source| StorageError::Json { path, source })
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> StorageResult<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(import_error(
+            "parser_cancelled",
+            "import parsing was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_images(
+    work: Vec<ImageValidationWork>,
+    worker_limit: usize,
+    limits: &ImportLimits,
+    cancelled: &AtomicBool,
+) -> StorageResult<BTreeMap<String, StorageResult<super::image_validation::ValidatedImage>>> {
+    check_cancelled(cancelled)?;
+    if work.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let worker_count = worker_limit.min(work.len()).max(1);
+    if worker_count == 1 {
+        return Ok(work
+            .into_iter()
+            .map(|work| {
+                let validated = check_cancelled(cancelled).and_then(|()| {
+                    validate_image(
+                        &work.physical_path,
+                        &work.source_path,
+                        &work.registered,
+                        limits,
+                        cancelled,
+                    )
+                });
+                (work.source_path, validated)
+            })
+            .collect());
+    }
+
+    let next = AtomicUsize::new(0);
+    let lowest_error = AtomicUsize::new(usize::MAX);
+    let (sender, receiver) = mpsc::channel();
+    let mut results = std::iter::repeat_with(|| None)
+        .take(work.len())
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let work = &work;
+            let next = &next;
+            let lowest_error = &lowest_error;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = work.get(index) else {
+                        break;
+                    };
+                    let result = check_cancelled(cancelled).and_then(|()| {
+                        if index > lowest_error.load(Ordering::Relaxed) {
+                            return Err(import_error(
+                                "parser_cancelled",
+                                "image validation stopped after an earlier error",
+                            ));
+                        }
+                        validate_image(
+                            &item.physical_path,
+                            &item.source_path,
+                            &item.registered,
+                            limits,
+                            cancelled,
+                        )
+                    });
+                    if result.is_err() {
+                        lowest_error.fetch_min(index, Ordering::Relaxed);
+                    }
+                    if sender.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (index, result) in receiver {
+            results[index] = Some(result);
+        }
+    });
+
+    Ok(work
+        .into_iter()
+        .zip(results)
+        .map(|(work, result)| {
+            (
+                work.source_path,
+                result.expect("every image validation worker returned a result"),
+            )
+        })
+        .collect())
 }
 
 fn parse_yolo(
@@ -249,6 +417,7 @@ fn parse_yolo(
     limits: &ImportLimits,
     pose: bool,
     diagnostics: &mut Diagnostics,
+    cancelled: &AtomicBool,
 ) -> StorageResult<ImportIr> {
     if request.descriptor_paths.len() != 1 || request.selected_splits.is_empty() {
         return Err(import_error(
@@ -314,10 +483,10 @@ fn parse_yolo(
             },
         );
     }
-    let mut used_labels = BTreeSet::new();
-    let mut declared_label_roots = BTreeSet::new();
-    let mut row_objects = BTreeMap::<String, usize>::new();
+    let mut selections = Vec::<YoloImageSelection>::new();
+    let mut selection_indices = BTreeMap::<String, usize>::new();
     for split in &request.selected_splits {
+        check_cancelled(cancelled)?;
         let values = yaml_strings(object.get(split).ok_or_else(|| {
             import_error(
                 "yolo_split_missing",
@@ -328,259 +497,293 @@ fn parse_yolo(
             let resolved = join_source_path(&dataset_root, &value, limits)?;
             let image_paths = yolo_split_images(source, &resolved, &dataset_root, limits)?;
             for image_path in image_paths {
-                let source_key = format!("{}:{}", request.source_namespace, image_path);
-                if let Some(existing) = ir.images.get(&source_key)
-                    && !existing.split_memberships.contains(split)
-                {
-                    match request.policies.cross_split_duplicates {
-                        CrossSplitDuplicatePolicy::Block => diagnostics.add(
-                            "yolo_split_overlap",
-                            DiagnosticSeverity::Error,
-                            "one logical image occurs in multiple selected splits",
-                            true,
-                            false,
-                            false,
-                            Some(example_path(&image_path)),
-                        ),
-                        CrossSplitDuplicatePolicy::MultipleMemberships => diagnostics.add(
-                            "yolo_split_overlap_membership",
-                            DiagnosticSeverity::WarningRequiresAck,
-                            "one logical image is retained with multiple split memberships",
-                            false,
-                            true,
-                            false,
-                            Some(example_path(&image_path)),
-                        ),
+                if let Some(index) = selection_indices.get(&image_path).copied() {
+                    if selections[index].split_memberships.insert(split.clone()) {
+                        match request.policies.cross_split_duplicates {
+                            CrossSplitDuplicatePolicy::Block => diagnostics.add(
+                                "yolo_split_overlap",
+                                DiagnosticSeverity::Error,
+                                "one logical image occurs in multiple selected splits",
+                                true,
+                                false,
+                                false,
+                                Some(example_path(&image_path)),
+                            ),
+                            CrossSplitDuplicatePolicy::MultipleMemberships => diagnostics.add(
+                                "yolo_split_overlap_membership",
+                                DiagnosticSeverity::WarningRequiresAck,
+                                "one logical image is retained with multiple split memberships",
+                                false,
+                                true,
+                                false,
+                                Some(example_path(&image_path)),
+                            ),
+                        }
                     }
+                    continue;
                 }
-                if !ir.images.contains_key(&source_key) && ir.images.len() >= limits.selected_images
-                {
+                if selections.len() >= limits.selected_images {
                     return Err(import_error(
                         "selected_image_limit",
                         "selected images exceed the configured limit",
                     ));
                 }
-                let registered = source.file(&image_path)?;
-                let validated =
-                    validate_image(&source.physical_path(registered), &image_path, limits)?;
-                let image = ir
-                    .images
-                    .entry(source_key.clone())
-                    .or_insert_with(|| IrImage {
-                        source_key: source_key.clone(),
-                        file_id: registered.file_id.clone(),
-                        source_path: image_path.clone(),
-                        display_name: image_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(&image_path)
-                            .to_string(),
-                        split_memberships: BTreeSet::new(),
-                        source_namespace: request.source_namespace.clone(),
-                        blake3: validated.blake3,
-                        byte_size: validated.byte_size,
-                        width: validated.width,
-                        height: validated.height,
-                        media_type: validated.media_type,
-                        extension: validated.extension,
-                    });
-                image.split_memberships.insert(split.clone());
-                let label_path = yolo_label_path(&image_path)?;
-                if let Some(root) = label_tree_root(&label_path) {
-                    declared_label_roots.insert(root);
-                }
-                let label = match source.file(&label_path) {
-                    Ok(file) => file,
-                    Err(_) => {
-                        match request.policies.yolo_missing_labels {
-                            YoloMissingLabelPolicy::Block => diagnostics.add(
-                                "yolo_label_missing",
-                                DiagnosticSeverity::Error,
-                                "a selected image has no corresponding label file",
-                                true,
-                                false,
-                                true,
-                                Some(example_path(&image_path)),
-                            ),
-                            YoloMissingLabelPolicy::MissingIsBackground => diagnostics.add(
-                                "yolo_missing_is_background",
-                                DiagnosticSeverity::WarningRequiresAck,
-                                "missing label is treated as verified background",
-                                false,
-                                true,
-                                true,
-                                Some(example_path(&image_path)),
-                            ),
-                            YoloMissingLabelPolicy::RetainIncomplete => diagnostics.add(
-                                "yolo_label_missing_incomplete",
-                                DiagnosticSeverity::Warning,
-                                "missing label leaves image-task coverage incomplete",
-                                false,
-                                false,
-                                true,
-                                Some(example_path(&image_path)),
-                            ),
-                        }
-                        for category in names.keys() {
-                            let key = coverage_key(&source_key, &category.to_string());
-                            if request.policies.yolo_missing_labels
-                                != YoloMissingLabelPolicy::MissingIsBackground
-                            {
-                                ir.coverage_overrides
-                                    .insert(key.clone(), ImportCoverage::Incomplete);
-                            }
-                            ir.equivalence_facts
-                                .entry(key)
-                                .or_default()
-                                .insert("missing_label".to_string());
-                        }
-                        continue;
+                selection_indices.insert(image_path.clone(), selections.len());
+                selections.push(YoloImageSelection {
+                    source_path: image_path,
+                    split_memberships: BTreeSet::from([split.clone()]),
+                });
+            }
+        }
+    }
+
+    let mut used_labels = BTreeSet::new();
+    let mut declared_label_roots = BTreeSet::new();
+    let mut row_objects = BTreeMap::<String, usize>::new();
+    for selection_batch in selections.chunks(limits.image_validation_workers) {
+        let validation_work = selection_batch
+            .iter()
+            .map(|selection| {
+                let registered = source.file(&selection.source_path)?;
+                Ok(ImageValidationWork {
+                    source_path: selection.source_path.clone(),
+                    physical_path: source.physical_path(registered),
+                    registered: registered.clone(),
+                })
+            })
+            .collect::<StorageResult<Vec<_>>>()?;
+        let mut validated_images = validate_images(
+            validation_work,
+            limits.image_validation_workers,
+            limits,
+            cancelled,
+        )?;
+        for selection in selection_batch {
+            check_cancelled(cancelled)?;
+            let image_path = &selection.source_path;
+            let source_key = format!("{}:{}", request.source_namespace, image_path);
+            let registered = source.file(image_path)?;
+            let validated = validated_images
+                .remove(image_path)
+                .expect("every unique YOLO image was validated")?;
+            ir.images.insert(
+                source_key.clone(),
+                IrImage {
+                    source_key: source_key.clone(),
+                    file_id: registered.file_id.clone(),
+                    source_path: image_path.clone(),
+                    display_name: image_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(image_path)
+                        .to_string(),
+                    split_memberships: selection.split_memberships.clone(),
+                    source_namespace: request.source_namespace.clone(),
+                    blake3: validated.blake3,
+                    byte_size: validated.byte_size,
+                    width: validated.width,
+                    height: validated.height,
+                    media_type: validated.media_type,
+                    extension: validated.extension,
+                },
+            );
+            let label_path = yolo_label_path(image_path)?;
+            if let Some(root) = label_tree_root(&label_path) {
+                declared_label_roots.insert(root);
+            }
+            let label = match source.file(&label_path) {
+                Ok(file) => file,
+                Err(_) => {
+                    match request.policies.yolo_missing_labels {
+                        YoloMissingLabelPolicy::Block => diagnostics.add(
+                            "yolo_label_missing",
+                            DiagnosticSeverity::Error,
+                            "a selected image has no corresponding label file",
+                            true,
+                            false,
+                            true,
+                            Some(example_path(image_path)),
+                        ),
+                        YoloMissingLabelPolicy::MissingIsBackground => diagnostics.add(
+                            "yolo_missing_is_background",
+                            DiagnosticSeverity::WarningRequiresAck,
+                            "missing label is treated as verified background",
+                            false,
+                            true,
+                            true,
+                            Some(example_path(image_path)),
+                        ),
+                        YoloMissingLabelPolicy::RetainIncomplete => diagnostics.add(
+                            "yolo_label_missing_incomplete",
+                            DiagnosticSeverity::Warning,
+                            "missing label leaves image-task coverage incomplete",
+                            false,
+                            false,
+                            true,
+                            Some(example_path(image_path)),
+                        ),
                     }
-                };
-                used_labels.insert(label_path.clone());
-                let mut any_rows = false;
-                let mut row_ordinal = 0_usize;
-                for_each_bounded_line(
-                    &source.physical_path(label),
-                    limits.yolo_line_bytes,
-                    |line_index, line| {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            return Ok(());
+                    for category in names.keys() {
+                        let key = coverage_key(&source_key, &category.to_string());
+                        if request.policies.yolo_missing_labels
+                            != YoloMissingLabelPolicy::MissingIsBackground
+                        {
+                            ir.coverage_overrides
+                                .insert(key.clone(), ImportCoverage::Incomplete);
                         }
-                        row_ordinal += 1;
-                        any_rows = true;
-                        let columns = trimmed.split_ascii_whitespace().collect::<Vec<_>>();
-                        if columns.len() > limits.yolo_columns {
-                            return Err(import_error(
-                                "yolo_column_limit",
-                                "YOLO row exceeds the configured column limit",
-                            ));
-                        }
-                        let expected = if pose {
-                            5 + keypoint_count * dimensions
+                        ir.equivalence_facts
+                            .entry(key)
+                            .or_default()
+                            .insert("missing_label".to_string());
+                    }
+                    continue;
+                }
+            };
+            used_labels.insert(label_path.clone());
+            let mut any_rows = false;
+            let mut row_ordinal = 0_usize;
+            for_each_bounded_line(
+                &source.physical_path(label),
+                limits.yolo_line_bytes,
+                |line_index, line| {
+                    check_cancelled(cancelled)?;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        return Ok(());
+                    }
+                    row_ordinal += 1;
+                    any_rows = true;
+                    let columns = trimmed.split_ascii_whitespace().collect::<Vec<_>>();
+                    if columns.len() > limits.yolo_columns {
+                        return Err(import_error(
+                            "yolo_column_limit",
+                            "YOLO row exceeds the configured column limit",
+                        ));
+                    }
+                    let expected = if pose {
+                        5 + keypoint_count * dimensions
+                    } else {
+                        5
+                    };
+                    if columns.len() != expected {
+                        let code = if !pose && columns.len() == 6 {
+                            "yolo_confidence_result_rejected"
                         } else {
-                            5
+                            "yolo_row_shape_invalid"
                         };
-                        if columns.len() != expected {
-                            let code = if !pose && columns.len() == 6 {
-                                "yolo_confidence_result_rejected"
-                            } else {
-                                "yolo_row_shape_invalid"
-                            };
-                            diagnostics.add(
-                                code,
-                                DiagnosticSeverity::Error,
-                                "YOLO row has an unsupported result or geometry shape",
-                                true,
-                                false,
-                                true,
-                                Some(example_line(&label_path, line_index)),
-                            );
-                            return Ok(());
-                        }
-                        let class_index = parse_integer_token(columns[0], "yolo_class_invalid")?;
-                        if !names.contains_key(&class_index) {
-                            diagnostics.add(
-                                "yolo_class_unknown",
-                                DiagnosticSeverity::Error,
-                                "YOLO row references an unknown class",
-                                true,
-                                false,
-                                true,
-                                Some(example_line(&label_path, line_index)),
-                            );
-                            return Ok(());
-                        }
-                        let numbers = columns[1..]
-                            .iter()
-                            .map(|value| parse_finite(value, "yolo_number_invalid"))
-                            .collect::<StorageResult<Vec<_>>>()?;
-                        let (mut bbox, boundary_normalized) = normalize_yolo_bbox_boundary(
-                            numbers[0], numbers[1], numbers[2], numbers[3],
+                        diagnostics.add(
+                            code,
+                            DiagnosticSeverity::Error,
+                            "YOLO row has an unsupported result or geometry shape",
+                            true,
+                            false,
+                            true,
+                            Some(example_line(&label_path, line_index)),
                         );
-                        if boundary_normalized {
-                            diagnostics.add(
-                                "yolo_boundary_rounding_normalized",
-                                DiagnosticSeverity::Info,
-                                "tiny YOLO boundary rounding was normalized to the image edge",
+                        return Ok(());
+                    }
+                    let class_index = parse_integer_token(columns[0], "yolo_class_invalid")?;
+                    if !names.contains_key(&class_index) {
+                        diagnostics.add(
+                            "yolo_class_unknown",
+                            DiagnosticSeverity::Error,
+                            "YOLO row references an unknown class",
+                            true,
+                            false,
+                            true,
+                            Some(example_line(&label_path, line_index)),
+                        );
+                        return Ok(());
+                    }
+                    let numbers = columns[1..]
+                        .iter()
+                        .map(|value| parse_finite(value, "yolo_number_invalid"))
+                        .collect::<StorageResult<Vec<_>>>()?;
+                    let (mut bbox, boundary_normalized) = normalize_yolo_bbox_boundary(
+                        numbers[0], numbers[1], numbers[2], numbers[3],
+                    );
+                    if boundary_normalized {
+                        diagnostics.add(
+                            "yolo_boundary_rounding_normalized",
+                            DiagnosticSeverity::Info,
+                            "tiny YOLO boundary rounding was normalized to the image edge",
+                            false,
+                            false,
+                            false,
+                            Some(example_line(&label_path, line_index)),
+                        );
+                    }
+                    let clipped = validate_or_clip_box(
+                        &mut bbox,
+                        request.policies.geometry_bounds,
+                        diagnostics,
+                        &label_path,
+                        line_index,
+                    )?;
+                    let canonical_row = columns.join(" ");
+                    let duplicate_key = format!("{source_key}\0{canonical_row}");
+                    if let Some(existing_index) = row_objects.get(&duplicate_key).copied() {
+                        match request.policies.yolo_duplicate_rows {
+                            DuplicateRowPolicy::Block => diagnostics.add(
+                                "yolo_duplicate_row",
+                                DiagnosticSeverity::Error,
+                                "exact duplicate YOLO row is blocked in strict mode",
+                                true,
                                 false,
-                                false,
-                                false,
+                                true,
                                 Some(example_line(&label_path, line_index)),
-                            );
-                        }
-                        let clipped = validate_or_clip_box(
-                            &mut bbox,
-                            request.policies.geometry_bounds,
-                            diagnostics,
-                            &label_path,
-                            line_index,
-                        )?;
-                        let canonical_row = columns.join(" ");
-                        let duplicate_key = format!("{source_key}\0{canonical_row}");
-                        if let Some(existing_index) = row_objects.get(&duplicate_key).copied() {
-                            match request.policies.yolo_duplicate_rows {
-                                DuplicateRowPolicy::Block => diagnostics.add(
-                                    "yolo_duplicate_row",
-                                    DiagnosticSeverity::Error,
-                                    "exact duplicate YOLO row is blocked in strict mode",
-                                    true,
+                            ),
+                            DuplicateRowPolicy::Deduplicate => {
+                                diagnostics.add(
+                                    "yolo_duplicate_row_deduplicated",
+                                    DiagnosticSeverity::WarningRequiresAck,
+                                    "exact duplicate YOLO row is deduplicated",
                                     false,
                                     true,
+                                    false,
                                     Some(example_line(&label_path, line_index)),
-                                ),
-                                DuplicateRowPolicy::Deduplicate => {
-                                    diagnostics.add(
-                                        "yolo_duplicate_row_deduplicated",
-                                        DiagnosticSeverity::WarningRequiresAck,
-                                        "exact duplicate YOLO row is deduplicated",
-                                        false,
-                                        true,
-                                        false,
-                                        Some(example_line(&label_path, line_index)),
-                                    );
-                                    ir.objects[existing_index]
-                                        .row_references
-                                        .push(format!("{}:{}", label_path, row_ordinal));
-                                }
+                                );
+                                ir.objects[existing_index]
+                                    .row_references
+                                    .push(format!("{}:{}", label_path, row_ordinal));
                             }
-                            return Ok(());
                         }
-                        if ir.objects.len() >= limits.annotations_total {
-                            return Err(import_error(
-                                "annotation_limit",
-                                "source objects exceed the configured limit",
-                            ));
-                        }
-                        let object_key = format!(
-                            "{}:{}:{}:{}",
-                            request.source_namespace, image_path, label.blake3, row_ordinal
-                        );
-                        let mut skeleton = if pose {
-                            Some(parse_yolo_keypoints(
-                                &numbers[4..],
-                                &keypoint_names[&class_index],
-                                dimensions,
-                                &label_path,
-                                row_ordinal,
-                            )?)
-                        } else {
-                            None
-                        };
-                        if skeleton.as_ref().is_some_and(|points| {
-                            points
-                                .iter()
-                                .all(|point| point.state == KeypointState::Absent)
-                        }) {
-                            let key = coverage_key(&source_key, &class_index.to_string());
-                            ir.zero_keypoint_coverage.insert(key.clone());
-                            ir.equivalence_facts
-                                .entry(key)
-                                .or_default()
-                                .insert("zero_keypoints".to_string());
-                            skeleton = None;
-                            diagnostics.add(
+                        return Ok(());
+                    }
+                    if ir.objects.len() >= limits.annotations_total {
+                        return Err(import_error(
+                            "annotation_limit",
+                            "source objects exceed the configured limit",
+                        ));
+                    }
+                    let object_key = format!(
+                        "{}:{}:{}:{}",
+                        request.source_namespace, image_path, label.blake3, row_ordinal
+                    );
+                    let mut skeleton = if pose {
+                        Some(parse_yolo_keypoints(
+                            &numbers[4..],
+                            &keypoint_names[&class_index],
+                            dimensions,
+                            &label_path,
+                            row_ordinal,
+                        )?)
+                    } else {
+                        None
+                    };
+                    if skeleton.as_ref().is_some_and(|points| {
+                        points
+                            .iter()
+                            .all(|point| point.state == KeypointState::Absent)
+                    }) {
+                        let key = coverage_key(&source_key, &class_index.to_string());
+                        ir.zero_keypoint_coverage.insert(key.clone());
+                        ir.equivalence_facts
+                            .entry(key)
+                            .or_default()
+                            .insert("zero_keypoints".to_string());
+                        skeleton = None;
+                        diagnostics.add(
                                 "yolo_zero_keypoints",
                                 DiagnosticSeverity::Warning,
                                 "zero-keypoint object keeps its box but makes skeleton coverage incomplete",
@@ -589,34 +792,33 @@ fn parse_yolo(
                                 true,
                                 Some(example_line(&label_path, line_index)),
                             );
-                        }
-                        row_objects.insert(duplicate_key, ir.objects.len());
-                        ir.objects.push(IrObject {
-                            source_object_key: object_key,
-                            source_namespace: request.source_namespace.clone(),
-                            source_image_key: source_key.clone(),
-                            source_category_key: class_index.to_string(),
-                            direct_bbox: Some(bbox),
-                            direct_skeleton: skeleton,
-                            source_bbox: Some(vec![numbers[0], numbers[1], numbers[2], numbers[3]]),
-                            source_area: None,
-                            source_iscrowd: 0,
-                            source_segmentation: None,
-                            derived_bbox: false,
-                            clipped,
-                            boundary_rounding_normalized: boundary_normalized,
-                            row_references: vec![format!("{}:{}", label_path, row_ordinal)],
-                        });
-                        Ok(())
-                    },
-                )?;
-                if !any_rows && !request.exhaustive_attested {
-                    for category in names.keys() {
-                        ir.coverage_overrides.insert(
-                            coverage_key(&source_key, &category.to_string()),
-                            ImportCoverage::Incomplete,
-                        );
                     }
+                    row_objects.insert(duplicate_key, ir.objects.len());
+                    ir.objects.push(IrObject {
+                        source_object_key: object_key,
+                        source_namespace: request.source_namespace.clone(),
+                        source_image_key: source_key.clone(),
+                        source_category_key: class_index.to_string(),
+                        direct_bbox: Some(bbox),
+                        direct_skeleton: skeleton,
+                        source_bbox: Some(vec![numbers[0], numbers[1], numbers[2], numbers[3]]),
+                        source_area: None,
+                        source_iscrowd: 0,
+                        source_segmentation: None,
+                        derived_bbox: false,
+                        clipped,
+                        boundary_rounding_normalized: boundary_normalized,
+                        row_references: vec![format!("{}:{}", label_path, row_ordinal)],
+                    });
+                    Ok(())
+                },
+            )?;
+            if !any_rows && !request.exhaustive_attested {
+                for category in names.keys() {
+                    ir.coverage_overrides.insert(
+                        coverage_key(&source_key, &category.to_string()),
+                        ImportCoverage::Incomplete,
+                    );
                 }
             }
         }
@@ -708,6 +910,7 @@ fn parse_coco(
     limits: &ImportLimits,
     keypoints_profile: bool,
     diagnostics: &mut Diagnostics,
+    cancelled: &AtomicBool,
 ) -> StorageResult<ImportIr> {
     if request.coco_descriptors.is_empty() {
         return Err(import_error(
@@ -739,6 +942,7 @@ fn parse_coco(
     let mut object_payloads: BTreeMap<String, IrObject> = BTreeMap::new();
     let mut declared_annotations = 0_usize;
     for selection in &request.coco_descriptors {
+        check_cancelled(cancelled)?;
         let descriptor_keypoints =
             selection.kind == labello_domain::ImportDescriptorKind::CocoKeypoints;
         let bytes = source.read_limited(&selection.descriptor_path, limits.descriptor_bytes)?;
@@ -828,6 +1032,7 @@ fn parse_coco(
         let mut image_ids = BTreeSet::new();
         let mut source_keys = BTreeMap::new();
         for image in images {
+            check_cancelled(cancelled)?;
             let object = image.as_object().ok_or_else(|| {
                 import_error("coco_image_invalid", "COCO image must be an object")
             })?;
@@ -866,7 +1071,13 @@ fn parse_coco(
                 continue;
             }
             let image = {
-                let validated = validate_image(&source.physical_path(file), &image_path, limits)?;
+                let validated = validate_image(
+                    &source.physical_path(file),
+                    &image_path,
+                    file,
+                    limits,
+                    cancelled,
+                )?;
                 IrImage {
                     source_key: source_key.clone(),
                     file_id: file.file_id.clone(),
@@ -906,6 +1117,7 @@ fn parse_coco(
         }
         let mut annotation_ids = BTreeSet::new();
         for annotation in annotations {
+            check_cancelled(cancelled)?;
             let object = annotation.as_object().ok_or_else(|| {
                 import_error(
                     "coco_annotation_invalid",
@@ -1390,11 +1602,12 @@ fn yolo_split_images(
         }
         Ok(images)
     } else {
-        let images = source
+        let mut images = source
             .files_below(resolved)
             .filter(|file| is_image_path(&file.relative_path))
             .map(|file| file.relative_path.clone())
             .collect::<Vec<_>>();
+        images.sort();
         if images.is_empty() {
             Err(import_error(
                 "yolo_split_empty",
@@ -2604,7 +2817,8 @@ fn coverage_totals(
     ir: &ImportIr,
     request: &PreflightRequest,
     task_ids: &BTreeMap<String, Vec<String>>,
-) -> labello_domain::ImportCoverageTotals {
+    cancelled: &AtomicBool,
+) -> StorageResult<labello_domain::ImportCoverageTotals> {
     let canonical = ir
         .images
         .values()
@@ -2622,16 +2836,23 @@ fn coverage_totals(
         .into_values()
         .collect::<Vec<_>>();
     let mut totals = labello_domain::ImportCoverageTotals::default();
+    let mut objects_by_image_category = BTreeMap::<(&str, &str), Vec<&IrObject>>::new();
+    for object in &ir.objects {
+        objects_by_image_category
+            .entry((
+                object.source_image_key.as_str(),
+                object.source_category_key.as_str(),
+            ))
+            .or_default()
+            .push(object);
+    }
     for source_image_key in canonical {
+        check_cancelled(cancelled)?;
         for (category_key, ids) in task_ids {
-            let objects = ir
-                .objects
-                .iter()
-                .filter(|object| {
-                    object.source_image_key == source_image_key
-                        && object.source_category_key == *category_key
-                })
-                .collect::<Vec<_>>();
+            let objects = objects_by_image_category
+                .get(&(source_image_key, category_key.as_str()))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             for task_id in ids {
                 let annotation_type = request
                     .task_mappings
@@ -2650,7 +2871,7 @@ fn coverage_totals(
                     ir,
                     source_image_key,
                     category_key,
-                    &objects,
+                    objects,
                     skeleton,
                     request,
                 );
@@ -2668,7 +2889,7 @@ fn coverage_totals(
             }
         }
     }
-    totals
+    Ok(totals)
 }
 
 pub(super) fn coverage_for(
