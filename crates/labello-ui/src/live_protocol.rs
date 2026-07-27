@@ -589,6 +589,20 @@ pub(crate) enum UiCommand {
 }
 
 impl UiCommand {
+    pub(crate) fn invalidates_assignment_availability(&self) -> bool {
+        matches!(
+            self,
+            Self::SaveAdmin { .. }
+                | Self::SaveDatasetRoles { .. }
+                | Self::Ingest { .. }
+                | Self::Migration { .. }
+                | Self::SaveAnnotations { submit: true, .. }
+                | Self::Review { .. }
+                | Self::Correction { .. }
+                | Self::Adjudication { .. }
+        )
+    }
+
     pub(crate) fn request(&self) -> &RequestIdentity {
         match self {
             Self::ImportCapabilities { .. }

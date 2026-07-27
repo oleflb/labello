@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, future::Future, pin::Pin, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+};
 
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AnnotationVersion, Assignment, AssignmentId, AssignmentKind,
@@ -93,6 +98,16 @@ pub(crate) struct WorkspacePreference {
     pub show_tutorial: bool,
     pub selected_annotation: Option<AnnotationId>,
     pub canvas: StoredCanvasTransform,
+    #[serde(default)]
+    pub availability: Option<StoredAssignmentAvailability>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredAssignmentAvailability {
+    pub kind: AssignmentKind,
+    pub tasks: BTreeMap<TaskId, bool>,
+    pub checked_at: Timestamp,
 }
 
 pub(crate) fn load_workspace_preference(
@@ -873,6 +888,7 @@ impl crate::app::LabelloApp {
             show_tutorial: self.show_tutorial,
             selected_annotation: self.selected_annotation.clone(),
             canvas: self.canvas.stored_transform(),
+            availability: self.stored_assignment_availability(),
         };
         let encoded = match serde_json::to_string(&preference) {
             Ok(encoded) => encoded,
@@ -921,6 +937,63 @@ impl crate::app::LabelloApp {
                 }
             }
         }
+    }
+
+    fn stored_assignment_availability(&self) -> Option<StoredAssignmentAvailability> {
+        let checked_at = self.availability.checked_at?;
+        let kind = self.assignment_kind()?;
+        (self.availability.resolved
+            && self.availability.error.is_none()
+            && self.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+            && self.availability.kind.as_ref() == Some(&kind))
+        .then(|| StoredAssignmentAvailability {
+            kind,
+            tasks: self.availability.tasks.clone(),
+            checked_at,
+        })
+    }
+
+    pub(crate) fn restore_cached_assignment_availability(&mut self) -> bool {
+        let Some(kind) = self.assignment_kind() else {
+            return false;
+        };
+        let Some(preference) = self.runtime.persistence.preference.clone() else {
+            return false;
+        };
+        let Some(cached) = preference.availability else {
+            return false;
+        };
+        if preference.dataset_id != self.config.dataset_id || cached.kind != kind {
+            return false;
+        }
+        let expected_tasks = self
+            .tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect::<BTreeSet<_>>();
+        if cached.tasks.keys().cloned().collect::<BTreeSet<_>>() != expected_tasks {
+            return false;
+        }
+        let Ok(age) = labello_domain::now()
+            .signed_duration_since(cached.checked_at)
+            .to_std()
+        else {
+            return false;
+        };
+        if age >= crate::app::ASSIGNMENT_AVAILABILITY_CACHE_TTL {
+            return false;
+        }
+        self.availability.dataset_id = Some(self.config.dataset_id.clone());
+        self.availability.kind = Some(kind);
+        self.availability.tasks = cached.tasks;
+        self.availability.resolved = true;
+        self.availability.checked_at = Some(cached.checked_at);
+        self.availability.loading = false;
+        self.availability.load_after_resolution = false;
+        self.availability.refresh_after_load = false;
+        self.availability.error = None;
+        self.availability.last_attempt = Some(Instant::now());
+        true
     }
 
     pub(crate) fn apply_assignment_preferences(&mut self) {

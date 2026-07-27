@@ -721,7 +721,7 @@ impl LabelloApp {
                 self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
             }
         }
-        if self.availability.loading {
+        if self.availability.loading && self.availability.tasks.is_empty() {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.small("Checking assignment availability…");

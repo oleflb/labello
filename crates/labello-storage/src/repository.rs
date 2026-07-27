@@ -3,8 +3,9 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use labello_domain::{
@@ -12,7 +13,8 @@ use labello_domain::{
     ArtifactMigrationKind, ArtifactMigrationPhase, DatasetConfig, DatasetMetadata, DatasetSnapshot,
     EventLogEntry, EventPayload, ImageId, ImageRecord, ImageState, ImagesIndex, ImportId,
     ImportManifest, KeybindingSet, LEGACY_SCHEMA_VERSION, MigrationRecord, SCHEMA_VERSION,
-    SnapshotFileEntry, SnapshotImportEntry, UserId, labello_schema_bundle, now, rebuild_state,
+    SnapshotFileEntry, SnapshotImportEntry, TaskId, UserId, labello_schema_bundle, now,
+    rebuild_state,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -31,6 +33,82 @@ use crate::{
     stats::StatsCache,
 };
 
+const ASSIGNMENT_AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+pub(crate) type AssignmentAvailabilityCacheKey = (UserId, String);
+
+#[derive(Clone, Debug)]
+struct CachedAssignmentAvailability {
+    generation: u64,
+    cached_at: Instant,
+    tasks: BTreeMap<TaskId, bool>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AssignmentAvailabilityCache {
+    generation: AtomicU64,
+    values: AsyncMutex<BTreeMap<AssignmentAvailabilityCacheKey, CachedAssignmentAvailability>>,
+    refresh: AsyncMutex<()>,
+    #[cfg(test)]
+    scans: AtomicU64,
+}
+
+impl AssignmentAvailabilityCache {
+    pub(crate) fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn get(
+        &self,
+        key: &AssignmentAvailabilityCacheKey,
+        generation: u64,
+    ) -> Option<BTreeMap<TaskId, bool>> {
+        self.values
+            .lock()
+            .await
+            .get(key)
+            .filter(|cached| {
+                cached.generation == generation
+                    && cached.cached_at.elapsed() < ASSIGNMENT_AVAILABILITY_CACHE_TTL
+            })
+            .map(|cached| cached.tasks.clone())
+    }
+
+    pub(crate) async fn lock_refresh(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh.lock().await
+    }
+
+    pub(crate) async fn store(
+        &self,
+        key: AssignmentAvailabilityCacheKey,
+        generation: u64,
+        tasks: BTreeMap<TaskId, bool>,
+    ) {
+        self.values.lock().await.insert(
+            key,
+            CachedAssignmentAvailability {
+                generation,
+                cached_at: Instant::now(),
+                tasks,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_scan(&self) {
+        self.scans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_count(&self) -> u64 {
+        self.scans.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DatasetRepository {
     root: Arc<PathBuf>,
@@ -38,8 +116,11 @@ pub struct DatasetRepository {
     migration_lock: Arc<AsyncMutex<()>>,
     migration_complete: Arc<AtomicBool>,
     pub(crate) stats_cache: Arc<StatsCache>,
+    pub(crate) assignment_availability_cache: Arc<AssignmentAvailabilityCache>,
     #[cfg(test)]
     migration_failure: Arc<Mutex<Option<ArtifactMigrationPhase>>>,
+    #[cfg(test)]
+    image_state_loads: Arc<AtomicU64>,
 }
 
 impl DatasetRepository {
@@ -50,8 +131,11 @@ impl DatasetRepository {
             migration_lock: Arc::new(AsyncMutex::new(())),
             migration_complete: Arc::new(AtomicBool::new(false)),
             stats_cache: Arc::new(StatsCache::default()),
+            assignment_availability_cache: Arc::new(AssignmentAvailabilityCache::default()),
             #[cfg(test)]
             migration_failure: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            image_state_loads: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -467,6 +551,7 @@ impl DatasetRepository {
         )
         .await?;
         self.stats_cache.invalidate();
+        self.assignment_availability_cache.invalidate();
         Ok(())
     }
 
@@ -510,6 +595,7 @@ impl DatasetRepository {
         index.image_count = index.images_by_hash.len();
         write_json_atomic(&self.images_index_path(), &index).await?;
         self.stats_cache.invalidate();
+        self.assignment_availability_cache.invalidate();
         Ok(())
     }
 
@@ -546,10 +632,13 @@ impl DatasetRepository {
         if events.iter().any(stats_relevant_event) {
             self.stats_cache.invalidate();
         }
+        self.assignment_availability_cache.invalidate();
         Ok(state)
     }
 
     pub async fn load_image_state(&self, image_id: &ImageId) -> StorageResult<ImageState> {
+        #[cfg(test)]
+        self.image_state_loads.fetch_add(1, Ordering::Relaxed);
         self.ensure_artifact_migration().await?;
         let path = self.state_path(image_id);
         let cache_exists = tokio::fs::try_exists(&path).await.with_path(&path)?;
@@ -587,6 +676,16 @@ impl DatasetRepository {
             write_json_atomic(&path, &state).await?;
         }
         Ok(state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_image_state_load_count(&self) {
+        self.image_state_loads.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_state_load_count(&self) -> u64 {
+        self.image_state_loads.load(Ordering::Relaxed)
     }
 
     pub async fn append_payload(
@@ -647,6 +746,7 @@ impl DatasetRepository {
         if events.iter().any(stats_relevant_event) {
             self.stats_cache.invalidate();
         }
+        self.assignment_availability_cache.invalidate();
         Ok((events, next_state))
     }
 
@@ -671,6 +771,7 @@ impl DatasetRepository {
         if resequenced.iter().any(stats_relevant_event) {
             self.stats_cache.invalidate();
         }
+        self.assignment_availability_cache.invalidate();
         Ok(events.len())
     }
 
@@ -803,6 +904,7 @@ impl DatasetRepository {
                 .await?;
         }
         self.stats_cache.invalidate();
+        self.assignment_availability_cache.invalidate();
         self.migration_complete.store(true, Ordering::Release);
         Ok(())
     }

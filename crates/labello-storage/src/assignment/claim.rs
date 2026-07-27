@@ -2,29 +2,101 @@ use super::migration::{has_migration_final_review_by_user, migration_final_appro
 use super::review::{has_task_review_by_user, task_approval_count};
 use super::*;
 
+fn assignment_kind_cache_key(kind: &AssignmentKind) -> &'static str {
+    match kind {
+        AssignmentKind::Annotation => "annotation",
+        AssignmentKind::Review => "review",
+        AssignmentKind::Adjudication => "adjudication",
+    }
+}
+
 impl DatasetRepository {
     pub async fn assignment_availability(
         &self,
         user_id: &UserId,
         kind: AssignmentKind,
     ) -> StorageResult<std::collections::BTreeMap<TaskId, bool>> {
-        let metadata = self.load_dataset().await?;
+        let config = self.load_dataset_config().await?;
         require_role(
-            &metadata.role_assignments,
-            &metadata.dataset_id,
+            &config.role_assignments,
+            &config.dataset_id,
             user_id,
             role_for_kind(&kind),
         )?;
+        let cache_key = (
+            user_id.clone(),
+            assignment_kind_cache_key(&kind).to_string(),
+        );
+        let requested_generation = self.assignment_availability_cache.generation();
+        if let Some(tasks) = self
+            .assignment_availability_cache
+            .get(&cache_key, requested_generation)
+            .await
+        {
+            return Ok(tasks);
+        }
+
+        let _refresh = self.assignment_availability_cache.lock_refresh().await;
+        let generation = self.assignment_availability_cache.generation();
+        if let Some(tasks) = self
+            .assignment_availability_cache
+            .get(&cache_key, generation)
+            .await
+        {
+            return Ok(tasks);
+        }
+
+        #[cfg(test)]
+        self.assignment_availability_cache.record_scan();
+        let availability = self.compute_assignment_availability(user_id, &kind).await?;
+        self.assignment_availability_cache
+            .store(cache_key, generation, availability.clone())
+            .await;
+        Ok(availability)
+    }
+
+    async fn compute_assignment_availability(
+        &self,
+        user_id: &UserId,
+        kind: &AssignmentKind,
+    ) -> StorageResult<std::collections::BTreeMap<TaskId, bool>> {
+        let metadata = self.load_dataset().await?;
 
         let mut availability = std::collections::BTreeMap::new();
+        let mut unresolved = std::collections::BTreeSet::new();
         for task in &metadata.tasks {
-            let available = if self.task_accepts_assignment(&metadata, task, &kind).await? {
-                self.task_has_available_image(user_id, task, &kind, &metadata)
+            if self.task_accepts_assignment(&metadata, task, kind).await? {
+                unresolved.insert(task.task_id.clone());
+            }
+            availability.insert(task.task_id.clone(), false);
+        }
+
+        for image_id in metadata.images.keys() {
+            if unresolved.is_empty() {
+                break;
+            }
+            let lock = self.image_lock(image_id);
+            let _guard = lock.lock().await;
+            let state = self.load_image_state(image_id).await?;
+            let now = labello_domain::now();
+            let mut available = Vec::new();
+            for task in metadata
+                .tasks
+                .iter()
+                .filter(|task| unresolved.contains(&task.task_id))
+            {
+                let status = effective_assignment_status(&state, &task.task_id, kind, now);
+                if self
+                    .image_accepts_assignment(image_id, &state, task, user_id, kind, &status, now)
                     .await?
-            } else {
-                false
-            };
-            availability.insert(task.task_id.clone(), available);
+                {
+                    available.push(task.task_id.clone());
+                }
+            }
+            for task_id in available {
+                unresolved.remove(&task_id);
+                availability.insert(task_id, true);
+            }
         }
         Ok(availability)
     }
@@ -212,29 +284,6 @@ impl DatasetRepository {
             return Ok(Some(assignment));
         }
         Ok(None)
-    }
-
-    async fn task_has_available_image(
-        &self,
-        user_id: &UserId,
-        task: &TaskDefinition,
-        kind: &AssignmentKind,
-        metadata: &DatasetMetadata,
-    ) -> StorageResult<bool> {
-        for image_id in metadata.images.keys() {
-            let lock = self.image_lock(image_id);
-            let _guard = lock.lock().await;
-            let state = self.load_image_state(image_id).await?;
-            let now = labello_domain::now();
-            let status = effective_assignment_status(&state, &task.task_id, kind, now);
-            if self
-                .image_accepts_assignment(image_id, &state, task, user_id, kind, &status, now)
-                .await?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     async fn task_accepts_assignment(

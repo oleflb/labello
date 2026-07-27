@@ -48,7 +48,9 @@ use crate::app::{
     LayoutMode, RequestIdentity, SaveStatus, SetupSection, UiCommand, UiMessage,
 };
 use crate::canvas::BoundingBoxEdit;
-use crate::persistence::{StoredCanvasTransform, StoredView, WorkspacePreference};
+use crate::persistence::{
+    StoredAssignmentAvailability, StoredCanvasTransform, StoredView, WorkspacePreference,
+};
 use crate::theme;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2843,6 +2845,15 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
             .query_by_label_contains("No assignments available")
             .is_some()
     );
+    harness.state_mut().availability.loading = true;
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Checking assignment availability")
+            .is_none(),
+        "background refreshes should keep the resolved workflow state stable"
+    );
+    harness.state_mut().availability.loading = false;
 
     let mut skeleton = harness.state().tasks[0].clone();
     skeleton.task_id = TaskId::from("skeleton:person");
@@ -2891,6 +2902,320 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
         !app.availability.loading && app.availability.error.is_none()
     });
     assert!(api.counts().assignment_availability >= 3);
+}
+
+#[test]
+fn assignment_availability_poll_waits_for_the_in_flight_request() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api);
+    app.view = AppView::Annotate;
+    app.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.availability.kind = Some(AssignmentKind::Annotation);
+    app.availability.loading = true;
+    app.availability.last_attempt = Some(Instant::now() - Duration::from_secs(11));
+    let queued_before = app.runtime.commands.len();
+
+    app.refresh_assignment_availability_if_due();
+
+    assert_eq!(app.runtime.commands.len(), queued_before);
+    assert!(!app.availability.refresh_after_load);
+    assert!(app.availability.loading);
+}
+
+#[test]
+fn assignment_availability_poll_is_scheduled_from_completion() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api);
+    app.view = AppView::Annotate;
+    app.request_assignment_availability();
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected availability request");
+    };
+    app.availability.last_attempt = Some(Instant::now() - Duration::from_secs(30));
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), true)]),
+            }),
+        })
+        .unwrap();
+
+    app.process_messages(&egui::Context::default());
+    let queued_before = app.runtime.commands.len();
+    app.refresh_assignment_availability_if_due();
+
+    assert!(!app.availability.loading);
+    assert_eq!(app.runtime.commands.len(), queued_before);
+    assert!(
+        app.availability
+            .last_attempt
+            .is_some_and(|completed| completed.elapsed() < Duration::from_secs(1))
+    );
+}
+
+#[test]
+fn assignment_load_waits_for_availability_and_selects_the_next_available_workflow() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+
+    app.request_next_image();
+
+    assert!(!app.loading.image);
+    assert!(app.active_load_id.is_none());
+    assert!(app.availability.load_after_resolution);
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected availability before assignment claim");
+    };
+    assert!(app.runtime.commands.is_empty());
+
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks: BTreeMap::from([
+                    (TaskId::from("bounding_box:person"), false),
+                    (TaskId::from("bounding_box:vehicle"), true),
+                ]),
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+
+    assert!(app.availability.resolved);
+    assert!(!app.availability.load_after_resolution);
+    assert_eq!(
+        app.selected_task_id.as_ref(),
+        Some(&TaskId::from("bounding_box:vehicle"))
+    );
+    let UiCommand::ClaimAssignment { task_id, .. } = app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected assignment claim after availability");
+    };
+    assert_eq!(task_id, TaskId::from("bounding_box:vehicle"));
+}
+
+#[test]
+fn fresh_cached_availability_survives_reload_without_another_check() {
+    let api = Rc::new(SpyApi::new());
+    api.set_workflow_availability("bounding_box:person", false);
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 8, |app| {
+        app.runtime
+            .persistence
+            .preference
+            .as_ref()
+            .is_some_and(|preference| preference.availability.is_some())
+    });
+    let mut preference = harness
+        .state()
+        .runtime
+        .persistence
+        .preference
+        .clone()
+        .unwrap();
+    preference.task_id = Some(TaskId::from("bounding_box:person"));
+    preference.availability.as_mut().unwrap().checked_at =
+        labello_domain::now() - Duration::from_secs(20);
+
+    let mut reloaded = base_live_app(api.clone());
+    reloaded.runtime.persistence.preference = Some(preference);
+    reloaded.sync_work_config(api.metadata());
+    reloaded.view = AppView::Annotate;
+
+    assert!(reloaded.restore_cached_assignment_availability());
+    assert!(
+        reloaded
+            .availability
+            .last_attempt
+            .is_some_and(|attempt| attempt.elapsed() < Duration::from_secs(1)),
+        "restoring a wall-clock cache must not backdate the new page's monotonic clock"
+    );
+    assert!(
+        reloaded
+            .assignment_availability_cache_age()
+            .is_some_and(|age| age >= Duration::from_secs(19))
+    );
+    reloaded.request_next_image();
+
+    assert_eq!(
+        reloaded.selected_task_id.as_ref(),
+        Some(&TaskId::from("bounding_box:vehicle"))
+    );
+    assert!(
+        reloaded
+            .runtime
+            .commands
+            .iter()
+            .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+    assert!(reloaded.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { task_id, .. }
+            if task_id == &TaskId::from("bounding_box:vehicle")
+    )));
+
+    reloaded.refresh_assignment_availability_if_due();
+    assert!(
+        reloaded
+            .runtime
+            .commands
+            .iter()
+            .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+}
+
+#[test]
+fn expired_or_wrong_scope_cached_availability_requires_a_new_check() {
+    let api = Rc::new(SpyApi::new());
+    let metadata = api.metadata();
+    let tasks = metadata
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), true))
+        .collect();
+    let preference = WorkspacePreference {
+        version: 2,
+        dataset_id: DatasetId::from("demo"),
+        view: StoredView::Annotate,
+        task_id: Some(TaskId::from("bounding_box:person")),
+        assignment_id: None,
+        assignment_image_id: None,
+        assignment_kind: None,
+        drawer: None,
+        show_settings: false,
+        show_tutorial: false,
+        selected_annotation: None,
+        canvas: StoredCanvasTransform {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        },
+        availability: Some(StoredAssignmentAvailability {
+            kind: AssignmentKind::Annotation,
+            tasks,
+            checked_at: labello_domain::now() - Duration::from_secs(31),
+        }),
+    };
+
+    for stale in [
+        preference.clone(),
+        WorkspacePreference {
+            availability: Some(StoredAssignmentAvailability {
+                kind: AssignmentKind::Review,
+                checked_at: labello_domain::now(),
+                ..preference.availability.clone().unwrap()
+            }),
+            ..preference
+        },
+    ] {
+        let mut app = base_live_app(api.clone());
+        app.sync_work_config(metadata.clone());
+        app.view = AppView::Annotate;
+        app.runtime.persistence.preference = Some(stale.clone());
+
+        assert!(!app.restore_cached_assignment_availability());
+        app.request_next_image();
+        assert!(matches!(
+            app.runtime.commands.pop_front(),
+            Some(UiCommand::AssignmentAvailability { .. })
+        ));
+    }
+}
+
+#[test]
+fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    app.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.availability.kind = Some(AssignmentKind::Annotation);
+    app.availability.tasks = app
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), true))
+        .collect();
+    app.availability.resolved = true;
+    app.availability.checked_at = Some(labello_domain::now());
+    let request = test_request(&app, 42, Some("demo"));
+
+    app.queue_command(UiCommand::Ingest {
+        request,
+        dataset_id: app.config.dataset_id.clone(),
+    });
+
+    assert!(app.availability.checked_at.is_none());
+}
+
+#[test]
+fn failed_or_empty_availability_never_starts_an_assignment_load() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    app.request_next_image();
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected availability request");
+    };
+
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Err("availability failed".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+
+    assert!(!app.availability.resolved);
+    assert!(app.availability.load_after_resolution);
+    assert!(app.runtime.commands.is_empty());
+    assert!(!app.loading.image);
+
+    app.request_assignment_availability();
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected availability retry");
+    };
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks: BTreeMap::from([
+                    (TaskId::from("bounding_box:person"), false),
+                    (TaskId::from("bounding_box:vehicle"), false),
+                ]),
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+
+    assert!(app.availability.resolved);
+    assert!(app.availability.load_after_resolution);
+    assert!(app.runtime.commands.is_empty());
+    assert!(!app.loading.image);
+    assert!(
+        app.runtime
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("currently available"))
+    );
 }
 
 #[test]
@@ -2978,7 +3303,7 @@ fn no_available_assignment_is_a_normal_empty_state() {
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| {
-        !app.loading.dataset && !app.loading.image
+        !app.loading.dataset && !app.loading.image && app.availability.resolved
     });
 
     assert!(harness.state().current.is_none());
@@ -3980,6 +4305,7 @@ fn explicit_dataset_transition_suppresses_workspace_restoration() {
             pan_x: 0.0,
             pan_y: 0.0,
         },
+        availability: None,
     });
     app.request_load_dataset();
     assert!(app.runtime.persistence.restoration_attempted);
@@ -5654,7 +5980,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     );
     release_and_switch(&mut harness);
     step_until(&mut harness, 10, |app| {
-        app.view == AppView::Review && !app.loading.image
+        app.view == AppView::Review && app.current.is_some() && !app.loading.image
     });
     assert!(harness.state().drawer.is_none());
     assert!(harness.query_by_label("Tutorial").is_none());
@@ -5685,7 +6011,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     );
     release_and_switch(&mut harness);
     step_until(&mut harness, 10, |app| {
-        app.view == AppView::Adjudicate && !app.loading.image
+        app.view == AppView::Adjudicate && app.current.is_some() && !app.loading.image
     });
     assert!(harness.query_by_label("Accept all annotations").is_some());
     assert!(harness.query_by_label("Send back for correction").is_some());

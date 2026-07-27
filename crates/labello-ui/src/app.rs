@@ -15,7 +15,7 @@ use labello_domain::{
     DatasetSnapshot, DatasetStats, HumanRevisionKind, ImageExplorerPage, ImageId, ImageRecord,
     ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass, NormalizedPoint,
     PrelabelSuggestion, RevisionSource, SkeletonGeometry, TaskDefinition, TaskId, TaskStatus,
-    TutorialContent, UserAccount, UserId,
+    Timestamp, TutorialContent, UserAccount, UserId,
 };
 use web_time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ pub(crate) use crate::live_protocol::{
 };
 
 pub const IMAGE_QUEUE_SIZE: usize = 2;
+pub(crate) const ASSIGNMENT_AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_HISTORY_OPERATIONS: usize = 256;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -195,7 +196,10 @@ pub(crate) struct AssignmentAvailabilityState {
     pub(crate) dataset_id: Option<DatasetId>,
     pub(crate) kind: Option<AssignmentKind>,
     pub(crate) tasks: std::collections::BTreeMap<TaskId, bool>,
+    pub(crate) resolved: bool,
+    pub(crate) checked_at: Option<Timestamp>,
     pub(crate) loading: bool,
+    pub(crate) load_after_resolution: bool,
     pub(crate) refresh_after_load: bool,
     pub(crate) error: Option<String>,
     pub(crate) last_attempt: Option<Instant>,
@@ -755,9 +759,17 @@ impl LabelloApp {
         let kind = self.assignment_kind()?;
         (self.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
             && self.availability.kind.as_ref() == Some(&kind)
+            && self.availability.resolved
             && self.availability.error.is_none())
         .then(|| self.availability.tasks.get(task_id).copied())
         .flatten()
+    }
+
+    pub(crate) fn assignment_availability_cache_age(&self) -> Option<Duration> {
+        labello_domain::now()
+            .signed_duration_since(self.availability.checked_at?)
+            .to_std()
+            .ok()
     }
 
     pub(crate) fn work_view(&self) -> bool {
@@ -2166,11 +2178,18 @@ impl eframe::App for LabelloApp {
             ui.ctx().request_repaint_after(until_refresh);
         }
         if self.work_view() && self.runtime.api.is_some() && !self.availability.loading {
-            let until_refresh = self
-                .availability
-                .last_attempt
-                .map(|attempt| std::time::Duration::from_secs(10).saturating_sub(attempt.elapsed()))
-                .unwrap_or_default();
+            let until_refresh = if self.availability.checked_at.is_some() {
+                self.assignment_availability_cache_age()
+                    .map(|age| ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(age))
+                    .unwrap_or_default()
+            } else {
+                self.availability
+                    .last_attempt
+                    .map(|attempt| {
+                        ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(attempt.elapsed())
+                    })
+                    .unwrap_or_default()
+            };
             ui.ctx().request_repaint_after(until_refresh);
         }
     }

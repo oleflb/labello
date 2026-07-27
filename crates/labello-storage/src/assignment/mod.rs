@@ -845,6 +845,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assignment_availability_caches_single_pass_scans_and_invalidates_on_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = DatasetRepository::new(temp.path());
+        let user_id = UserId::from("annotator");
+        let task_specs = [
+            ("bounding_box:person", "person", "Person"),
+            ("bounding_box:vehicle", "vehicle", "Vehicle"),
+            ("bounding_box:ball", "ball", "Ball"),
+        ];
+        let mut metadata = DatasetMetadata::new(DatasetId::from("ds"), "Dataset", now());
+        for (task_id, class_id, name) in task_specs {
+            metadata.label_classes.push(LabelClass {
+                class_id: ClassId::from(class_id),
+                name: name.to_string(),
+                color: "#5eead4".to_string(),
+                description: None,
+            });
+            metadata.tasks.push(TaskDefinition {
+                task_id: TaskId::from(task_id),
+                name: format!("{name} boxes"),
+                annotation_type: AnnotationType::BoundingBox,
+                class_ids: vec![ClassId::from(class_id)],
+                instructions: TutorialContent {
+                    title: format!("Annotate {name}"),
+                    example_text: "Draw boxes.".to_string(),
+                    example_images: Vec::new(),
+                },
+                skeleton: None,
+                review: ReviewConfig::default(),
+                prelabel_config_ids: Vec::new(),
+                manual_box_guide_migration: None,
+                enabled: true,
+            });
+        }
+        metadata.role_assignments.push(DatasetRoleAssignment {
+            dataset_id: metadata.dataset_id.clone(),
+            user_id: user_id.clone(),
+            roles: BTreeSet::from([DatasetRole::Annotator]),
+            assigned_at: now(),
+            assigned_by: None,
+        });
+        repo.initialize(metadata.clone()).await.unwrap();
+
+        let images = (0..4)
+            .map(|index| {
+                let image_id = ImageId::from(format!("img_{index}"));
+                (
+                    format!("hash_{index}"),
+                    ImageRecord {
+                        image_id,
+                        blake3: format!("hash_{index}"),
+                        canonical_path: format!("images/{index}.png"),
+                        known_paths: vec![format!("images/{index}.png")],
+                        duplicate_paths: Vec::new(),
+                        file_name: format!("{index}.png"),
+                        byte_size: 4,
+                        width: 2,
+                        height: 2,
+                        media_type: "image/png".to_string(),
+                        source_memberships: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        repo.save_images_index(&ImagesIndex {
+            schema_version: SCHEMA_VERSION,
+            image_count: images.len(),
+            images_by_hash: images.clone(),
+        })
+        .await
+        .unwrap();
+
+        let timestamp = now();
+        let actor = Actor {
+            user_id: user_id.clone(),
+            role: DatasetRole::Annotator,
+        };
+        for image in images.values() {
+            let payloads = metadata
+                .tasks
+                .iter()
+                .map(|task| EventPayload::TaskStateChanged {
+                    task_state: TaskState {
+                        task_id: task.task_id.clone(),
+                        status: TaskStatus::Completed,
+                        outcome: Some(TaskOutcome::AnnotationCompleted),
+                        assigned_to: None,
+                        completed_by: Some(user_id.clone()),
+                        completed_at: Some(timestamp),
+                        updated_at: timestamp,
+                    },
+                })
+                .collect();
+            repo.append_payloads_unlocked(&image.image_id, &actor, payloads)
+                .await
+                .unwrap();
+        }
+
+        repo.reset_image_state_load_count();
+        let availability = repo
+            .assignment_availability(&user_id, AssignmentKind::Annotation)
+            .await
+            .unwrap();
+
+        assert!(availability.values().all(|available| !available));
+        assert_eq!(
+            repo.image_state_load_count(),
+            images.len() as u64,
+            "availability should load each image state once regardless of task count"
+        );
+        assert_eq!(repo.assignment_availability_cache.scan_count(), 1);
+
+        let cached = repo
+            .assignment_availability(&user_id, AssignmentKind::Annotation)
+            .await
+            .unwrap();
+        assert_eq!(cached, availability);
+        assert_eq!(repo.image_state_load_count(), images.len() as u64);
+        assert_eq!(
+            repo.assignment_availability_cache.scan_count(),
+            1,
+            "an unchanged request should reuse the completed scan"
+        );
+
+        let first_image = &images.values().next().unwrap().image_id;
+        let first_task = &metadata.tasks[0].task_id;
+        repo.append_payload(
+            first_image,
+            &actor,
+            EventPayload::TaskStateChanged {
+                task_state: TaskState {
+                    task_id: first_task.clone(),
+                    status: TaskStatus::Completed,
+                    outcome: Some(TaskOutcome::AnnotationCompleted),
+                    assigned_to: None,
+                    completed_by: Some(user_id.clone()),
+                    completed_at: Some(timestamp),
+                    updated_at: now(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        repo.reset_image_state_load_count();
+        let refreshed = repo
+            .assignment_availability(&user_id, AssignmentKind::Annotation)
+            .await
+            .unwrap();
+        assert_eq!(refreshed, availability);
+        assert_eq!(repo.image_state_load_count(), images.len() as u64);
+        assert_eq!(
+            repo.assignment_availability_cache.scan_count(),
+            2,
+            "event writes must invalidate cached availability"
+        );
+
+        repo.save_dataset(&metadata).await.unwrap();
+        repo.reset_image_state_load_count();
+        let (first, second) = tokio::join!(
+            repo.assignment_availability(&user_id, AssignmentKind::Annotation),
+            repo.assignment_availability(&user_id, AssignmentKind::Annotation),
+        );
+        assert_eq!(first.unwrap(), availability);
+        assert_eq!(second.unwrap(), availability);
+        assert_eq!(repo.image_state_load_count(), images.len() as u64);
+        assert_eq!(
+            repo.assignment_availability_cache.scan_count(),
+            3,
+            "concurrent misses should share one scan"
+        );
+    }
+
+    #[tokio::test]
     async fn retries_return_same_users_active_assignment() {
         let temp = tempfile::tempdir().unwrap();
         let repo = DatasetRepository::new(temp.path());
