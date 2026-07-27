@@ -3,7 +3,8 @@
 Every check box item is an issue. An issues that is checked is finished and should be skipped.
 When working on an issue, use the following workflow:
 
-1. use analyze the issue
+0. Assign yourself to the issue by writing LOCKED at the start of the issue. DO NOT START AN ISSUE IF IT IS ALREADY LOCKED. Work in a new worktree in .worktrees.
+1. analyze the issue
 2. reproduce it, if it is visual look at it in the inspector with mcp
 3. if it is a valid issue create a new branch from the current one
 4. plan a fix
@@ -11,12 +12,13 @@ When working on an issue, use the following workflow:
 6. validate
 7. Review
 8. then commit
+9. Ask if I approve of the changes and if the commit(s) should be merged into alex-probiert-dinge
 
 Only after that continue with the next issue.
 
 # Feedback Issues
 
-- [ ] Show assignment availability in the workflow selector.
+- [ ] LOCKED Show assignment availability in the workflow selector.
   - Add one authenticated batch endpoint for the current assignment kind; do not issue one request per workflow or infer availability from dataset statistics.
   - Reuse the claim path's task, image-state, reservation, review, adjudication, migration, and imbalance eligibility rules so availability does not drift from actual assignment claims.
   - Load availability when a workspace opens or its assignment kind changes, refresh it after claim/release/complete/reopen transitions, and poll lightly so assignments released by other users become selectable.
