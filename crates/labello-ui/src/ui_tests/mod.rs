@@ -769,7 +769,7 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
 }
 
 #[test]
-fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
+fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api.clone());
     step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
@@ -783,14 +783,27 @@ fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
         labello_client::ImportProfile::CocoInstancesGtV1,
         labello_client::ImportTransport::ServerDirectory,
     );
-    job.preflight_report = Some(test_import_report());
+    let mut report = test_import_report();
+    report.source.categories = 2;
+    job.preflight_report = Some(report);
     api.set_import_job(job.clone());
     {
         let flow = &mut harness.state_mut().import_flow;
         flow.open = true;
         flow.job = Some(job);
         flow.screen = crate::import_flow::ImportScreen::Preflight;
-        flow.categories = vec![contract_import_category()];
+        let person = contract_import_category();
+        let mut vehicle = contract_import_category();
+        vehicle.source_category_key = "release:vehicle:18".to_string();
+        vehicle.source_category_id = "18".to_string();
+        vehicle.source_name = "Vehicle".to_string();
+        vehicle.class_id = "vehicle".to_string();
+        vehicle.class_name = "Vehicle".to_string();
+        vehicle.bounding_box_task_id = "bounding_box:vehicle".to_string();
+        vehicle.bounding_box_task_name = "Vehicle bounding boxes".to_string();
+        vehicle.skeleton_task_id = "skeleton:vehicle".to_string();
+        vehicle.skeleton_task_name = "Vehicle skeletons".to_string();
+        flow.categories = vec![person, vehicle];
         flow.geometry_policy = labello_client::ImportGeometryPolicy::ManualBoxGuideV1;
         flow.workflow_intent = labello_client::ImportWorkflowIntent::RequireApproval;
         flow.keypoint_names = "nose,left_eye".to_string();
@@ -803,15 +816,17 @@ fn mutable_import_spy_accepts_api_valid_manual_approval_request() {
     });
 
     let request = api.last_import_plan_request().unwrap();
-    assert_eq!(request.task_mappings.len(), 2);
+    assert_eq!(request.task_mappings.len(), 4);
     assert!(request.task_mappings.iter().all(|mapping| {
         mapping.task.review.workflow == labello_domain::ReviewWorkflow::Approval
             && mapping.task.review.required_reviews == 1
     }));
+    assert_eq!(request.skeleton_mappings.len(), 2);
     assert!(
-        request.skeleton_mappings[0]
-            .source_keypoint_names
-            .is_empty()
+        request
+            .skeleton_mappings
+            .iter()
+            .all(|mapping| mapping.source_keypoint_names.is_empty())
     );
     assert!(harness.state().import_flow.error.is_none());
 }

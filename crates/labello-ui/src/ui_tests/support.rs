@@ -1188,15 +1188,6 @@ fn validate_spy_import_plan(
     }) {
         return Err("API validation: manual mappings cannot declare source names".to_string());
     }
-    if request
-        .geometry_mappings
-        .iter()
-        .filter(|mapping| mapping.policy == labello_client::ImportGeometryPolicy::ManualBoxGuideV1)
-        .count()
-        > 1
-    {
-        return Err("API validation: only one manual mapping is supported".to_string());
-    }
     Ok(())
 }
 

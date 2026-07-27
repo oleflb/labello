@@ -2184,6 +2184,12 @@ mod tests {
         targets: Vec<MigrationTarget>,
     }
 
+    struct MigrationPair {
+        guide_task_id: TaskId,
+        task_id: TaskId,
+        targets: Vec<MigrationTarget>,
+    }
+
     #[tokio::test]
     async fn migration_commands_are_canonical_idempotent_atomic_and_replayable() {
         let fixture = fixture(ReviewWorkflow::None, 2).await;
@@ -3084,6 +3090,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multiple_class_migrations_complete_and_review_independently() {
+        let fixture = fixture(ReviewWorkflow::Approval, 1).await;
+        let vehicle = add_migration_pair(&fixture, "vehicle", "wheel").await;
+        let person = MigrationPair {
+            guide_task_id: fixture.guide_task_id.clone(),
+            task_id: fixture.task_id.clone(),
+            targets: fixture.targets.clone(),
+        };
+        assert_ne!(person.guide_task_id, vehicle.guide_task_id);
+
+        for (index, pair) in [&person, &vehicle].into_iter().enumerate() {
+            let annotation = fixture
+                .repository
+                .assign_next_image(
+                    &fixture.annotator,
+                    &pair.task_id,
+                    AssignmentKind::Annotation,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let state = fixture
+                .repository
+                .load_image_state(&fixture.image_id)
+                .await
+                .unwrap();
+            let resolved = fixture
+                .repository
+                .exclude_migration_target(
+                    &fixture.annotator,
+                    context(&annotation),
+                    None,
+                    &expectation(&state, &pair.task_id, &pair.targets[0]),
+                    MigrationExclusionReason::ObjectNotPresent,
+                    None,
+                    &format!("exclude-{index}"),
+                )
+                .await
+                .unwrap();
+            let target_hash = resolved.image_state.migration_target_sets[&pair.task_id]
+                .target_set_hash
+                .clone();
+            let state_hash = resolved
+                .image_state
+                .current_migration_state_hash(&pair.task_id)
+                .unwrap();
+            let confirmation_hash = migration_confirmation_hash(&target_hash, &state_hash).unwrap();
+            fixture
+                .repository
+                .confirm_and_submit_migration(
+                    &fixture.annotator,
+                    context(&annotation),
+                    &target_hash,
+                    &state_hash,
+                    &confirmation_hash,
+                    &format!("confirm-{index}"),
+                )
+                .await
+                .unwrap();
+
+            let review = fixture
+                .repository
+                .assign_next_image(&fixture.reviewers[0], &pair.task_id, AssignmentKind::Review)
+                .await
+                .unwrap()
+                .unwrap();
+            let state = fixture
+                .repository
+                .load_image_state(&fixture.image_id)
+                .await
+                .unwrap();
+            let disposition_version = state.migration_dispositions[&pair.task_id]
+                [&pair.targets[0].object_group_id]
+                .disposition_version;
+            fixture
+                .repository
+                .review_migration(
+                    &fixture.reviewers[0],
+                    context(&review),
+                    &MigrationReviewTarget::Disposition {
+                        object_group_id: pair.targets[0].object_group_id.clone(),
+                        disposition_version,
+                    },
+                    ReviewDecision::Approved,
+                    None,
+                    &format!("review-object-{index}"),
+                )
+                .await
+                .unwrap();
+            fixture
+                .repository
+                .review_migration(
+                    &fixture.reviewers[0],
+                    context(&review),
+                    &MigrationReviewTarget::Confirmation { confirmation_hash },
+                    ReviewDecision::Approved,
+                    None,
+                    &format!("review-confirmation-{index}"),
+                )
+                .await
+                .unwrap();
+
+            let state = fixture
+                .repository
+                .load_image_state(&fixture.image_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                state.task_states[&pair.task_id].status,
+                TaskStatus::Completed
+            );
+            if index == 0 {
+                assert_eq!(
+                    state.task_states[&vehicle.task_id].status,
+                    TaskStatus::Pending
+                );
+            }
+        }
+
+        let guide_assignment = open_guide_assignment(&fixture).await;
+        let state = fixture
+            .repository
+            .load_image_state(&fixture.image_id)
+            .await
+            .unwrap();
+        let current = state
+            .current_annotation(&person.targets[0].guide_annotation_id)
+            .unwrap();
+        let mut corrected = current.clone();
+        corrected.version += 1;
+        corrected.revision_source = RevisionSource::Human {
+            action: HumanRevisionKind::Edited,
+        };
+        corrected.author_user_id = fixture.annotator.clone();
+        corrected.updated_at = labello_domain::now();
+        corrected.geometry = AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.2,
+            height: 0.2,
+        });
+        fixture
+            .repository
+            .apply_annotation_batch(
+                &fixture.annotator,
+                context(&guide_assignment),
+                vec![EventPayload::AnnotationVersionCreated {
+                    annotation: corrected,
+                    previous_version: Some(current.version),
+                    reason: Some("correct person guide".to_string()),
+                }],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let state = fixture
+            .repository
+            .load_image_state(&fixture.image_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.task_states[&person.task_id].status,
+            TaskStatus::NeedsCorrection
+        );
+        assert!(!state.migration_confirmations.contains_key(&person.task_id));
+        assert_eq!(
+            state.task_states[&vehicle.task_id].status,
+            TaskStatus::Completed
+        );
+        assert!(state.migration_confirmations.contains_key(&vehicle.task_id));
+    }
+
+    #[tokio::test]
     async fn reopening_submitted_migration_cancels_active_reviews() {
         let fixture = fixture(ReviewWorkflow::Approval, 1).await;
         let annotation = claim_annotator(&fixture).await;
@@ -3734,6 +3914,162 @@ mod tests {
             task_id,
             annotator,
             reviewers,
+            targets,
+        }
+    }
+
+    async fn add_migration_pair(fixture: &Fixture, class: &str, keypoint: &str) -> MigrationPair {
+        let class_id = ClassId::from(class);
+        let guide_task_id = TaskId::from(format!("bounding_box:{class}"));
+        let task_id = TaskId::from(format!("skeleton:{class}"));
+        let mut metadata = fixture.repository.load_dataset_config().await.unwrap();
+        metadata.label_classes.push(LabelClass {
+            class_id: class_id.clone(),
+            name: class.to_string(),
+            color: "#cccccc".to_string(),
+            description: None,
+        });
+        metadata.tasks.push(TaskDefinition {
+            task_id: guide_task_id.clone(),
+            name: format!("{class} boxes"),
+            annotation_type: AnnotationType::BoundingBox,
+            class_ids: vec![class_id.clone()],
+            instructions: tutorial(),
+            skeleton: None,
+            review: ReviewConfig::default(),
+            prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: None,
+            enabled: true,
+        });
+        metadata.tasks.push(TaskDefinition {
+            task_id: task_id.clone(),
+            name: format!("{class} skeletons"),
+            annotation_type: AnnotationType::Skeleton,
+            class_ids: vec![class_id.clone()],
+            instructions: tutorial(),
+            skeleton: Some(SkeletonSpec {
+                keypoints: vec![KeypointSpec {
+                    name: keypoint.to_string(),
+                    required: true,
+                }],
+                edges: Vec::new(),
+                allow_hidden: true,
+                allow_absent: false,
+            }),
+            review: ReviewConfig {
+                required_reviews: 1,
+                workflow: ReviewWorkflow::Approval,
+                allow_reviewer_corrections: false,
+                agreement_threshold: None,
+            },
+            prelabel_config_ids: Vec::new(),
+            manual_box_guide_migration: Some(ManualBoxGuideMigration {
+                guide_task_id: guide_task_id.clone(),
+                cardinality: MigrationCardinality::ExactlyOne,
+                allow_exclusion: true,
+                sequence: MigrationSequence::ImportedSpatialOrderV1,
+            }),
+            enabled: true,
+        });
+        fixture.repository.save_dataset(&metadata).await.unwrap();
+
+        let import_id = ImportId::from(format!("import_{class}"));
+        let timestamp = labello_domain::now();
+        let target = MigrationTarget {
+            object_group_id: ObjectGroupId::from(format!("group_{class}")),
+            guide_annotation_id: AnnotationId::from(format!("box_{class}")),
+            reserved_skeleton_annotation_id: AnnotationId::from(format!("skeleton_{class}")),
+            sequence_index: 0,
+        };
+        let annotation = AnnotationVersion {
+            annotation_id: target.guide_annotation_id.clone(),
+            version: 1,
+            object_group_id: Some(target.object_group_id.clone()),
+            origin: AnnotationOrigin::Imported {
+                imported: ImportedOrigin {
+                    import_id: import_id.clone(),
+                    source_profile: SourceProfile {
+                        profile_id: "test".to_string(),
+                        profile_version: 1,
+                    },
+                    source_namespace: "test".to_string(),
+                    source_object_key: format!("object_{class}"),
+                    geometry_provenance: ImportGeometryProvenance::Direct,
+                },
+            },
+            task_id: guide_task_id.clone(),
+            class_id,
+            annotation_type: AnnotationType::BoundingBox,
+            revision_source: RevisionSource::Import {
+                import_id: import_id.clone(),
+            },
+            geometry: AnnotationGeometry::BoundingBox(BoundingBox {
+                x: 0.6,
+                y: 0.6,
+                width: 0.2,
+                height: 0.2,
+            }),
+            author_user_id: UserId::from("importer"),
+            created_at: timestamp,
+            updated_at: timestamp,
+            deleted: false,
+        };
+        let targets = vec![target];
+        let target_set_hash = migration_target_set_hash(
+            &MigrationHashContext {
+                dataset_id: &DatasetId::from("ds"),
+                image_id: &fixture.image_id,
+                guide_task_id: &guide_task_id,
+                target_task_id: &task_id,
+            },
+            &targets,
+        )
+        .unwrap();
+        fixture
+            .repository
+            .append_payload(
+                &fixture.image_id,
+                &Actor {
+                    user_id: UserId::from("importer"),
+                    role: DatasetRole::DataAdmin,
+                },
+                EventPayload::ImportInitialized {
+                    import_id,
+                    annotations: vec![annotation],
+                    task_initializations: vec![
+                        ImportTaskInitialization {
+                            task_id: guide_task_id.clone(),
+                            coverage: ImportCoverage::Complete,
+                            initial_state: TaskState {
+                                task_id: guide_task_id.clone(),
+                                status: TaskStatus::Completed,
+                                outcome: Some(TaskOutcome::ImportedGroundTruth),
+                                assigned_to: None,
+                                completed_by: Some(UserId::from("importer")),
+                                completed_at: Some(timestamp),
+                                updated_at: timestamp,
+                            },
+                        },
+                        ImportTaskInitialization {
+                            task_id: task_id.clone(),
+                            coverage: ImportCoverage::Incomplete,
+                            initial_state: TaskState::new(task_id.clone(), timestamp),
+                        },
+                    ],
+                    migration_target_sets: vec![MigrationTargetSetInitialization {
+                        dataset_id: DatasetId::from("ds"),
+                        guide_task_id: guide_task_id.clone(),
+                        target_task_id: task_id.clone(),
+                        target_set_hash,
+                        targets: targets.clone(),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        MigrationPair {
+            guide_task_id,
+            task_id,
             targets,
         }
     }

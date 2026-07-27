@@ -470,6 +470,15 @@ impl ImportFlowState {
                         .current_task_mappings
                         .iter()
                         .find(|mapping| mapping.task.annotation_type == AnnotationType::Skeleton);
+                    let target_skeleton = skeleton_task
+                        .and_then(|task| {
+                            source
+                                .current_skeleton_mappings
+                                .iter()
+                                .find(|mapping| mapping.target_task_id == task.task.task_id)
+                        })
+                        .map(|mapping| &mapping.skeleton)
+                        .or(source.keypoint_schema.as_ref());
                     ImportCategoryDraft {
                         selected: category.selected,
                         source_category_key: source.source_category_key.clone(),
@@ -500,9 +509,7 @@ impl ImportFlowState {
                             .first()
                             .map(|mapping| mapping.workflow_intent)
                             .unwrap_or(ImportWorkflowIntent::AuthoritativeGroundTruth),
-                        target_keypoint_names: source
-                            .keypoint_schema
-                            .as_ref()
+                        target_keypoint_names: target_skeleton
                             .map(|schema| {
                                 schema
                                     .keypoints
@@ -1781,25 +1788,6 @@ impl LabelloApp {
             .categories
             .iter()
             .any(|category| !category.geometry_mappings.is_empty());
-        let manual_categories = self
-            .import_flow
-            .categories
-            .iter()
-            .filter(|category| {
-                category.selected
-                    && category
-                        .geometry_mappings
-                        .iter()
-                        .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1)
-            })
-            .count();
-        if category_specific && manual_categories > 1 {
-            theme::inline_message(
-                ui,
-                theme::Intent::Error,
-                "Only one selected category may use manual box-guide migration.",
-            );
-        }
         if category_specific
             && self.import_flow.categories.iter().any(|category| {
                 category.selected
@@ -1861,7 +1849,7 @@ impl LabelloApp {
                 theme::inline_message(
                     ui,
                     theme::Intent::Info,
-                    "Manual migration creates a read-only bounding-box guide and skeleton target for exactly one selected source category, matching the current API/storage contract.",
+                    "Manual migration creates a separate read-only bounding-box guide and skeleton target for each selected source category.",
                 );
             }
             egui::ComboBox::from_label("Workflow intent")
@@ -3578,7 +3566,6 @@ impl LabelloApp {
             && (category_specific || self.import_flow.geometry_policy != ImportGeometryPolicy::Omit)
             && (!has_seed_workflow || self.import_flow.seed_workflow_confirmed)
             && (manual_categories == 0 || manual_available)
-            && manual_categories <= 1
     }
 
     fn import_plan_is_current(&self) -> bool {
@@ -4604,6 +4591,35 @@ mod tests {
         }
     }
 
+    fn manual_category(
+        key: &str,
+        source_id: &str,
+        class_id: &str,
+        keypoints: &str,
+    ) -> ImportCategoryDraft {
+        let mut category = category(key, source_id, class_id);
+        category.direct_geometry = vec![ImportGeometryKind::BoundingBox];
+        category.source_skeleton = None;
+        category.target_keypoint_names = keypoints.to_string();
+        category.geometry_mappings = vec![
+            ImportGeometryMappingRequest {
+                source_category_key: category.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::BoundingBox,
+                policy: ImportGeometryPolicy::Direct,
+                parameters: Vec::new(),
+            },
+            ImportGeometryMappingRequest {
+                source_category_key: category.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::Skeleton,
+                policy: ImportGeometryPolicy::ManualBoxGuideV1,
+                parameters: Vec::new(),
+            },
+        ];
+        category
+    }
+
     #[test]
     fn browser_limits_are_checked_before_file_contents_are_needed() {
         let limits = labello_client::ImportLimits {
@@ -4628,11 +4644,14 @@ mod tests {
         app.import_flow.geometry_policy = ImportGeometryPolicy::ManualBoxGuideV1;
         app.import_flow.target_geometry = ImportGeometryKind::Skeleton;
         app.import_flow.keypoint_names = "nose,left_eye".to_string();
-        app.import_flow.categories = vec![category("release:v2:17", "17", "person")];
+        app.import_flow.categories = vec![
+            category("release:v2:17", "17", "person"),
+            category("release:v2:18", "18", "vehicle"),
+        ];
 
         let request = app.import_plan_request();
 
-        assert_eq!(request.task_mappings.len(), 2);
+        assert_eq!(request.task_mappings.len(), 4);
         assert!(request.task_mappings.iter().any(|mapping| {
             mapping.task.task_id == TaskId::from("bounding_box:person")
                 && mapping.task.manual_box_guide_migration.is_none()
@@ -4647,7 +4666,18 @@ mod tests {
                         migration.guide_task_id == TaskId::from("bounding_box:person")
                     })
         }));
-        assert_eq!(request.geometry_mappings.len(), 2);
+        assert!(request.task_mappings.iter().any(|mapping| {
+            mapping.task.task_id == TaskId::from("skeleton:vehicle")
+                && mapping
+                    .task
+                    .manual_box_guide_migration
+                    .as_ref()
+                    .is_some_and(|migration| {
+                        migration.guide_task_id == TaskId::from("bounding_box:vehicle")
+                    })
+        }));
+        assert_eq!(request.geometry_mappings.len(), 4);
+        assert_eq!(request.skeleton_mappings.len(), 2);
         assert_eq!(
             request.category_mappings[0].source_category_key,
             "release:v2:17"
@@ -4661,7 +4691,7 @@ mod tests {
     }
 
     #[test]
-    fn category_specific_manual_mapping_allows_only_one_category() {
+    fn category_specific_manual_mapping_allows_multiple_categories() {
         let mut app = LabelloApp::default();
         app.import_flow.capabilities = Some(ImportCapabilities {
             manual_box_guide_migration: true,
@@ -4697,51 +4727,36 @@ mod tests {
             expires_at: None,
             recovery: None,
         });
-        let mut person = category("source:0", "0", "person");
-        person.direct_geometry = vec![ImportGeometryKind::BoundingBox];
-        person.source_skeleton = None;
-        person.geometry_mappings = vec![
-            ImportGeometryMappingRequest {
-                source_category_key: person.source_category_key.clone(),
-                source_geometry: ImportGeometryKind::BoundingBox,
-                target_geometry: ImportGeometryKind::BoundingBox,
-                policy: ImportGeometryPolicy::Direct,
-                parameters: Vec::new(),
-            },
-            ImportGeometryMappingRequest {
-                source_category_key: person.source_category_key.clone(),
-                source_geometry: ImportGeometryKind::BoundingBox,
-                target_geometry: ImportGeometryKind::Skeleton,
-                policy: ImportGeometryPolicy::ManualBoxGuideV1,
-                parameters: Vec::new(),
-            },
-        ];
-        let mut vehicle = category("source:1", "1", "vehicle");
-        vehicle.direct_geometry = vec![ImportGeometryKind::BoundingBox];
-        vehicle.source_skeleton = None;
-        vehicle.geometry_mappings = vec![
-            ImportGeometryMappingRequest {
-                source_category_key: vehicle.source_category_key.clone(),
-                source_geometry: ImportGeometryKind::BoundingBox,
-                target_geometry: ImportGeometryKind::BoundingBox,
-                policy: ImportGeometryPolicy::Direct,
-                parameters: Vec::new(),
-            },
-            ImportGeometryMappingRequest {
-                source_category_key: vehicle.source_category_key.clone(),
-                source_geometry: ImportGeometryKind::BoundingBox,
-                target_geometry: ImportGeometryKind::Skeleton,
-                policy: ImportGeometryPolicy::ManualBoxGuideV1,
-                parameters: Vec::new(),
-            },
-        ];
+        let person = manual_category("source:0", "0", "person", "nose");
+        let vehicle = manual_category("source:1", "1", "vehicle", "wheel, axle");
         app.import_flow.categories = vec![person, vehicle];
 
-        assert!(!app.import_mappings_complete());
-
-        app.import_flow.categories[1].geometry_mappings[1].policy =
-            ImportGeometryPolicy::BoxRelativeTemplateV1;
         assert!(app.import_mappings_complete());
+        let request = app.import_plan_request();
+        assert_eq!(request.task_mappings.len(), 4);
+        assert_eq!(request.skeleton_mappings.len(), 2);
+        for (category, guide, target) in [
+            ("source:0", "bounding_box:person", "skeleton:person"),
+            ("source:1", "bounding_box:vehicle", "skeleton:vehicle"),
+        ] {
+            let target = request
+                .task_mappings
+                .iter()
+                .find(|mapping| {
+                    mapping.source_category_key == category
+                        && mapping.task.task_id == TaskId::from(target)
+                })
+                .unwrap();
+            assert_eq!(
+                target
+                    .task
+                    .manual_box_guide_migration
+                    .as_ref()
+                    .unwrap()
+                    .guide_task_id,
+                TaskId::from(guide)
+            );
+        }
 
         app.import_flow.diagnostics = vec![labello_client::ImportDiagnostic::default()];
         app.import_flow.diagnostics_cursor = Some("old".to_string());
@@ -4750,6 +4765,125 @@ mod tests {
         assert!(app.import_flow.pending_plan_request.is_some());
         assert!(app.import_flow.diagnostics.is_empty());
         assert!(app.import_flow.diagnostics_cursor.is_none());
+    }
+
+    #[test]
+    fn recovery_restores_each_manual_category_target_schema() {
+        let mut planned = LabelloApp::default();
+        planned.import_flow.categories = vec![
+            manual_category("source:0", "0", "person", "nose, left_eye"),
+            manual_category("source:1", "1", "vehicle", "wheel, axle"),
+        ];
+        let accepted = planned.import_plan_request();
+        let source_categories = planned
+            .import_flow
+            .categories
+            .iter()
+            .map(|category| {
+                let category_mapping = accepted
+                    .category_mappings
+                    .iter()
+                    .find(|mapping| mapping.source_category_key == category.source_category_key)
+                    .unwrap()
+                    .clone();
+                labello_client::ImportSourceCategory {
+                    source_category_key: category.source_category_key.clone(),
+                    source_category_id: category.source_category_id.clone(),
+                    source_name: category.source_name.clone(),
+                    source_supercategory: None,
+                    source_namespace: "source".to_string(),
+                    direct_geometry: category.direct_geometry.clone(),
+                    keypoint_schema: None,
+                    generated_category_mapping: category_mapping.clone(),
+                    generated_task_mappings: Vec::new(),
+                    current_category_mapping: category_mapping,
+                    current_geometry_mappings: accepted
+                        .geometry_mappings
+                        .iter()
+                        .filter(|mapping| {
+                            mapping.source_category_key == category.source_category_key
+                        })
+                        .cloned()
+                        .collect(),
+                    current_task_mappings: accepted
+                        .task_mappings
+                        .iter()
+                        .filter(|mapping| {
+                            mapping.source_category_key == category.source_category_key
+                        })
+                        .cloned()
+                        .collect(),
+                    current_skeleton_mappings: accepted
+                        .skeleton_mappings
+                        .iter()
+                        .filter(|mapping| {
+                            mapping.source_category_key == category.source_category_key
+                        })
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect();
+        let report = labello_client::ImportPreflightReport {
+            source: labello_client::ImportSourceCounts {
+                categories: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = ImportPlan {
+            import_id: labello_domain::ImportId::from("imp-recovery"),
+            report: report.clone(),
+            source_categories,
+            accepted_request: Some(accepted.clone()),
+            ..Default::default()
+        };
+        let now = labello_domain::now();
+        let job = ImportJob {
+            import_id: plan.import_id.clone(),
+            owner_user_id: labello_domain::UserId::from("admin"),
+            destination_dataset_id: DatasetId::from("recovered"),
+            destination_name: "Recovered".to_string(),
+            profile: ImportProfile::UltralyticsYoloDetectV1,
+            transport: ImportTransport::ServerDirectory,
+            lifecycle: ImportLifecycle::AwaitingDecision,
+            progress: Default::default(),
+            failure: None,
+            source_fingerprint: Some("source".to_string()),
+            plan_hash: Some("plan".to_string()),
+            preflight_report: Some(report),
+            can_cancel: true,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            recovery: Some(labello_client::ImportRecoveryState {
+                accepted_plan: Some(plan),
+                ..Default::default()
+            }),
+        };
+
+        let mut recovered = LabelloApp::default();
+        recovered.import_flow.capabilities = Some(ImportCapabilities {
+            manual_box_guide_migration: true,
+            ..Default::default()
+        });
+        recovered.import_flow.hydrate_job_contract(&job);
+
+        assert_eq!(recovered.import_flow.categories.len(), 2);
+        assert_eq!(
+            recovered
+                .import_flow
+                .categories
+                .iter()
+                .map(|category| (
+                    category.class_id.as_str(),
+                    category.target_keypoint_names.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("person", "nose, left_eye"), ("vehicle", "wheel, axle")]
+        );
+        assert_eq!(recovered.import_flow.accepted_plan_request, Some(accepted));
+        assert!(recovered.import_mappings_complete());
     }
 
     #[test]

@@ -1478,9 +1478,9 @@ fn convert_plan_update(
 
     let mut bounding_boxes = false;
     let mut skeleton_output = false;
-    let mut manual_schema = None;
+    let mut manual_schemas = Vec::new();
     let mut geometry_targets = BTreeSet::new();
-    let mut manual_category = None;
+    let mut manual_categories = Vec::new();
     let mut geometry_mappings = Vec::new();
     for mapping in &request.geometry_mappings {
         if !selected.contains(&mapping.source_category_key) {
@@ -1592,16 +1592,10 @@ fn convert_plan_update(
                     || matching_task.is_none()
                 {
                     return Err(ApiError::Unprocessable(
-                        "manual box-guide requires one box-to-skeleton category and task"
-                            .to_string(),
+                        "manual box-guide requires a box-to-skeleton category and task".to_string(),
                     ));
                 }
-                if manual_category.is_some() {
-                    return Err(ApiError::Unprocessable(
-                        "only one manual box-guide category is supported".to_string(),
-                    ));
-                }
-                manual_category = Some(mapping.source_category_key.clone());
+                manual_categories.push(mapping.source_category_key.clone());
                 bounding_boxes = true;
                 skeleton_output = true;
                 let skeleton = request
@@ -1619,7 +1613,7 @@ fn convert_plan_update(
                             .to_string(),
                     ));
                 }
-                manual_schema = Some(storage::BoxToSkeletonPolicy::ManualBoxGuide {
+                manual_schemas.push(storage::BoxToSkeletonPolicy::ManualBoxGuide {
                     keypoint_names: skeleton
                         .skeleton
                         .keypoints
@@ -1661,7 +1655,7 @@ fn convert_plan_update(
             ));
         }
     }
-    if let Some(category_key) = manual_category {
+    for category_key in manual_categories {
         let skeleton_task = task_mappings
             .iter()
             .find(|mapping| {
@@ -1690,10 +1684,17 @@ fn convert_plan_update(
                 )
             })?;
     }
+    // The legacy output summary can represent only one schema. Explicit geometry and
+    // task mappings remain authoritative when categories use different schemas.
+    let box_to_skeleton = manual_schemas
+        .first()
+        .filter(|schema| manual_schemas.iter().all(|candidate| candidate == *schema))
+        .cloned()
+        .unwrap_or(storage::BoxToSkeletonPolicy::None);
     current.output = storage::OutputPolicy {
         bounding_boxes,
         skeletons: skeleton_output,
-        box_to_skeleton: manual_schema.unwrap_or(storage::BoxToSkeletonPolicy::None),
+        box_to_skeleton,
     };
     current.geometry_mappings = geometry_mappings;
     current.policies = storage::CompatibilityPolicies {
@@ -3479,7 +3480,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_mapping_allows_one_manual_category_beside_direct_categories() {
+    fn plan_mapping_allows_independent_manual_categories() {
         let mut request = valid_mapping_json();
         request["categoryMappings"]
             .as_array_mut()
@@ -3595,16 +3596,53 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(skeleton_mapping);
-        let error = convert_plan_update(
+        let shared_schema = convert_plan_update(
+            current_preflight(),
+            serde_json::from_value(second_manual.clone()).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            shared_schema.output.box_to_skeleton,
+            storage::BoxToSkeletonPolicy::ManualBoxGuide { .. }
+        ));
+
+        second_manual["taskMappings"][3]["task"]["skeleton"]["keypoints"] =
+            json!([{"name": "wheel", "required": false}]);
+        second_manual["skeletonMappings"][1]["skeleton"]["keypoints"] =
+            json!([{"name": "wheel", "required": false}]);
+        let converted = convert_plan_update(
             current_preflight(),
             serde_json::from_value(second_manual).unwrap(),
         )
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(converted.geometry_mappings.len(), 4);
+        assert_eq!(converted.task_mappings.len(), 4);
         assert!(matches!(
-            error,
-            ApiError::Unprocessable(ref message)
-                if message == "only one manual box-guide category is supported"
+            converted.output.box_to_skeleton,
+            storage::BoxToSkeletonPolicy::None
         ));
+        for (category, guide, target) in [
+            ("0", "person-box", "person-skeleton"),
+            ("1", "car-box", "car-skeleton"),
+        ] {
+            let target = converted
+                .task_mappings
+                .iter()
+                .find(|mapping| {
+                    mapping.source_category_key == category
+                        && mapping.task.task_id == labello_domain::TaskId::from(target)
+                })
+                .unwrap();
+            assert_eq!(
+                target
+                    .task
+                    .manual_box_guide_migration
+                    .as_ref()
+                    .unwrap()
+                    .guide_task_id,
+                labello_domain::TaskId::from(guide)
+            );
+        }
     }
 
     fn report_plan() -> storage::ImportPlan {

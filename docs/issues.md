@@ -24,7 +24,7 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
-- [ ] Support manual box-guide migration for multiple classes.
+- [x] Support manual box-guide migration for multiple classes.
   - Replace singular manual-category state with per-category guide/target task pairs across import UI, API, planning, persistence, assignment, review, and statistics, with multi-class lifecycle tests.
 - [ ] Make diagnostics in import preflight stage 3 collapsible.
   - Group diagnostics in an accessible disclosure that summarizes severity and count, preserves blocking visibility, and works at desktop and mobile widths.

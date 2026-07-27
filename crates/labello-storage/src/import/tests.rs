@@ -1375,7 +1375,7 @@ async fn box_relative_template_policy_preserves_named_points_and_pending_state()
 }
 
 #[tokio::test]
-async fn manual_category_coexists_with_direct_output_for_another_category() {
+async fn multiple_manual_categories_persist_independent_target_sets_and_stats() {
     let temp = tempfile::tempdir().unwrap();
     let service = service(temp.path()).await;
     let files = BTreeMap::from([
@@ -1396,7 +1396,7 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
         files,
     )
     .await;
-    let skeleton = labello_domain::SkeletonSpec {
+    let person_skeleton = labello_domain::SkeletonSpec {
         keypoints: vec![labello_domain::KeypointSpec {
             name: "center".to_string(),
             required: false,
@@ -1405,15 +1405,22 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
         allow_hidden: false,
         allow_absent: true,
     };
-    let guide_id = TaskId::from("person-box");
+    let vehicle_skeleton = labello_domain::SkeletonSpec {
+        keypoints: vec![labello_domain::KeypointSpec {
+            name: "wheel".to_string(),
+            required: false,
+        }],
+        edges: Vec::new(),
+        allow_hidden: false,
+        allow_absent: true,
+    };
+    let person_guide_id = TaskId::from("person-box");
+    let vehicle_guide_id = TaskId::from("car-box");
     let mut preflight = request(ImportProfile::UltralyticsYoloDetectV1);
     preflight.coverage_scope.clear();
     preflight.output.bounding_boxes = true;
     preflight.output.skeletons = true;
-    preflight.output.box_to_skeleton = BoxToSkeletonPolicy::ManualBoxGuide {
-        keypoint_names: vec!["center".to_string()],
-        edges: Vec::new(),
-    };
+    preflight.output.box_to_skeleton = BoxToSkeletonPolicy::None;
     preflight.category_mappings = vec![
         mapped_category("0", "person", "Person"),
         mapped_category("1", "car", "Car"),
@@ -1422,7 +1429,7 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
         ImportTaskMapping {
             source_category_key: "0".to_string(),
             task: mapped_task(
-                guide_id.as_str(),
+                person_guide_id.as_str(),
                 "person",
                 AnnotationType::BoundingBox,
                 None,
@@ -1436,9 +1443,9 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
                 "person-skeleton",
                 "person",
                 AnnotationType::Skeleton,
-                Some(skeleton),
+                Some(person_skeleton),
                 Some(labello_domain::ManualBoxGuideMigration {
-                    guide_task_id: guide_id,
+                    guide_task_id: person_guide_id,
                     cardinality: labello_domain::MigrationCardinality::ExactlyOne,
                     allow_exclusion: true,
                     sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
@@ -1448,7 +1455,29 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
         },
         ImportTaskMapping {
             source_category_key: "1".to_string(),
-            task: mapped_task("car-box", "car", AnnotationType::BoundingBox, None, None),
+            task: mapped_task(
+                vehicle_guide_id.as_str(),
+                "car",
+                AnnotationType::BoundingBox,
+                None,
+                None,
+            ),
+            intent: ImportIntent::AuthoritativeGroundTruth,
+        },
+        ImportTaskMapping {
+            source_category_key: "1".to_string(),
+            task: mapped_task(
+                "car-skeleton",
+                "car",
+                AnnotationType::Skeleton,
+                Some(vehicle_skeleton),
+                Some(labello_domain::ManualBoxGuideMigration {
+                    guide_task_id: vehicle_guide_id,
+                    cardinality: labello_domain::MigrationCardinality::ExactlyOne,
+                    allow_exclusion: true,
+                    sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
+                }),
+            ),
             intent: ImportIntent::AuthoritativeGroundTruth,
         },
     ];
@@ -1470,6 +1499,12 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
             source_geometry: labello_domain::ImportGeometryKind::BoundingBox,
             target_geometry: labello_domain::ImportGeometryKind::BoundingBox,
             policy: labello_domain::ImportGeometryPolicy::Direct,
+        },
+        labello_domain::ImportGeometryMapping {
+            source_category_key: "1".to_string(),
+            source_geometry: labello_domain::ImportGeometryKind::BoundingBox,
+            target_geometry: labello_domain::ImportGeometryKind::Skeleton,
+            policy: labello_domain::ImportGeometryPolicy::ManualBoxGuideV1,
         },
     ];
     let plan = service
@@ -1493,15 +1528,55 @@ async fn manual_category_coexists_with_direct_output_for_another_category() {
         .unwrap();
     let state = repository.load_image_state(&image.image_id).await.unwrap();
     assert_eq!(state.active_annotations().count(), 2);
-    assert_eq!(state.migration_target_sets.len(), 1);
+    assert_eq!(state.migration_target_sets.len(), 2);
     assert_eq!(
         state.migration_target_sets[&TaskId::from("person-skeleton")]
             .targets
             .len(),
         1
     );
+    assert_eq!(
+        state.migration_target_sets[&TaskId::from("car-skeleton")]
+            .targets
+            .len(),
+        1
+    );
     let manifest = repository.load_import_manifests().await.unwrap().remove(0);
-    assert_eq!(manifest.geometry_mappings.len(), 3);
+    assert_eq!(manifest.geometry_mappings.len(), 4);
+    assert_eq!(manifest.manual_migration_mappings.len(), 2);
+    assert!(matches!(
+        manifest.transform_policies.box_to_skeleton,
+        labello_domain::ImportBoxToSkeletonPolicy::None
+    ));
+    assert_eq!(manifest.skeleton_mappings.len(), 2);
+    assert_eq!(
+        manifest
+            .skeleton_mappings
+            .iter()
+            .map(|mapping| (
+                mapping.source_category_key.as_str(),
+                mapping.skeleton.keypoints[0].name.as_str()
+            ))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([("0", "center"), ("1", "wheel")])
+    );
+    assert_eq!(manifest.migration_totals.expected_targets, 2);
+
+    let stats = repository.dataset_stats().await.unwrap();
+    assert_eq!(stats.migration.expected, 2);
+    assert_eq!(stats.migration.pending, 2);
+    for task_id in ["person-skeleton", "car-skeleton"] {
+        assert_eq!(stats.per_task[&TaskId::from(task_id)].migration.expected, 1);
+        assert_eq!(stats.per_task[&TaskId::from(task_id)].migration.pending, 1);
+    }
+
+    tokio::fs::remove_file(repository.state_path(&image.image_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.load_image_state(&image.image_id).await.unwrap(),
+        state
+    );
 }
 
 #[tokio::test]

@@ -1194,6 +1194,11 @@ parser/tool/schema versions, ground-truth/exhaustiveness attestations, coverage
 and expected migration-target totals, acknowledged warning codes, transform
 policies, actor and timestamps, output counts, and output integrity hashes. It
 is not required for replay.
+For category-specific plans, `geometryMappings`, `skeletonMappings`, and
+`manualMigrationMappings` are authoritative. The singular
+`transformPolicies.boxToSkeleton` field is a compatibility summary: it records
+a manual schema only when every manual category uses that same schema, and is
+`none` when independent categories use different schemas.
 `source-objects.jsonl` retains bounded canonical source
 IDs, direct geometry at parsed `f64` precision, source area/visibility, output
 mapping, and derivation inputs needed to audit conversion. It does not retain
