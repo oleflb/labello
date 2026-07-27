@@ -18,7 +18,7 @@ Only after that continue with the next issue.
 
 # Feedback Issues
 
-- [ ] LOCKED Show assignment availability in the workflow selector.
+- [x] Show assignment availability in the workflow selector.
   - Add one authenticated batch endpoint for the current assignment kind; do not issue one request per workflow or infer availability from dataset statistics.
   - Reuse the claim path's task, image-state, reservation, review, adjudication, migration, and imbalance eligibility rules so availability does not drift from actual assignment claims.
   - Load availability when a workspace opens or its assignment kind changes, refresh it after claim/release/complete/reopen transitions, and poll lightly so assignments released by other users become selectable.
@@ -26,10 +26,20 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
+- [ ] LOCKED Promote a prepared assignment immediately after confirming a manual migration.
+  - Do not release or clear valid prepared assignments when migration confirmation completes the current annotation assignment.
+  - Reuse the normal annotation transition's prepared-image fast path, while retaining the blocking claim/load fallback when the queue is empty or expired.
+  - Add a focused UI regression test proving migration completion does not request another preview or release the prepared assignment.
 - [x] Support manual box-guide migration for multiple classes.
   - Replace singular manual-category state with per-category guide/target task pairs across import UI, API, planning, persistence, assignment, review, and statistics, with multi-class lifecycle tests.
 - [x] Make diagnostics in import preflight stage 3 collapsible.
   - Group diagnostics in an accessible disclosure that summarizes severity and count, preserves blocking visibility, and works at desktop and mobile widths.
+- [ ] LOCKED Give Import Stage 3/4 mapping inputs immediate, specific validation feedback.
+  - Show every statically determinable mapping error next to the input that causes it, including invalid or duplicate class/task IDs, names, colors, output selections, geometry-policy combinations, parameters, and skeleton schemas.
+  - Show immediate consequence warnings for workflow and compatibility choices, while keeping source-content-dependent findings authoritative to server preflight.
+  - Replace the ambiguous global-versus-category-specific mapping state with one canonical per-category request model and make invalid geometry combinations unrepresentable where practical.
+  - Treat Ready as a derived state: any edit must immediately mark the accepted report stale, return the visible workflow to Preflight, and keep Commit disabled until the exact draft is accepted again.
+  - Keep feedback accessible and usable at desktop, mobile, and short viewport sizes, and add focused validation, interaction, recovery, and API-parity tests.
 - [ ] Perform a full deep-dive integration test of every import UI stage and element.
   - Complete a real import using `/home/alex/Projects/hulks/datasets/nao_dataset/labello_nao_data.yaml`.
   - Inspect every import stage and element visually with screenshots.

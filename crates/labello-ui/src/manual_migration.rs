@@ -509,7 +509,9 @@ impl LabelloApp {
         }
         ui.separator();
         ui.label(RichText::new("Exclude target").strong());
-        egui::ComboBox::from_label("Exclusion reason")
+        let reason_label = ui.label("Exclusion reason");
+        egui::ComboBox::from_id_salt("migration-exclusion-reason")
+            .width(ui.available_width())
             .selected_text(exclusion_label(self.work.migration.exclusion_reason))
             .show_ui(ui, |ui| {
                 for reason in [
@@ -526,7 +528,9 @@ impl LabelloApp {
                         exclusion_label(reason),
                     );
                 }
-            });
+            })
+            .response
+            .labelled_by(reason_label.id);
         let note_label = ui.label("Exclusion note");
         theme::resizable_multiline_text_edit(
             ui,

@@ -876,10 +876,17 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         if LayoutMode::for_width(width) == LayoutMode::Wide {
             let canvas = migration.get_by_label("Annotation canvas").rect();
             let inspector = migration.get_by_label("Inspector").rect();
+            let workflow_boundary = LayoutMode::TASK_PANEL_WIDTH;
             let inspector_boundary = width - LayoutMode::INSPECTOR_PANEL_WIDTH;
+            let workflow_gutter = canvas.left() - workflow_boundary;
+            let inspector_gutter = inspector_boundary - canvas.right();
             assert!(
                 canvas.right() <= inspector_boundary + 0.5,
                 "canvas crosses the inspector boundary: canvas={canvas:?} boundary={inspector_boundary}",
+            );
+            assert!(
+                (workflow_gutter - inspector_gutter).abs() <= 0.5,
+                "canvas gutters differ: workflow={workflow_gutter} inspector={inspector_gutter} canvas={canvas:?}",
             );
             assert!(
                 inspector.left() >= inspector_boundary + 26.0,
@@ -888,6 +895,13 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             assert!(
                 canvas.right() + 15.0 <= inspector.left(),
                 "canvas crowds the inspector text: canvas={canvas:?} inspector={inspector:?}",
+            );
+            let exclusion_note = migration
+                .get_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Exclusion note")
+                .rect();
+            assert!(
+                exclusion_note.right() <= width - 16.5,
+                "migration controls overflow the inspector panel: note={exclusion_note:?}",
             );
         }
         assert_visible_controls_clamped(&migration, width, height);

@@ -2056,8 +2056,9 @@ impl eframe::App for LabelloApp {
                     }
                 });
         }
-        let inspector_left = (self.work_view() && layout == LayoutMode::Wide)
-            .then(|| ui.ctx().content_rect().right() - LayoutMode::INSPECTOR_PANEL_WIDTH);
+        let inspector_left = (self.work_view() && layout == LayoutMode::Wide).then(|| {
+            ui.ctx().content_rect().right() - LayoutMode::INSPECTOR_PANEL_WIDTH - theme::SPACE_2
+        });
         if self.work_view() && layout == LayoutMode::Wide {
             egui::Panel::left("task_panel")
                 .resizable(false)
@@ -2093,7 +2094,7 @@ impl eframe::App for LabelloApp {
         let central_frame = if self.work_view() {
             theme::central_frame()
                 .fill(egui::Color32::TRANSPARENT)
-                .inner_margin(egui::Margin::symmetric(8, 8))
+                .inner_margin(egui::Margin::same(theme::SPACE_2 as i8))
         } else {
             theme::central_frame()
         };
