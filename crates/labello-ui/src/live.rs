@@ -454,8 +454,7 @@ impl LabelloApp {
                                     self.canonical_migration_review_index();
                             }
                             if completed {
-                                self.clear_current_image();
-                                self.request_next_image();
+                                self.open_next_annotation_assignment(ctx, None);
                             }
                             self.request_assignment_availability();
                         }
@@ -2795,20 +2794,7 @@ impl LabelloApp {
         if self.view == AppView::Annotate
             && transition == Some(crate::app::PendingTransition::NextAssignment)
         {
-            self.one_shot_excluded_image_id = released_image_id;
-            while let Some(loaded) = self.queue.pop_prepared() {
-                if loaded.assignment.status == labello_domain::AssignmentStatus::Active
-                    && loaded
-                        .assignment
-                        .expires_at
-                        .is_none_or(|expires_at| expires_at > labello_domain::now())
-                {
-                    self.apply_loaded_image(ctx, loaded);
-                    return;
-                }
-            }
-            self.clear_current_image();
-            self.request_next_image();
+            self.open_next_annotation_assignment(ctx, released_image_id);
             return;
         }
         if let Some(crate::app::PendingTransition::PreviousAssignment(assignment)) = transition {
@@ -2822,6 +2808,29 @@ impl LabelloApp {
         } else {
             self.clear_current_image();
         }
+    }
+
+    fn open_next_annotation_assignment(
+        &mut self,
+        ctx: &egui::Context,
+        released_image_id: Option<labello_domain::ImageId>,
+    ) {
+        self.one_shot_excluded_image_id = released_image_id;
+        if self.view == AppView::Annotate {
+            while let Some(loaded) = self.queue.pop_prepared() {
+                if loaded.assignment.status == labello_domain::AssignmentStatus::Active
+                    && loaded
+                        .assignment
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > labello_domain::now())
+                {
+                    self.apply_loaded_image(ctx, loaded);
+                    return;
+                }
+            }
+        }
+        self.clear_current_image();
+        self.request_next_image();
     }
 
     pub(crate) fn apply_state(&mut self, state: labello_domain::ImageState) {

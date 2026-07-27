@@ -1508,8 +1508,10 @@ fn migration_draft_supports_undo_and_delete() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
-fn migration_confirmation_button_dispatches_once() {
+fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload() {
+    use crate::app::LoadedImage;
     use crate::inspector_presets::{self, InspectorPreset};
+    use crate::queue::QueuedImage;
 
     let api = Rc::new(SpyApi::new());
     let mut app = inspector_presets::build(
@@ -1517,21 +1519,51 @@ fn migration_confirmation_button_dispatches_once() {
         &egui::Context::default(),
     );
     api.set_image_state(app.current_state.clone().unwrap());
+    api.complete_next_migration_with(app.assignment.clone().unwrap());
+    let next_image_id = ImageId::from("img_prepared_migration");
+    let next_assignment = Assignment {
+        assignment_id: AssignmentId::generate(),
+        image_id: next_image_id.clone(),
+        task_id: app.selected_task_id.clone().unwrap(),
+        assigned_to: app.config.user_id.clone(),
+        kind: AssignmentKind::Annotation,
+        status: AssignmentStatus::Active,
+        expires_at: Some(now() + chrono::Duration::minutes(5)),
+        created_at: now(),
+        updated_at: now(),
+    };
+    app.queue.clear();
+    assert!(app.queue.push_prepared(LoadedImage {
+        assignment: next_assignment,
+        queued: QueuedImage {
+            image: image_record(next_image_id.as_str(), "prepared-migration.png", 640, 480),
+            prelabels: Vec::new(),
+        },
+        annotations: Vec::new(),
+        state: ImageState::new(next_image_id.clone()),
+        color_image: None,
+    }));
+    api.set_no_assignment(true);
     app.runtime.api = Some(api.clone());
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .with_max_steps(40)
         .build_eframe(|_| app);
     harness.step();
+    let previews_before = api.counts().get_image_preview;
 
     click_accesskit_button(&mut harness, "Confirm all guides & finish");
-    step_until(&mut harness, 8, |app| !app.migration.busy);
+    step_until(&mut harness, 8, |app| {
+        !app.migration.busy
+            && app
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.image_id == next_image_id)
+    });
     assert_eq!(api.counts().migration_commands, 1);
-    assert!(
-        harness
-            .query_by_label("Confirm all guides & finish")
-            .is_none()
-    );
+    assert_eq!(api.counts().get_image_preview, previews_before);
+    assert_eq!(api.counts().release_assignment, 0);
+    assert!(!harness.state().loading.image);
     harness.step();
     assert_eq!(api.counts().migration_commands, 1);
 }

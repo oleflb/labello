@@ -26,7 +26,7 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
-- [ ] LOCKED Promote a prepared assignment immediately after confirming a manual migration.
+- [x] Promote a prepared assignment immediately after confirming a manual migration.
   - Do not release or clear valid prepared assignments when migration confirmation completes the current annotation assignment.
   - Reuse the normal annotation transition's prepared-image fast path, while retaining the blocking claim/load fallback when the queue is empty or expired.
   - Add a focused UI regression test proving migration completion does not request another preview or release the prepared assignment.

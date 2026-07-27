@@ -452,6 +452,12 @@ impl SpyApi {
     }
 
     #[cfg(feature = "inspector-presets")]
+    pub(super) fn complete_next_migration_with(&self, mut assignment: Assignment) {
+        assignment.status = AssignmentStatus::Completed;
+        self.state.borrow_mut().migration_assignment = Some(assignment);
+    }
+
+    #[cfg(feature = "inspector-presets")]
     pub(super) fn image_state(&self, image_id: &ImageId) -> ImageState {
         self.state.borrow().states[image_id].clone()
     }
@@ -564,6 +570,7 @@ pub(super) struct SpyState {
     pub(super) fail_next_import_plan: bool,
     pub(super) last_import_plan_request: Option<labello_client::UpdateImportPlanRequest>,
     pub(super) fail_next_migration: bool,
+    pub(super) migration_assignment: Option<Assignment>,
 }
 
 impl SpyState {
@@ -684,6 +691,7 @@ impl SpyState {
             fail_next_import_plan: false,
             last_import_plan_request: None,
             fail_next_migration: false,
+            migration_assignment: None,
         }
     }
 
@@ -1226,7 +1234,7 @@ impl SpyApi {
             progress: Default::default(),
             active_pass: None,
             confirmation: None,
-            assignment: None,
+            assignment: state.migration_assignment.take(),
             annotation_id: None,
         }))
     }
