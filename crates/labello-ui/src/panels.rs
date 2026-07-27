@@ -682,10 +682,16 @@ impl LabelloApp {
             !self.loading.saving && !self.loading.image && self.pending_transition.is_none();
         for workflow in workflows {
             let selected = self.selected_task_id.as_ref() == Some(&workflow.task_id);
+            let unavailable = self.workflow_availability(&workflow.task_id) == Some(false);
             let icon_id = ui.id().with(("workflow-type", &workflow.task_id));
+            let label = if unavailable {
+                format!("{}\nNo assignments available", workflow.label())
+            } else {
+                workflow.label()
+            };
             let button = egui::Button::new((
                 egui::Atom::custom(icon_id, egui::vec2(28.0, 28.0)),
-                RichText::new(workflow.label()).strong(),
+                RichText::new(label).strong(),
             ))
             .selected(selected)
             .frame(true)
@@ -694,18 +700,42 @@ impl LabelloApp {
             .min_size(egui::vec2(ui.available_width(), 52.0))
             .gap(theme::SPACE_2)
             .truncate();
-            let choice = ui.add_enabled_ui(ready, |ui| button.atom_ui(ui)).inner;
+            let choice = ui
+                .add_enabled_ui(ready && !unavailable, |ui| button.atom_ui(ui))
+                .inner;
             if let Some(icon_rect) = choice.rect(icon_id) {
                 workflow_type_icon(ui, icon_id, icon_rect, &workflow.annotation_type);
             }
-            let response = choice.response.on_hover_text(format!(
+            let mut response = choice.response.on_hover_text(format!(
                 "{} workflow\nPrevious: {} · Next: {}",
                 annotation_type_label(&workflow.annotation_type),
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectPreviousWorkflow,),
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextWorkflow,)
             ));
+            if unavailable {
+                response = response.on_disabled_hover_text(
+                    "No assignment is currently available for this workflow. Availability is advisory and can be retried below.",
+                );
+            }
             if response.clicked() && !selected {
                 self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
+            }
+        }
+        if self.availability.loading && self.availability.tasks.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small("Checking assignment availability…");
+            });
+        } else if let Some(error) = self.availability.error.clone() {
+            theme::inline_message(
+                ui,
+                theme::Intent::Warning,
+                "Assignment availability could not be checked. Workflows remain selectable.",
+            );
+            ui.small(error);
+            if ui.button("Retry availability").clicked() {
+                self.availability.last_attempt = None;
+                self.request_assignment_availability();
             }
         }
         ui.separator();

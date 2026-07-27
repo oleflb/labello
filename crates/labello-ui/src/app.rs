@@ -15,7 +15,7 @@ use labello_domain::{
     DatasetSnapshot, DatasetStats, HumanRevisionKind, ImageExplorerPage, ImageId, ImageRecord,
     ImageState, KeybindingSet, KeypointAnnotation, KeypointState, LabelClass, NormalizedPoint,
     PrelabelSuggestion, RevisionSource, SkeletonGeometry, TaskDefinition, TaskId, TaskStatus,
-    TutorialContent, UserAccount, UserId,
+    Timestamp, TutorialContent, UserAccount, UserId,
 };
 use web_time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ pub(crate) use crate::live_protocol::{
 };
 
 pub const IMAGE_QUEUE_SIZE: usize = 2;
+pub(crate) const ASSIGNMENT_AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_HISTORY_OPERATIONS: usize = 256;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -188,6 +189,20 @@ pub(crate) struct LoadingState {
     pub snapshots: bool,
     pub creating_snapshot: bool,
     pub snapshot_file: Option<(String, String)>,
+}
+
+#[derive(Default)]
+pub(crate) struct AssignmentAvailabilityState {
+    pub(crate) dataset_id: Option<DatasetId>,
+    pub(crate) kind: Option<AssignmentKind>,
+    pub(crate) tasks: std::collections::BTreeMap<TaskId, bool>,
+    pub(crate) resolved: bool,
+    pub(crate) checked_at: Option<Timestamp>,
+    pub(crate) loading: bool,
+    pub(crate) load_after_resolution: bool,
+    pub(crate) refresh_after_load: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) last_attempt: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,6 +375,7 @@ pub struct WorkState {
     pub(crate) one_shot_excluded_image_id: Option<ImageId>,
     pub(crate) next_demo_image_index: usize,
     pub(crate) migration: ManualMigrationState,
+    pub(crate) availability: AssignmentAvailabilityState,
 }
 
 #[derive(Default)]
@@ -530,6 +546,7 @@ impl LabelloApp {
             one_shot_excluded_image_id: None,
             next_demo_image_index: config.queue_size.clamp(1, IMAGE_QUEUE_SIZE) + 2,
             migration: ManualMigrationState::default(),
+            availability: AssignmentAvailabilityState::default(),
         };
         Self {
             runtime: RuntimeState::new(),
@@ -736,6 +753,23 @@ impl LabelloApp {
             AppView::Adjudicate => Some(AssignmentKind::Adjudication),
             AppView::Setup | AppView::Admin | AppView::Stats => None,
         }
+    }
+
+    pub(crate) fn workflow_availability(&self, task_id: &TaskId) -> Option<bool> {
+        let kind = self.assignment_kind()?;
+        (self.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+            && self.availability.kind.as_ref() == Some(&kind)
+            && self.availability.resolved
+            && self.availability.error.is_none())
+        .then(|| self.availability.tasks.get(task_id).copied())
+        .flatten()
+    }
+
+    pub(crate) fn assignment_availability_cache_age(&self) -> Option<Duration> {
+        labello_domain::now()
+            .signed_duration_since(self.availability.checked_at?)
+            .to_std()
+            .ok()
     }
 
     pub(crate) fn work_view(&self) -> bool {
@@ -1654,8 +1688,14 @@ impl LabelloApp {
             .iter()
             .position(|choice| Some(&choice.task_id) == self.selected_task_id.as_ref())
             .unwrap_or(0);
-        let next = (current as isize + direction).rem_euclid(choices.len() as isize) as usize;
-        self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
+        for offset in 1..choices.len() {
+            let next = (current as isize + direction * offset as isize)
+                .rem_euclid(choices.len() as isize) as usize;
+            if self.workflow_availability(&choices[next].task_id) != Some(false) {
+                self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
+                return;
+            }
+        }
     }
 
     fn cycle_object(&mut self, direction: isize) {
@@ -2024,6 +2064,7 @@ impl eframe::App for LabelloApp {
         self.start_next_persistence_command();
         self.start_setup_load();
         self.refresh_stats_if_due();
+        self.refresh_assignment_availability_if_due();
         self.refresh_ingest_if_due();
         self.refresh_import_if_due();
         self.autosave_if_due();
@@ -2135,6 +2176,21 @@ impl eframe::App for LabelloApp {
                 .last_stats_attempt
                 .map(|attempt| std::time::Duration::from_secs(3).saturating_sub(attempt.elapsed()))
                 .unwrap_or(std::time::Duration::from_secs(3));
+            ui.ctx().request_repaint_after(until_refresh);
+        }
+        if self.work_view() && self.runtime.api.is_some() && !self.availability.loading {
+            let until_refresh = if self.availability.checked_at.is_some() {
+                self.assignment_availability_cache_age()
+                    .map(|age| ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(age))
+                    .unwrap_or_default()
+            } else {
+                self.availability
+                    .last_attempt
+                    .map(|attempt| {
+                        ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(attempt.elapsed())
+                    })
+                    .unwrap_or_default()
+            };
             ui.ctx().request_repaint_after(until_refresh);
         }
     }

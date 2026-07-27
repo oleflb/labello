@@ -383,6 +383,17 @@ impl SpyApi {
         self.state.borrow_mut().no_assignment = value;
     }
 
+    pub(super) fn set_workflow_availability(&self, task_id: &str, available: bool) {
+        self.state
+            .borrow_mut()
+            .availability_overrides
+            .insert(TaskId::from(task_id), available);
+    }
+
+    pub(super) fn fail_next_availability(&self) {
+        self.state.borrow_mut().fail_next_availability = true;
+    }
+
     pub(super) fn sanitize_metadata_roles(&self) {
         self.state.borrow_mut().metadata.role_assignments.clear();
     }
@@ -484,6 +495,7 @@ pub(super) struct CallCounts {
     pub(super) get_admin_dataset: usize,
     pub(super) update_dataset_config: usize,
     pub(super) ingest_dataset: usize,
+    pub(super) assignment_availability: usize,
     pub(super) assign_next_image: usize,
     pub(super) release_assignment: usize,
     pub(super) complete_assignment: usize,
@@ -530,6 +542,8 @@ pub(super) struct SpyState {
     pub(super) events: Vec<EventPayload>,
     pub(super) fail_next_preview: bool,
     pub(super) no_assignment: bool,
+    pub(super) availability_overrides: BTreeMap<TaskId, bool>,
+    pub(super) fail_next_availability: bool,
     pub(super) active_assignments: Vec<Assignment>,
     pub(super) reopenable_assignments: Vec<Assignment>,
     pub(super) exclusions: Vec<Vec<ImageId>>,
@@ -643,6 +657,8 @@ impl SpyState {
             events: Vec::new(),
             fail_next_preview: false,
             no_assignment: false,
+            availability_overrides: BTreeMap::new(),
+            fail_next_availability: false,
             active_assignments: Vec::new(),
             reopenable_assignments: Vec::new(),
             exclusions: Vec::new(),
@@ -1594,6 +1610,44 @@ impl TaskApi for SpyApi {
 }
 
 impl ImageApi for SpyApi {
+    fn assignment_availability<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: labello_client::AssignmentAvailabilityRequest,
+    ) -> ApiFuture<'a, labello_client::AssignmentAvailability> {
+        let mut state = self.state.borrow_mut();
+        state.counts.assignment_availability += 1;
+        if std::mem::take(&mut state.fail_next_availability) {
+            return ready(Err(ClientError::Demo(
+                "availability check failed".to_string(),
+            )));
+        }
+        if dataset_id != &state.metadata.dataset_id {
+            return ready(Err(ClientError::Demo(format!(
+                "missing dataset {dataset_id}"
+            ))));
+        }
+        let tasks = state
+            .metadata
+            .tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.task_id.clone(),
+                    state
+                        .availability_overrides
+                        .get(&task.task_id)
+                        .copied()
+                        .unwrap_or(!state.no_assignment),
+                )
+            })
+            .collect();
+        ready(Ok(labello_client::AssignmentAvailability {
+            kind: request.kind,
+            tasks,
+        }))
+    }
+
     fn list_images<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

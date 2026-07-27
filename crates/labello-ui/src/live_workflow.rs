@@ -412,6 +412,49 @@ impl LabelloApp {
         if self.loading.image || self.assignment.is_some() || self.runtime.api.is_none() {
             return;
         }
+        let availability_matches = self.availability.dataset_id.as_ref()
+            == Some(&self.config.dataset_id)
+            && self.availability.kind.as_ref() == Some(&kind);
+        if !availability_matches || !self.availability.resolved {
+            self.availability.load_after_resolution = true;
+            if !self.availability.loading {
+                self.request_assignment_availability();
+            }
+            return;
+        }
+        let task = if self.workflow_availability(&task.task_id) == Some(true) {
+            task
+        } else {
+            let choices = self.workflow_choices();
+            let current = choices
+                .iter()
+                .position(|choice| choice.task_id == task.task_id)
+                .unwrap_or(0);
+            let next = (1..=choices.len())
+                .map(|offset| &choices[(current + offset) % choices.len()])
+                .find(|choice| self.workflow_availability(&choice.task_id) == Some(true))
+                .cloned();
+            let Some(next) = next else {
+                self.availability.load_after_resolution = true;
+                self.runtime.persistence.expected_assignment = None;
+                self.runtime.notice = Some(
+                    match self.view {
+                        AppView::Annotate => "No annotation work is currently available.",
+                        AppView::Review => "No reviews are currently waiting.",
+                        AppView::Adjudicate => "No adjudications are currently waiting.",
+                        _ => "No work is currently available.",
+                    }
+                    .to_string(),
+                );
+                return;
+            };
+            self.select_workflow(&next.task_id);
+            self.runtime.persistence.expected_assignment = None;
+            self.selected_task()
+                .cloned()
+                .expect("selected available workflow must remain configured")
+        };
+        self.availability.load_after_resolution = false;
         let operation_id = self.begin_load();
         let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
         let excluded_image_ids = self.assignment_exclusions();

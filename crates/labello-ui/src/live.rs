@@ -8,8 +8,8 @@ use labello_client::{
 use web_time::{Duration, Instant};
 
 use crate::app::{
-    AppView, ImportRequestIdentity, LabelloApp, LoadedAdmin, LoadedDataset, LoadedImage,
-    RequestIdentity, SaveStatus, SetupSection, UiCommand, UiMessage,
+    ASSIGNMENT_AVAILABILITY_CACHE_TTL, AppView, ImportRequestIdentity, LabelloApp, LoadedAdmin,
+    LoadedDataset, LoadedImage, RequestIdentity, SaveStatus, SetupSection, UiCommand, UiMessage,
 };
 
 impl LabelloApp {
@@ -457,6 +457,7 @@ impl LabelloApp {
                                 self.clear_current_image();
                                 self.request_next_image();
                             }
+                            self.request_assignment_availability();
                         }
                         Err(error) => self.work.migration.error = Some(error),
                     }
@@ -722,6 +723,7 @@ impl LabelloApp {
                                 self.request_previous_draft_status();
                             }
                             self.apply_loaded_image(ctx, loaded);
+                            self.refresh_assignment_availability_if_due();
                         }
                         Ok(None) => {
                             self.one_shot_excluded_image_id = None;
@@ -741,6 +743,7 @@ impl LabelloApp {
                                 }
                                 .to_string(),
                             );
+                            self.request_assignment_availability();
                         }
                         Err(error) => {
                             if assignment.is_some() {
@@ -749,6 +752,7 @@ impl LabelloApp {
                             self.runtime.persistence.expected_assignment = None;
                             self.assignment = assignment;
                             self.runtime.error = Some(error);
+                            self.request_assignment_availability();
                         }
                     }
                 }
@@ -797,6 +801,7 @@ impl LabelloApp {
                             self.runtime.notice =
                                 Some("Returned to previous assignment".to_string());
                             self.apply_loaded_image(ctx, loaded);
+                            self.request_assignment_availability();
                         }
                         Err(error) => {
                             let expired = assignment.as_ref().is_some_and(|assignment| {
@@ -873,6 +878,8 @@ impl LabelloApp {
                             "A prepared assignment could not be released; its lease will expire."
                                 .to_string(),
                         );
+                    } else {
+                        self.request_assignment_availability();
                     }
                 }
                 UiMessage::SaveFinished {
@@ -919,6 +926,7 @@ impl LabelloApp {
                                     self.remember_previous_annotation_assignment(assignment);
                                 }
                                 self.finish_annotation_transition(ctx, None);
+                                self.request_assignment_availability();
                             }
                         }
                         Err(error) => {
@@ -961,6 +969,7 @@ impl LabelloApp {
                             }
                             self.runtime.error = None;
                             self.finish_annotation_transition(ctx, released_image_id);
+                            self.request_assignment_availability();
                         }
                         Err(error) => {
                             self.pending_transition = None;
@@ -1019,6 +1028,7 @@ impl LabelloApp {
                                     self.execute_transition(
                                         crate::app::PendingTransition::NextAssignment,
                                     );
+                                    self.request_assignment_availability();
                                 }
                             }
                         }
@@ -1048,6 +1058,7 @@ impl LabelloApp {
                             self.request_stats();
                             self.clear_current_image();
                             self.execute_transition(crate::app::PendingTransition::NextAssignment);
+                            self.request_assignment_availability();
                         }
                         Err(error) => {
                             self.pending_transition = None;
@@ -1072,6 +1083,7 @@ impl LabelloApp {
                             self.request_stats();
                             self.clear_current_image();
                             self.execute_transition(crate::app::PendingTransition::NextAssignment);
+                            self.request_assignment_availability();
                         }
                         Err(error) => {
                             self.pending_transition = None;
@@ -1102,6 +1114,47 @@ impl LabelloApp {
                             self.datasets.stats_error = None;
                         }
                         Err(error) => self.datasets.stats_error = Some(error),
+                    }
+                }
+                UiMessage::AssignmentAvailabilityLoaded { result, .. } => {
+                    self.availability.loading = false;
+                    self.availability.last_attempt = Some(Instant::now());
+                    if std::mem::take(&mut self.availability.refresh_after_load) {
+                        self.availability.tasks.clear();
+                        self.availability.resolved = false;
+                        self.availability.checked_at = None;
+                        self.availability.error = None;
+                        self.availability.last_attempt = None;
+                        self.request_assignment_availability();
+                        continue;
+                    }
+                    match result {
+                        Ok(availability)
+                            if self.assignment_kind().as_ref() == Some(&availability.kind) =>
+                        {
+                            self.availability.dataset_id = Some(self.config.dataset_id.clone());
+                            self.availability.kind = Some(availability.kind);
+                            self.availability.tasks = availability.tasks;
+                            self.availability.resolved = true;
+                            self.availability.checked_at = Some(labello_domain::now());
+                            self.availability.error = None;
+                            if self.availability.load_after_resolution {
+                                self.request_next_image();
+                            }
+                        }
+                        Ok(_) => {
+                            self.availability.tasks.clear();
+                            self.availability.resolved = false;
+                            self.availability.checked_at = None;
+                            self.availability.error =
+                                Some("Availability response did not match this workspace.".into());
+                        }
+                        Err(error) => {
+                            self.availability.tasks.clear();
+                            self.availability.resolved = false;
+                            self.availability.checked_at = None;
+                            self.availability.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::KeybindingsSaved { result, .. } => {
@@ -1611,6 +1664,20 @@ impl LabelloApp {
                     .map_err(|error| error.to_string());
                 UiMessage::StatsLoaded { request, result }
             }),
+            UiCommand::AssignmentAvailability {
+                request,
+                dataset_id,
+                kind,
+            } => self.spawn_message(request.clone(), async move {
+                let result = api
+                    .assignment_availability(
+                        &dataset_id,
+                        labello_client::AssignmentAvailabilityRequest { kind },
+                    )
+                    .await
+                    .map_err(|error| error.to_string());
+                UiMessage::AssignmentAvailabilityLoaded { request, result }
+            }),
             UiCommand::SaveKeybindings {
                 request,
                 dataset_id,
@@ -1759,6 +1826,63 @@ impl LabelloApp {
         }
     }
 
+    pub(crate) fn refresh_assignment_availability_if_due(&mut self) {
+        if self.availability.loading {
+            return;
+        }
+        let Some(kind) = self.assignment_kind() else {
+            return;
+        };
+        let context_changed = self.availability.dataset_id.as_ref()
+            != Some(&self.config.dataset_id)
+            || self.availability.kind.as_ref() != Some(&kind);
+        let due = context_changed
+            || if self.availability.checked_at.is_some() {
+                self.assignment_availability_cache_age()
+                    .is_none_or(|age| age >= ASSIGNMENT_AVAILABILITY_CACHE_TTL)
+            } else {
+                self.availability
+                    .last_attempt
+                    .is_none_or(|last| last.elapsed() >= ASSIGNMENT_AVAILABILITY_CACHE_TTL)
+            };
+        if due {
+            self.request_assignment_availability();
+        }
+    }
+
+    pub(crate) fn request_assignment_availability(&mut self) {
+        let Some(kind) = self.assignment_kind() else {
+            return;
+        };
+        if self.runtime.api.is_none() {
+            return;
+        }
+        if self.availability.loading {
+            self.availability.refresh_after_load = true;
+            self.availability.last_attempt = None;
+            return;
+        }
+        let dataset_id = self.config.dataset_id.clone();
+        if self.availability.dataset_id.as_ref() != Some(&dataset_id)
+            || self.availability.kind.as_ref() != Some(&kind)
+        {
+            self.availability.tasks.clear();
+            self.availability.resolved = false;
+            self.availability.checked_at = None;
+            self.availability.error = None;
+        }
+        self.availability.dataset_id = Some(dataset_id.clone());
+        self.availability.kind = Some(kind.clone());
+        self.availability.loading = true;
+        self.availability.last_attempt = Some(Instant::now());
+        let request = self.request_identity(Some(dataset_id.clone()));
+        self.queue_command(UiCommand::AssignmentAvailability {
+            request,
+            dataset_id,
+            kind,
+        });
+    }
+
     pub(crate) fn refresh_ingest_if_due(&mut self) {
         if !self.loading.ingesting || self.loading.ingest_polling {
             return;
@@ -1783,6 +1907,9 @@ impl LabelloApp {
 
     pub(crate) fn queue_command(&mut self, command: UiCommand) -> bool {
         if self.runtime.commands.len() < 64 {
+            if command.invalidates_assignment_availability() {
+                self.availability.checked_at = None;
+            }
             let request_id = command
                 .import_request()
                 .map(|request| request.request_id)
@@ -1902,6 +2029,13 @@ impl LabelloApp {
                 self.loading.stats = false;
                 self.datasets.active_stats_request = None;
                 self.datasets.stats_error = Some(error.to_string());
+            }
+            UiCommand::AssignmentAvailability { .. } => {
+                self.availability.loading = false;
+                self.availability.tasks.clear();
+                self.availability.resolved = false;
+                self.availability.checked_at = None;
+                self.availability.error = Some(error.to_string());
             }
             UiCommand::SaveKeybindings { .. } => {
                 self.loading.keybindings = false;
@@ -2059,6 +2193,7 @@ impl LabelloApp {
         self.loading.uploading = false;
         self.loading.upload_progress = None;
         self.loading.stats = false;
+        self.availability.loading = false;
         self.loading.keybindings = false;
         self.loading.images = false;
         self.loading.snapshots = false;
@@ -2079,6 +2214,7 @@ impl LabelloApp {
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.workspace_epoch = self.workspace_epoch.wrapping_add(1);
         self.invalidate_async_ownership();
+        self.availability = Default::default();
         self.datasets.requested_view = None;
         self.runtime.persistence.restoration_attempted = false;
     }
@@ -2086,6 +2222,7 @@ impl LabelloApp {
     pub(crate) fn begin_workspace_epoch(&mut self) {
         self.workspace_epoch = self.workspace_epoch.wrapping_add(1);
         self.invalidate_async_ownership();
+        self.availability = Default::default();
     }
 
     pub(crate) fn request_dataset_list(&mut self) {
@@ -2487,6 +2624,7 @@ impl LabelloApp {
         } else {
             self.view = requested;
             if self.work_view() && self.selected_task().is_some() {
+                self.restore_cached_assignment_availability();
                 self.request_next_image();
             } else if self.view == AppView::Stats {
                 self.request_stats();

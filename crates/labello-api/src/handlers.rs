@@ -168,6 +168,10 @@ pub fn router(state: ApiState) -> Router {
             "/datasets/{dataset_id}/images/next",
             post(workflow::assign_next),
         )
+        .route(
+            "/datasets/{dataset_id}/assignments/availability",
+            get(workflow::assignment_availability),
+        )
         .route("/datasets/{dataset_id}/images", get(list_images))
         .route(
             "/datasets/{dataset_id}/assignments/release",

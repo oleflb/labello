@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use url::Url;
 
 const STATS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const ASSIGNMENT_AVAILABILITY_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const UPLOAD_OFFSET_HEADER: &str = "upload-offset";
@@ -712,6 +714,25 @@ impl TaskApi for HttpLabelloApi {
 }
 
 impl ImageApi for HttpLabelloApi {
+    fn assignment_availability<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: crate::AssignmentAvailabilityRequest,
+    ) -> crate::ApiFuture<'a, crate::AssignmentAvailability> {
+        Box::pin(async move {
+            let response = self
+                .request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/assignments/availability"),
+                )?
+                .query(&request)
+                .timeout(ASSIGNMENT_AVAILABILITY_REQUEST_TIMEOUT)
+                .send()
+                .await?;
+            Self::json(response).await
+        })
+    }
+
     fn list_images<'a>(
         &'a self,
         dataset_id: &'a DatasetId,
