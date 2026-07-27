@@ -6,11 +6,11 @@ use axum::{
     response::IntoResponse,
 };
 use labello_client::{
-    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, ConfirmMigrationRequest,
-    CorrectionRequest, ExcludeMigrationTargetRequest, KeepMigrationTargetRequest,
-    ManualMigrationCommandResult, OfflineBundleRequest, PrelabelSuggestionRequest,
-    ReopenMigrationTargetRequest, ReviewMigrationRequest, SaveMigrationSkeletonRequest,
-    StartMigrationPassRequest,
+    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, AssignmentAvailability,
+    AssignmentAvailabilityRequest, ConfirmMigrationRequest, CorrectionRequest,
+    ExcludeMigrationTargetRequest, KeepMigrationTargetRequest, ManualMigrationCommandResult,
+    OfflineBundleRequest, PrelabelSuggestionRequest, ReopenMigrationTargetRequest,
+    ReviewMigrationRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
 };
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType, Assignment,
@@ -40,6 +40,23 @@ pub(crate) struct PreviewQuery {
 
 fn default_preview_max() -> u32 {
     1600
+}
+
+pub(crate) async fn assignment_availability(
+    State(state): State<ApiState>,
+    Path(dataset_id): Path<DatasetId>,
+    headers: HeaderMap,
+    Query(request): Query<AssignmentAvailabilityRequest>,
+) -> ApiResult<Json<AssignmentAvailability>> {
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let tasks = repo
+        .assignment_availability(&actor.user_id, request.kind.clone())
+        .await?;
+    Ok(Json(AssignmentAvailability {
+        kind: request.kind,
+        tasks,
+    }))
 }
 
 pub(crate) async fn assign_next(

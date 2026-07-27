@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 
 use eframe::egui;
 use labello_client::{
-    AuthOptions, CancelImportResult, CommitImportResult, CorrectionRequest, CreateImportRequest,
-    DatasetSummary, DatasetUser, ImageExplorerQuery, ImportCapabilities, ImportJob, ImportPlan,
-    IngestJob, SessionInfo, SnapshotFile, UpdateImportPlanRequest,
+    AssignmentAvailability, AuthOptions, CancelImportResult, CommitImportResult, CorrectionRequest,
+    CreateImportRequest, DatasetSummary, DatasetUser, ImageExplorerQuery, ImportCapabilities,
+    ImportJob, ImportPlan, IngestJob, SessionInfo, SnapshotFile, UpdateImportPlanRequest,
 };
 use labello_domain::{
     AdjudicationRecord, AnnotationId, Assignment, AssignmentId, AssignmentKind, DatasetId,
@@ -321,6 +321,10 @@ pub(crate) enum UiMessage {
         request: RequestIdentity,
         result: Result<DatasetStats, String>,
     },
+    AssignmentAvailabilityLoaded {
+        request: RequestIdentity,
+        result: Result<AssignmentAvailability, String>,
+    },
     KeybindingsSaved {
         request: RequestIdentity,
         result: Result<KeybindingSet, String>,
@@ -495,6 +499,11 @@ pub(crate) enum UiCommand {
         request: RequestIdentity,
         dataset_id: DatasetId,
     },
+    AssignmentAvailability {
+        request: RequestIdentity,
+        dataset_id: DatasetId,
+        kind: AssignmentKind,
+    },
     SaveKeybindings {
         request: RequestIdentity,
         dataset_id: DatasetId,
@@ -613,6 +622,7 @@ impl UiCommand {
             | Self::Ingest { request, .. }
             | Self::PollIngest { request, .. }
             | Self::Stats { request, .. }
+            | Self::AssignmentAvailability { request, .. }
             | Self::SaveKeybindings { request, .. }
             | Self::ClaimAssignment { request, .. }
             | Self::PrefetchAssignment { request, .. }
@@ -708,6 +718,7 @@ impl UiMessage {
             | Self::AdjudicationFinished { request, .. }
             | Self::IngestJobLoaded { request, .. }
             | Self::StatsLoaded { request, .. }
+            | Self::AssignmentAvailabilityLoaded { request, .. }
             | Self::KeybindingsSaved { request, .. }
             | Self::MigrationFinished { request, .. }
             | Self::RequestFailed { request, .. } => Some(request),

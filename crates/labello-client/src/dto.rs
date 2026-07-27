@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AssignmentId, AssignmentKind, ClassId, CorrectionId,
     DatasetId, DatasetRole, DatasetRoleAssignment, EventLogEntry, EventPayload, ImageId,
@@ -95,6 +97,19 @@ pub struct AssignNextRequest {
     pub assignment_id: Option<AssignmentId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_image_ids: Vec<ImageId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentAvailabilityRequest {
+    pub kind: AssignmentKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentAvailability {
+    pub kind: AssignmentKind,
+    pub tasks: BTreeMap<TaskId, bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

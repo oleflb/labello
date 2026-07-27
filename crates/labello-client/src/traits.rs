@@ -9,10 +9,11 @@ use labello_domain::{
 
 use crate::{
     AnnotationBatchRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
-    AuthOptions, ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest,
-    DatasetSummary, DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob,
-    IngestReport, OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest,
-    PrelabelSuggestionRequest, SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
+    AssignmentAvailability, AssignmentAvailabilityRequest, AuthOptions, ClientError, ClientResult,
+    CorrectionRequest, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery,
+    ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
+    OfflineBundleRequest, PrelabelSuggestionRequest, SessionInfo, SetDatasetRolesRequest,
+    UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;
@@ -221,6 +222,12 @@ pub trait TaskApi {
 }
 
 pub trait ImageApi {
+    fn assignment_availability<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: AssignmentAvailabilityRequest,
+    ) -> ApiFuture<'a, AssignmentAvailability>;
+
     fn list_images<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

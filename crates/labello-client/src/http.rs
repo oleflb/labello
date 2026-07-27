@@ -712,6 +712,24 @@ impl TaskApi for HttpLabelloApi {
 }
 
 impl ImageApi for HttpLabelloApi {
+    fn assignment_availability<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        request: crate::AssignmentAvailabilityRequest,
+    ) -> crate::ApiFuture<'a, crate::AssignmentAvailability> {
+        Box::pin(async move {
+            let response = self
+                .request(
+                    Method::GET,
+                    &format!("/datasets/{dataset_id}/assignments/availability"),
+                )?
+                .query(&request)
+                .send()
+                .await?;
+            Self::json(response).await
+        })
+    }
+
     fn list_images<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

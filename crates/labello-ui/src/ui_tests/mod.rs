@@ -2825,6 +2825,127 @@ fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
 }
 
 #[test]
+fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failures() {
+    let api = Rc::new(SpyApi::new());
+    api.set_workflow_availability("bounding_box:vehicle", false);
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| {
+        app.workflow_availability(&TaskId::from("bounding_box:vehicle")) == Some(false)
+    });
+
+    let vehicle = harness
+        .query_all_by_label_contains("Vehicle boxes")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap();
+    assert!(vehicle.accesskit_node().is_disabled());
+    assert!(
+        harness
+            .query_by_label_contains("No assignments available")
+            .is_some()
+    );
+
+    let mut skeleton = harness.state().tasks[0].clone();
+    skeleton.task_id = TaskId::from("skeleton:person");
+    skeleton.name = "Person skeleton".to_string();
+    skeleton.annotation_type = AnnotationType::Skeleton;
+    skeleton.skeleton = Some(SkeletonSpec {
+        keypoints: vec![KeypointSpec {
+            name: "head".to_string(),
+            required: true,
+        }],
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: true,
+    });
+    harness.state_mut().tasks.push(skeleton);
+    harness
+        .state_mut()
+        .availability
+        .tasks
+        .insert(TaskId::from("skeleton:person"), true);
+    harness
+        .state_mut()
+        .trigger_user_action(labello_domain::UserAction::SelectNextWorkflow);
+    assert!(matches!(
+        harness.state().pending_transition,
+        Some(crate::app::PendingTransition::Workflow(ref task_id))
+            if task_id == &TaskId::from("skeleton:person")
+    ));
+
+    harness.state_mut().pending_transition = None;
+    api.fail_next_availability();
+    harness.state_mut().availability.last_attempt = None;
+    harness.state_mut().request_assignment_availability();
+    step_until(&mut harness, 8, |app| app.availability.error.is_some());
+    assert!(
+        !harness
+            .query_all_by_label_contains("Vehicle boxes")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap()
+            .accesskit_node()
+            .is_disabled(),
+        "failed availability remains advisory"
+    );
+    click_accesskit_button(&mut harness, "Retry availability");
+    step_until(&mut harness, 8, |app| {
+        !app.availability.loading && app.availability.error.is_none()
+    });
+    assert!(api.counts().assignment_availability >= 3);
+}
+
+#[test]
+fn stale_availability_is_discarded_after_refresh_and_dataset_switch() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api);
+    app.view = AppView::Annotate;
+    app.request_assignment_availability();
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected availability request");
+    };
+
+    app.request_assignment_availability();
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), false)]),
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert_eq!(
+        app.workflow_availability(&TaskId::from("bounding_box:person")),
+        None,
+        "a result superseded by a transition refresh must remain advisory"
+    );
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.pop_back().unwrap()
+    else {
+        panic!("expected replacement availability request");
+    };
+
+    app.begin_workspace_epoch();
+    app.config.dataset_id = DatasetId::from("other");
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), false)]),
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.availability.tasks.is_empty());
+    assert_eq!(app.availability.dataset_id, None);
+}
+
+#[test]
 fn missing_workflow_is_actionable() {
     let api = Rc::new(SpyApi::new());
     api.clear_workflows();

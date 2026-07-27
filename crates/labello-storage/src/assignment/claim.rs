@@ -3,6 +3,32 @@ use super::review::{has_task_review_by_user, task_approval_count};
 use super::*;
 
 impl DatasetRepository {
+    pub async fn assignment_availability(
+        &self,
+        user_id: &UserId,
+        kind: AssignmentKind,
+    ) -> StorageResult<std::collections::BTreeMap<TaskId, bool>> {
+        let metadata = self.load_dataset().await?;
+        require_role(
+            &metadata.role_assignments,
+            &metadata.dataset_id,
+            user_id,
+            role_for_kind(&kind),
+        )?;
+
+        let mut availability = std::collections::BTreeMap::new();
+        for task in &metadata.tasks {
+            let available = if self.task_accepts_assignment(&metadata, task, &kind).await? {
+                self.task_has_available_image(user_id, task, &kind, &metadata)
+                    .await?
+            } else {
+                false
+            };
+            availability.insert(task.task_id.clone(), available);
+        }
+        Ok(availability)
+    }
+
     /// Return an exact still-active assignment without renewing it. Browser
     /// restoration uses this before loading image state so the validation base
     /// sequence is not changed by the reclaim itself.
@@ -14,11 +40,7 @@ impl DatasetRepository {
         kind: AssignmentKind,
     ) -> StorageResult<Option<Assignment>> {
         let metadata = self.load_dataset().await?;
-        let required_role = match kind {
-            AssignmentKind::Annotation => DatasetRole::Annotator,
-            AssignmentKind::Review => DatasetRole::Reviewer,
-            AssignmentKind::Adjudication => DatasetRole::Adjudicator,
-        };
+        let required_role = role_for_kind(&kind);
         require_role(
             &metadata.role_assignments,
             &metadata.dataset_id,
@@ -100,28 +122,7 @@ impl DatasetRepository {
         let task = metadata
             .task(task_id)
             .ok_or_else(|| StorageError::Unauthorized(format!("task {task_id} does not exist")))?;
-        if !task.enabled {
-            return Ok(None);
-        }
-        if task.review.workflow == ReviewWorkflow::IndependentAgreement {
-            return Err(StorageError::InvalidAssignment(format!(
-                "independent agreement workflow is not implemented for task {task_id}"
-            )));
-        }
-        if task.class_ids.len() != 1 {
-            return Err(StorageError::InvalidAssignment(format!(
-                "enabled task {task_id} must have exactly one class"
-            )));
-        }
-        if kind == AssignmentKind::Review && task.review.workflow == ReviewWorkflow::None {
-            return Ok(None);
-        }
-        if metadata
-            .imbalance
-            .as_ref()
-            .is_some_and(|config| config.enforce)
-            && self.task_is_overrepresented(task_id).await?
-        {
+        if !self.task_accepts_assignment(&metadata, task, &kind).await? {
             return Ok(None);
         }
 
@@ -138,30 +139,14 @@ impl DatasetRepository {
                 role: required_role.clone(),
             };
             let mut payloads = expired_assignment_payloads(&state.assignments, task_id, &kind, now);
-            let mut status = state
-                .task_states
-                .get(task_id)
-                .map(|state| state.status.clone())
-                .unwrap_or(TaskStatus::Pending);
-            if kind == AssignmentKind::Annotation && !state.assignment_eligible(task_id) {
-                if !payloads.is_empty() {
-                    self.append_payloads_unlocked(image_id, &actor, payloads)
-                        .await?;
-                }
-                continue;
-            }
+            let status = effective_assignment_status(&state, task_id, &kind, now);
             if kind == AssignmentKind::Annotation
-                && status == TaskStatus::InProgress
-                && payloads.iter().any(|payload| {
-                    matches!(
-                        payload,
-                        EventPayload::AssignmentUpdated { assignment }
-                            if assignment.kind == AssignmentKind::Annotation
-                    )
-                })
-                && !has_active_unexpired_assignment(&state.assignments, task_id, &kind, now)
+                && status == TaskStatus::Pending
+                && state
+                    .task_states
+                    .get(task_id)
+                    .is_some_and(|state| state.status == TaskStatus::InProgress)
             {
-                status = TaskStatus::Pending;
                 payloads.push(EventPayload::TaskStateChanged {
                     task_state: TaskState {
                         task_id: task_id.clone(),
@@ -174,24 +159,15 @@ impl DatasetRepository {
                     },
                 });
             }
-            if kind == AssignmentKind::Review {
-                let already_final = if task.manual_box_guide_migration.is_some() {
-                    let events = self.load_events(image_id).await?;
-                    has_migration_final_review_by_user(&events, task_id, user_id)
-                        || migration_final_approval_count(&events, task_id)
-                            >= task.review.required_reviews
-                } else {
-                    let reviews = self.current_task_reviews(image_id, task_id).await?;
-                    has_task_review_by_user(&reviews, task_id, user_id)
-                        || task_approval_count(&reviews, task_id) >= task.review.required_reviews
-                };
-                if already_final {
-                    if !payloads.is_empty() {
-                        self.append_payloads_unlocked(image_id, &actor, payloads)
-                            .await?;
-                    }
-                    continue;
+            if !self
+                .image_accepts_assignment(image_id, &state, task, user_id, &kind, &status, now)
+                .await?
+            {
+                if !payloads.is_empty() {
+                    self.append_payloads_unlocked(image_id, &actor, payloads)
+                        .await?;
                 }
+                continue;
             }
             if let Some(assignment) =
                 active_assignment_for_user(&state.assignments, task_id, user_id, &kind, now)
@@ -204,20 +180,6 @@ impl DatasetRepository {
                 self.append_payloads_unlocked(image_id, &actor, payloads)
                     .await?;
                 return Ok(Some(assignment));
-            }
-            if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind, now) {
-                if !payloads.is_empty() {
-                    self.append_payloads_unlocked(image_id, &actor, payloads)
-                        .await?;
-                }
-                continue;
-            }
-            if !status_matches_kind(&status, &kind) {
-                if !payloads.is_empty() {
-                    self.append_payloads_unlocked(image_id, &actor, payloads)
-                        .await?;
-                }
-                continue;
             }
             let assignment = Assignment {
                 assignment_id: AssignmentId::generate(),
@@ -252,6 +214,103 @@ impl DatasetRepository {
         Ok(None)
     }
 
+    async fn task_has_available_image(
+        &self,
+        user_id: &UserId,
+        task: &TaskDefinition,
+        kind: &AssignmentKind,
+        metadata: &DatasetMetadata,
+    ) -> StorageResult<bool> {
+        for image_id in metadata.images.keys() {
+            let lock = self.image_lock(image_id);
+            let _guard = lock.lock().await;
+            let state = self.load_image_state(image_id).await?;
+            let now = labello_domain::now();
+            let status = effective_assignment_status(&state, &task.task_id, kind, now);
+            if self
+                .image_accepts_assignment(image_id, &state, task, user_id, kind, &status, now)
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn task_accepts_assignment(
+        &self,
+        metadata: &DatasetMetadata,
+        task: &TaskDefinition,
+        kind: &AssignmentKind,
+    ) -> StorageResult<bool> {
+        if !task.enabled {
+            return Ok(false);
+        }
+        if task.review.workflow == ReviewWorkflow::IndependentAgreement {
+            return Err(StorageError::InvalidAssignment(format!(
+                "independent agreement workflow is not implemented for task {}",
+                task.task_id
+            )));
+        }
+        if task.class_ids.len() != 1 {
+            return Err(StorageError::InvalidAssignment(format!(
+                "enabled task {} must have exactly one class",
+                task.task_id
+            )));
+        }
+        if *kind == AssignmentKind::Review && task.review.workflow == ReviewWorkflow::None {
+            return Ok(false);
+        }
+        if metadata
+            .imbalance
+            .as_ref()
+            .is_some_and(|config| config.enforce)
+            && self.task_is_overrepresented(&task.task_id).await?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn image_accepts_assignment(
+        &self,
+        image_id: &ImageId,
+        state: &labello_domain::ImageState,
+        task: &TaskDefinition,
+        user_id: &UserId,
+        kind: &AssignmentKind,
+        status: &TaskStatus,
+        now: labello_domain::Timestamp,
+    ) -> StorageResult<bool> {
+        let task_id = &task.task_id;
+        if *kind == AssignmentKind::Annotation && !state.assignment_eligible(task_id) {
+            return Ok(false);
+        }
+        if *kind == AssignmentKind::Review {
+            let already_final = if task.manual_box_guide_migration.is_some() {
+                let events = self.load_events(image_id).await?;
+                has_migration_final_review_by_user(&events, task_id, user_id)
+                    || migration_final_approval_count(&events, task_id)
+                        >= task.review.required_reviews
+            } else {
+                let reviews = self.current_task_reviews(image_id, task_id).await?;
+                has_task_review_by_user(&reviews, task_id, user_id)
+                    || task_approval_count(&reviews, task_id) >= task.review.required_reviews
+            };
+            if already_final {
+                return Ok(false);
+            }
+        }
+        if active_assignment_for_user(&state.assignments, task_id, user_id, kind, now).is_some() {
+            return Ok(true);
+        }
+        if has_conflicting_assignment(&state.assignments, task_id, user_id, kind, now) {
+            return Ok(false);
+        }
+        Ok(status_matches_kind(status, kind))
+    }
+
     async fn task_is_overrepresented(&self, selected_task_id: &TaskId) -> StorageResult<bool> {
         let metadata = self.load_dataset().await?;
         let Some(config) = metadata.imbalance.as_ref() else {
@@ -281,6 +340,33 @@ impl DatasetRepository {
         } else {
             Ok((selected as f32 / min_other as f32) > config.max_ratio)
         }
+    }
+}
+
+fn effective_assignment_status(
+    state: &labello_domain::ImageState,
+    task_id: &TaskId,
+    kind: &AssignmentKind,
+    now: labello_domain::Timestamp,
+) -> TaskStatus {
+    let status = state
+        .task_states
+        .get(task_id)
+        .map(|state| state.status.clone())
+        .unwrap_or(TaskStatus::Pending);
+    if *kind == AssignmentKind::Annotation
+        && status == TaskStatus::InProgress
+        && state.assignments.iter().any(|assignment| {
+            assignment.task_id == *task_id
+                && assignment.kind == *kind
+                && assignment.status == AssignmentStatus::Active
+                && assignment_is_expired(assignment, now)
+        })
+        && !has_active_unexpired_assignment(&state.assignments, task_id, kind, now)
+    {
+        TaskStatus::Pending
+    } else {
+        status
     }
 }
 

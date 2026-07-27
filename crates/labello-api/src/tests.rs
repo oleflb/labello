@@ -2012,6 +2012,60 @@ async fn assign_next_honors_exact_reclaim_then_exclusions() {
 }
 
 #[tokio::test]
+async fn assignment_availability_is_batched_authenticated_and_advisory() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "only.png", &png_bytes(2, 2)).await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/assignments/availability?kind=annotation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let stale_available = get_assignment_availability(&app, "admin", "annotation").await;
+    assert_eq!(stale_available["kind"], "annotation");
+    assert_eq!(
+        stale_available["tasks"]["bounding_box:pixel"],
+        serde_json::Value::Bool(true)
+    );
+
+    let competing = claim_assignment(&app, "other_annotator", "annotation").await;
+    assert!(!competing.is_null());
+    assert!(
+        claim_assignment(&app, "admin", "annotation")
+            .await
+            .is_null(),
+        "the claim response remains authoritative when an earlier availability result is stale"
+    );
+    let reserved = get_assignment_availability(&app, "admin", "annotation").await;
+    assert_eq!(
+        reserved["tasks"]["bounding_box:pixel"],
+        serde_json::Value::Bool(false)
+    );
+
+    assert_eq!(
+        post_assignment_action(&app, "other_annotator", "release", &competing)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let released = get_assignment_availability(&app, "admin", "annotation").await;
+    assert_eq!(
+        released["tasks"]["bounding_box:pixel"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[tokio::test]
 async fn assign_next_rejects_invalid_ids_and_too_many_exclusions() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));
@@ -3570,6 +3624,26 @@ async fn get_test_stats(app: &axum::Router) -> serde_json::Value {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+async fn get_assignment_availability(
+    app: &axum::Router,
+    user_id: &str,
+    kind: &str,
+) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/datasets/ds/assignments/availability?kind={kind}"))
+                .header("x-test-user-id", user_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
 async fn post_assignment_action(

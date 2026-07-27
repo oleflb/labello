@@ -1,8 +1,9 @@
 use labello_domain::{
     Actor, AnnotationGeometry, AnnotationId, Assignment, AssignmentId, AssignmentKind,
-    AssignmentStatus, CorrectionId, DatasetRole, EventLogEntry, EventPayload, ImageId,
-    ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow, ReviewerCorrectionRecord,
-    RevisionSource, TaskId, TaskOutcome, TaskState, TaskStatus, UserId, require_role,
+    AssignmentStatus, CorrectionId, DatasetMetadata, DatasetRole, EventLogEntry, EventPayload,
+    ImageId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow,
+    ReviewerCorrectionRecord, RevisionSource, TaskDefinition, TaskId, TaskOutcome, TaskState,
+    TaskStatus, UserId, require_role,
 };
 
 use crate::{DatasetRepository, StorageError, StorageResult};

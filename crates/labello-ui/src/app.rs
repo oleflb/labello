@@ -190,6 +190,17 @@ pub(crate) struct LoadingState {
     pub snapshot_file: Option<(String, String)>,
 }
 
+#[derive(Default)]
+pub(crate) struct AssignmentAvailabilityState {
+    pub(crate) dataset_id: Option<DatasetId>,
+    pub(crate) kind: Option<AssignmentKind>,
+    pub(crate) tasks: std::collections::BTreeMap<TaskId, bool>,
+    pub(crate) loading: bool,
+    pub(crate) refresh_after_load: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) last_attempt: Option<Instant>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AdminSection {
     #[default]
@@ -360,6 +371,7 @@ pub struct WorkState {
     pub(crate) one_shot_excluded_image_id: Option<ImageId>,
     pub(crate) next_demo_image_index: usize,
     pub(crate) migration: ManualMigrationState,
+    pub(crate) availability: AssignmentAvailabilityState,
 }
 
 #[derive(Default)]
@@ -530,6 +542,7 @@ impl LabelloApp {
             one_shot_excluded_image_id: None,
             next_demo_image_index: config.queue_size.clamp(1, IMAGE_QUEUE_SIZE) + 2,
             migration: ManualMigrationState::default(),
+            availability: AssignmentAvailabilityState::default(),
         };
         Self {
             runtime: RuntimeState::new(),
@@ -736,6 +749,15 @@ impl LabelloApp {
             AppView::Adjudicate => Some(AssignmentKind::Adjudication),
             AppView::Setup | AppView::Admin | AppView::Stats => None,
         }
+    }
+
+    pub(crate) fn workflow_availability(&self, task_id: &TaskId) -> Option<bool> {
+        let kind = self.assignment_kind()?;
+        (self.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+            && self.availability.kind.as_ref() == Some(&kind)
+            && self.availability.error.is_none())
+        .then(|| self.availability.tasks.get(task_id).copied())
+        .flatten()
     }
 
     pub(crate) fn work_view(&self) -> bool {
@@ -1654,8 +1676,14 @@ impl LabelloApp {
             .iter()
             .position(|choice| Some(&choice.task_id) == self.selected_task_id.as_ref())
             .unwrap_or(0);
-        let next = (current as isize + direction).rem_euclid(choices.len() as isize) as usize;
-        self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
+        for offset in 1..choices.len() {
+            let next = (current as isize + direction * offset as isize)
+                .rem_euclid(choices.len() as isize) as usize;
+            if self.workflow_availability(&choices[next].task_id) != Some(false) {
+                self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
+                return;
+            }
+        }
     }
 
     fn cycle_object(&mut self, direction: isize) {
@@ -2024,6 +2052,7 @@ impl eframe::App for LabelloApp {
         self.start_next_persistence_command();
         self.start_setup_load();
         self.refresh_stats_if_due();
+        self.refresh_assignment_availability_if_due();
         self.refresh_ingest_if_due();
         self.refresh_import_if_due();
         self.autosave_if_due();
@@ -2134,6 +2163,14 @@ impl eframe::App for LabelloApp {
                 .last_stats_attempt
                 .map(|attempt| std::time::Duration::from_secs(3).saturating_sub(attempt.elapsed()))
                 .unwrap_or(std::time::Duration::from_secs(3));
+            ui.ctx().request_repaint_after(until_refresh);
+        }
+        if self.work_view() && self.runtime.api.is_some() && !self.availability.loading {
+            let until_refresh = self
+                .availability
+                .last_attempt
+                .map(|attempt| std::time::Duration::from_secs(10).saturating_sub(attempt.elapsed()))
+                .unwrap_or_default();
             ui.ctx().request_repaint_after(until_refresh);
         }
     }

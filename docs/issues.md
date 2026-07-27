@@ -16,7 +16,7 @@ Only after that continue with the next issue.
 
 # Feedback Issues
 
-- [ ] Show assignment availability in the workflow selector.
+- [x] Show assignment availability in the workflow selector.
   - Add one authenticated batch endpoint for the current assignment kind; do not issue one request per workflow or infer availability from dataset statistics.
   - Reuse the claim path's task, image-state, reservation, review, adjudication, migration, and imbalance eligibility rules so availability does not drift from actual assignment claims.
   - Load availability when a workspace opens or its assignment kind changes, refresh it after claim/release/complete/reopen transitions, and poll lightly so assignments released by other users become selectable.

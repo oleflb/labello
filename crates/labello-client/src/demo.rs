@@ -395,6 +395,19 @@ impl TaskApi for DemoLabelloApi {
 }
 
 impl ImageApi for DemoLabelloApi {
+    fn assignment_availability<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        request: crate::AssignmentAvailabilityRequest,
+    ) -> crate::ApiFuture<'a, crate::AssignmentAvailability> {
+        Box::pin(async move {
+            Ok(crate::AssignmentAvailability {
+                kind: request.kind,
+                tasks: std::collections::BTreeMap::new(),
+            })
+        })
+    }
+
     fn assign_next_image<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,
