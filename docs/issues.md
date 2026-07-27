@@ -26,7 +26,7 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
-- [ ] Refactor the codebase around explicit ownership boundaries after the import and migration behavior is stable.
+- [ ] LOCKED Refactor the codebase around explicit ownership boundaries after the import and migration behavior is stable.
   - Objective:
     - Perform a behavior-preserving structural refactor focused on maintainability, reviewability, and code quality rather than new product behavior.
     - Keep the existing crate graph. The dependency direction is sound; the main problem is mixed responsibility and duplicated policy inside individual crates.
