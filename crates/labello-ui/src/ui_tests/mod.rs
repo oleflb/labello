@@ -1108,6 +1108,64 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn preflight_diagnostics_are_an_accessible_responsive_disclosure() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    for (size, disclosure_label, acknowledged_label) in [
+        (
+            egui::vec2(1180.0, 1600.0),
+            "Diagnostics — 1 warning · 6 affected · 1 acknowledgement required",
+            "Diagnostics — 1 warning · 6 affected",
+        ),
+        (
+            egui::vec2(390.0, 1600.0),
+            "Diagnostics (1 warning) · action required",
+            "Diagnostics (1 warning)",
+        ),
+    ] {
+        let mut harness = Harness::builder().with_size(size).build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::ImportPreflight, &ctx.egui_ctx)
+        });
+        harness.step();
+
+        let disclosure =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, disclosure_label);
+        assert_eq!(disclosure.accesskit_node().data().is_expanded(), Some(true));
+        let acknowledgement = harness.get_by_role_and_label(
+            egui::accesskit::Role::CheckBox,
+            "Acknowledge geometry_clipped",
+        );
+        acknowledgement.click_accesskit();
+        harness.step();
+        harness.step();
+        assert!(
+            harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, acknowledged_label)
+                .is_some()
+        );
+
+        let disclosure =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, acknowledged_label);
+        disclosure.click_accesskit();
+        harness.step();
+
+        let collapsed =
+            harness.get_by_role_and_label(egui::accesskit::Role::Button, acknowledged_label);
+        assert_eq!(collapsed.accesskit_node().data().is_expanded(), Some(false));
+        assert!(
+            harness
+                .query_by_role_and_label(
+                    egui::accesskit::Role::CheckBox,
+                    "Acknowledge geometry_clipped",
+                )
+                .is_none()
+        );
+        assert_visible_controls_clamped(&harness, size.x, size.y);
+    }
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn import_progress_overview_exposes_stage_and_activity_status() {
     use crate::inspector_presets::{self, InspectorPreset};
 

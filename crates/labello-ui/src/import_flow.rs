@@ -1445,71 +1445,7 @@ impl LabelloApp {
                 ),
             );
             ui.separator();
-            ui.label(RichText::new("Diagnostics").strong());
-            if report.diagnostics.is_empty() {
-                theme::inline_message(ui, theme::Intent::Success, "No diagnostics reported.");
-            }
-            for diagnostic in report.diagnostics {
-                let intent = match diagnostic.severity {
-                    ImportDiagnosticSeverity::Error => theme::Intent::Error,
-                    ImportDiagnosticSeverity::WarningRequiresAck
-                    | ImportDiagnosticSeverity::Warning => theme::Intent::Warning,
-                    ImportDiagnosticSeverity::Info | ImportDiagnosticSeverity::Unknown => {
-                        theme::Intent::Info
-                    }
-                };
-                theme::inline_message(
-                    ui,
-                    intent,
-                    format!(
-                        "{} diagnostic {}: {} ({} affected)",
-                        diagnostic_severity_label(diagnostic.severity),
-                        diagnostic.code,
-                        diagnostic.safe_summary,
-                        diagnostic.count
-                    ),
-                );
-                if diagnostic.impact.requires_acknowledgement {
-                    let mut acknowledged =
-                        self.import_flow.acknowledgements.contains(&diagnostic.code);
-                    if ui
-                        .checkbox(
-                            &mut acknowledged,
-                            format!("Acknowledge {}", diagnostic.code),
-                        )
-                        .changed()
-                    {
-                        if acknowledged {
-                            self.import_flow
-                                .acknowledgements
-                                .insert(diagnostic.code.clone());
-                        } else {
-                            self.import_flow.acknowledgements.remove(&diagnostic.code);
-                        }
-                    }
-                }
-            }
-            if !self.import_flow.diagnostics.is_empty() {
-                ui.label(RichText::new("Diagnostic details").strong());
-                for diagnostic in &self.import_flow.diagnostics {
-                    ui.label(format!(
-                        "{} diagnostic {}: {}",
-                        diagnostic_severity_label(diagnostic.severity),
-                        diagnostic.code,
-                        diagnostic.safe_summary
-                    ));
-                }
-            }
-            if self.import_flow.diagnostics_cursor.is_some()
-                && ui
-                    .add_enabled(
-                        !self.import_flow.busy,
-                        egui::Button::new("Load more diagnostics"),
-                    )
-                    .clicked()
-            {
-                self.request_import_diagnostics(false);
-            }
+            self.import_diagnostics_disclosure(ui, &report.diagnostics);
         } else {
             ui.small("Deterministic preflight checks are in progress.");
         }
@@ -1562,6 +1498,98 @@ impl LabelloApp {
         {
             self.request_cancel_import();
         }
+    }
+
+    fn import_diagnostics_disclosure(
+        &mut self,
+        ui: &mut egui::Ui,
+        diagnostics: &[labello_client::ImportDiagnosticSummary],
+    ) {
+        let overview = ImportDiagnosticOverview::from_diagnostics(
+            diagnostics,
+            &self.import_flow.acknowledgements,
+        );
+        let compact = ui.available_width() < 480.0;
+        let label = overview.disclosure_label(compact);
+        let color = overview.color();
+
+        let disclosure = egui::CollapsingHeader::new(RichText::new(label).strong().color(color))
+            .id_salt("import-preflight-diagnostics")
+            .default_open(true)
+            .show_background(true)
+            .show(ui, |ui| {
+                if diagnostics.is_empty() {
+                    theme::inline_message(ui, theme::Intent::Success, "No diagnostics reported.");
+                }
+                for diagnostic in diagnostics {
+                    let intent = match diagnostic.severity {
+                        ImportDiagnosticSeverity::Error => theme::Intent::Error,
+                        ImportDiagnosticSeverity::WarningRequiresAck
+                        | ImportDiagnosticSeverity::Warning => theme::Intent::Warning,
+                        ImportDiagnosticSeverity::Info | ImportDiagnosticSeverity::Unknown => {
+                            theme::Intent::Info
+                        }
+                    };
+                    theme::inline_message(
+                        ui,
+                        intent,
+                        format!(
+                            "{} diagnostic {}: {} ({} affected)",
+                            diagnostic_severity_label(diagnostic.severity),
+                            diagnostic.code,
+                            diagnostic.safe_summary,
+                            diagnostic.count
+                        ),
+                    );
+                    if diagnostic.impact.requires_acknowledgement {
+                        let mut acknowledged =
+                            self.import_flow.acknowledgements.contains(&diagnostic.code);
+                        if ui
+                            .checkbox(
+                                &mut acknowledged,
+                                format!("Acknowledge {}", diagnostic.code),
+                            )
+                            .changed()
+                        {
+                            if acknowledged {
+                                self.import_flow
+                                    .acknowledgements
+                                    .insert(diagnostic.code.clone());
+                            } else {
+                                self.import_flow.acknowledgements.remove(&diagnostic.code);
+                            }
+                        }
+                    }
+                }
+                if !self.import_flow.diagnostics.is_empty() {
+                    ui.label(RichText::new("Diagnostic details").strong());
+                    for diagnostic in &self.import_flow.diagnostics {
+                        ui.label(format!(
+                            "{} diagnostic {}: {}",
+                            diagnostic_severity_label(diagnostic.severity),
+                            diagnostic.code,
+                            diagnostic.safe_summary
+                        ));
+                    }
+                }
+                if self.import_flow.diagnostics_cursor.is_some()
+                    && ui
+                        .add_enabled(
+                            !self.import_flow.busy,
+                            egui::Button::new("Load more diagnostics"),
+                        )
+                        .clicked()
+                {
+                    self.request_import_diagnostics(false);
+                }
+            });
+        let expanded =
+            egui::collapsing_header::CollapsingState::load(ui.ctx(), disclosure.header_response.id)
+                .is_some_and(|state| state.is_open());
+        ui.ctx()
+            .accesskit_node_builder(disclosure.header_response.id, |node| {
+                node.set_expanded(expanded);
+            });
     }
 
     fn import_mapping_editor(&mut self, ui: &mut egui::Ui) {
@@ -4294,6 +4322,101 @@ fn lifecycle_label(lifecycle: ImportLifecycle) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct ImportDiagnosticOverview {
+    errors: usize,
+    warnings: usize,
+    information: usize,
+    affected: u64,
+    blocking: usize,
+    unacknowledged: usize,
+}
+
+impl ImportDiagnosticOverview {
+    fn from_diagnostics(
+        diagnostics: &[labello_client::ImportDiagnosticSummary],
+        acknowledgements: &std::collections::BTreeSet<String>,
+    ) -> ImportDiagnosticOverview {
+        let mut overview = Self::default();
+        for diagnostic in diagnostics {
+            match diagnostic.severity {
+                ImportDiagnosticSeverity::Error => overview.errors += 1,
+                ImportDiagnosticSeverity::WarningRequiresAck
+                | ImportDiagnosticSeverity::Warning => overview.warnings += 1,
+                ImportDiagnosticSeverity::Info | ImportDiagnosticSeverity::Unknown => {
+                    overview.information += 1;
+                }
+            }
+            overview.affected = overview.affected.saturating_add(diagnostic.count);
+            overview.blocking += usize::from(diagnostic.impact.blocks_commit);
+            overview.unacknowledged += usize::from(
+                diagnostic.impact.requires_acknowledgement
+                    && !acknowledgements.contains(&diagnostic.code),
+            );
+        }
+        overview
+    }
+
+    fn disclosure_label(&self, compact: bool) -> String {
+        let mut severities = Vec::new();
+        if self.errors > 0 {
+            severities.push(counted(self.errors, "error"));
+        }
+        if self.warnings > 0 {
+            severities.push(counted(self.warnings, "warning"));
+        }
+        if self.information > 0 {
+            severities.push(format!("{} info", self.information));
+        }
+        if severities.is_empty() {
+            return "Diagnostics (none)".to_string();
+        }
+
+        if compact {
+            let action = if self.blocking > 0 {
+                " · commit blocked"
+            } else if self.unacknowledged > 0 {
+                " · action required"
+            } else {
+                ""
+            };
+            format!("Diagnostics ({}){action}", severities.join(", "))
+        } else {
+            let mut parts = vec![severities.join(", ")];
+            if self.affected > 0 {
+                parts.push(format!("{} affected", self.affected));
+            }
+            if self.blocking > 0 {
+                parts.push(counted(self.blocking, "blocking diagnostic"));
+            }
+            if self.unacknowledged > 0 {
+                parts.push(format!(
+                    "{} acknowledgement{} required",
+                    self.unacknowledged,
+                    if self.unacknowledged == 1 { "" } else { "s" }
+                ));
+            }
+            format!("Diagnostics — {}", parts.join(" · "))
+        }
+    }
+
+    fn color(&self) -> egui::Color32 {
+        if self.errors > 0 || self.blocking > 0 {
+            theme::DANGER
+        } else if self.warnings > 0 || self.unacknowledged > 0 {
+            theme::WARNING
+        } else if self.information > 0 {
+            theme::INFO
+        } else {
+            theme::SUCCESS
+        }
+    }
+}
+
+fn counted(count: usize, singular: &str) -> String {
+    format!("{count} {singular}{}", if count == 1 { "" } else { "s" })
+}
+
 fn diagnostic_severity_label(severity: ImportDiagnosticSeverity) -> &'static str {
     match severity {
         ImportDiagnosticSeverity::Error => "Error",
@@ -4482,6 +4605,57 @@ mod tests {
         assert_eq!(flow.profile, ImportProfile::UltralyticsYoloDetectV1);
         assert_eq!(flow.descriptors.len(), 1);
         assert_eq!(flow.descriptors[0].kind, ImportDescriptorKind::YoloDataset);
+    }
+
+    #[test]
+    fn diagnostic_overview_keeps_blocking_severity_visible_when_collapsed() {
+        let diagnostics = vec![
+            labello_client::ImportDiagnosticSummary {
+                severity: ImportDiagnosticSeverity::Error,
+                count: 3,
+                impact: labello_client::ImportDiagnosticImpact {
+                    blocks_commit: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            labello_client::ImportDiagnosticSummary {
+                code: "warning".to_string(),
+                severity: ImportDiagnosticSeverity::WarningRequiresAck,
+                count: 2,
+                impact: labello_client::ImportDiagnosticImpact {
+                    requires_acknowledgement: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            labello_client::ImportDiagnosticSummary {
+                severity: ImportDiagnosticSeverity::Info,
+                count: 1,
+                ..Default::default()
+            },
+        ];
+        let overview =
+            ImportDiagnosticOverview::from_diagnostics(&diagnostics, &Default::default());
+
+        assert_eq!(
+            overview.disclosure_label(false),
+            "Diagnostics — 1 error, 1 warning, 1 info · 6 affected · 1 blocking diagnostic · 1 acknowledgement required"
+        );
+        assert_eq!(
+            overview.disclosure_label(true),
+            "Diagnostics (1 error, 1 warning, 1 info) · commit blocked"
+        );
+        assert_eq!(overview.color(), theme::DANGER);
+
+        let acknowledged = std::collections::BTreeSet::from([diagnostics[1].code.clone()]);
+        let acknowledged_overview =
+            ImportDiagnosticOverview::from_diagnostics(&diagnostics, &acknowledged);
+        assert!(
+            !acknowledged_overview
+                .disclosure_label(false)
+                .contains("acknowledgement required")
+        );
     }
 
     #[test]

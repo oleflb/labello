@@ -26,7 +26,7 @@ Only after that continue with the next issue.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
 - [x] Support manual box-guide migration for multiple classes.
   - Replace singular manual-category state with per-category guide/target task pairs across import UI, API, planning, persistence, assignment, review, and statistics, with multi-class lifecycle tests.
-- [ ] Make diagnostics in import preflight stage 3 collapsible.
+- [x] Make diagnostics in import preflight stage 3 collapsible.
   - Group diagnostics in an accessible disclosure that summarizes severity and count, preserves blocking visibility, and works at desktop and mobile widths.
 - [ ] Perform a full deep-dive integration test of every import UI stage and element.
   - Complete a real import using `/home/alex/Projects/hulks/datasets/nao_dataset/labello_nao_data.yaml`.
