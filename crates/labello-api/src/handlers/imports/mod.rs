@@ -3230,6 +3230,101 @@ mod tests {
     }
 
     #[test]
+    fn import_control_persistence_contract_is_stable() {
+        let control = control(client::ImportProfile::CocoInstancesGtV1);
+        assert_eq!(
+            serde_json::to_value(&control).unwrap(),
+            json!({
+                "importId": "imp_test",
+                "ownerUserId": "admin",
+                "createRequest": {
+                    "destinationDatasetId": "imported",
+                    "destinationName": "Imported",
+                    "profile": "coco_instances_gt_v1",
+                    "source": {
+                        "transport": "browser_folder"
+                    },
+                    "attestations": {
+                        "groundTruth": true,
+                        "exhaustive": true,
+                        "coverageScope": [],
+                        "provenance": "fixture"
+                    }
+                },
+                "sealRequest": null,
+                "files": {
+                    "descriptor": {
+                        "clientFileId": null,
+                        "relativePath": "annotations/keypoints.json",
+                        "byteSize": 5,
+                        "blake3": "a".repeat(64),
+                        "acceptedBytes": 5,
+                        "complete": true
+                    },
+                    "image": {
+                        "clientFileId": null,
+                        "relativePath": "images/a.png",
+                        "byteSize": 5,
+                        "blake3": "b".repeat(64),
+                        "acceptedBytes": 5,
+                        "complete": true
+                    },
+                    "instances": {
+                        "clientFileId": null,
+                        "relativePath": "annotations/instances.json",
+                        "byteSize": 5,
+                        "blake3": "c".repeat(64),
+                        "acceptedBytes": 5,
+                        "complete": true
+                    }
+                },
+                "plan": null,
+                "acceptedPlanRequest": null,
+                "pendingPlanRequest": null
+            })
+        );
+        let mut legacy = serde_json::to_value(&control).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("acceptedPlanRequest");
+        object.remove("pendingPlanRequest");
+        let descriptor = object["files"]["descriptor"].as_object_mut().unwrap();
+        descriptor.remove("acceptedBytes");
+        descriptor.remove("complete");
+        let restored: JobControl = serde_json::from_value(legacy).unwrap();
+        assert!(restored.accepted_plan_request.is_none());
+        assert!(restored.pending_plan_request.is_none());
+        assert_eq!(restored.files["descriptor"].accepted_bytes, 0);
+        assert!(!restored.files["descriptor"].complete);
+
+        let pending = IdempotencyRecord::Pending {
+            operation: "create".to_string(),
+            request_hash: "request-hash".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(pending).unwrap(),
+            json!({
+                "status": "pending",
+                "operation": "create",
+                "request_hash": "request-hash"
+            })
+        );
+        let complete = IdempotencyRecord::Complete {
+            operation: "create".to_string(),
+            request_hash: "request-hash".to_string(),
+            response: json!({"importId": "imp_test"}),
+        };
+        assert_eq!(
+            serde_json::to_value(complete).unwrap(),
+            json!({
+                "status": "complete",
+                "operation": "create",
+                "request_hash": "request-hash",
+                "response": {"importId": "imp_test"}
+            })
+        );
+    }
+
+    #[test]
     fn coco_selection_preserves_identity_and_rejects_unsupported_inputs() {
         let job = job(storage::ImportProfile::CocoKeypointsGtV1);
         let control = control(client::ImportProfile::CocoKeypointsGtV1);

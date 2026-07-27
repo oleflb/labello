@@ -68,6 +68,7 @@ Only after that continue with the next issue.
     - Stop when the audited ownership leaks and collision hotspots are resolved. Do not split all modules to an arbitrary line limit or continue reorganizing stable, cohesive low-churn code.
   - Refactor plan:
     - Phase 0 — freeze and map behavior:
+      - Maintain the reviewed inventory in [the structural refactor baseline](structural-refactor-baseline.md).
       - Record the public route inventory, middleware order, client JSON fixtures, schema bundle, representative v2/v3 event logs, import job/control fixtures, migration hash goldens, and current module dependency graph.
       - Add characterization tests only where moving a boundary would otherwise be unsafe: import idempotency/recovery, event transaction failure paths, stale UI responses, persistence retries, and server configuration conversion.
       - Capture focused timing baselines for replay, assignment scans, statistics, representative import profiles, and UI test groups. Use them to detect regressions, not to promise optimization.
