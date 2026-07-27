@@ -204,7 +204,7 @@ below correspond to the binary-size defaults used by storage.
 | Setting | Default | Enforced limit |
 | --- | ---: | --- |
 | `import.limits.concurrentBuildJobs` | `1` | Concurrent preflight/build jobs for the server. |
-| `import.limits.imageValidationWorkers` | `8` | Maximum concurrent YOLO image decoders. |
+| `import.limits.imageValidationWorkers` | `8` | Maximum concurrent YOLO image decoders; configurable up to `32`. |
 | `import.limits.decodedImageMemoryBytes` | `5_368_709_120` (5 GiB) | Aggregate image-validation memory reservation shared by concurrent preflights. Reservations include encoded bytes, worst-case decoded output, and an extra decoded canvas for GIF validation. |
 | `import.limits.concurrentBrowserUploadJobs` | `2` | Concurrent browser upload jobs for the server. |
 | `import.limits.activeReservationsPerOwner` | `2` | Active destination reservations per owner. |

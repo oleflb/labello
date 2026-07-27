@@ -11,7 +11,7 @@ pub const PROFILE_YOLO_POSE: &str = "ultralytics_yolo_pose_v1";
 pub const PROFILE_COCO_INSTANCES: &str = "coco_instances_gt_v1";
 pub const PROFILE_COCO_KEYPOINTS: &str = "coco_keypoints_gt_v1";
 pub const IMPORT_PARSER_VERSION: &str = "labello-storage-import-v2";
-pub const MAX_IMAGE_VALIDATION_WORKERS: usize = 16;
+pub const MAX_IMAGE_VALIDATION_WORKERS: usize = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
