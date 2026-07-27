@@ -26,6 +26,100 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
+- [ ] Refactor the codebase around explicit ownership boundaries after the import and migration behavior is stable.
+  - Objective:
+    - Perform a behavior-preserving structural refactor focused on maintainability, reviewability, and code quality rather than new product behavior.
+    - Keep the existing crate graph. The dependency direction is sound; the main problem is mixed responsibility and duplicated policy inside individual crates.
+    - Treat line count and churn as signals, not success metrics. A large cohesive module may remain large when splitting it would obscure an invariant.
+  - Audit baseline:
+    - The workspace dependency graph follows the intended direction: `labello-domain` has no internal dependency, storage and client depend on domain, API depends on client/domain/storage, UI depends on client/domain, and the apps compose those crates. Do not add a crate merely to make the diagram more layered.
+    - The current Rust footprint is approximately 92,000 lines including tests. The most concentrated production areas are `crates/labello-ui/src/import_flow.rs` (about 6,300 lines), `crates/labello-storage/src/assignment/migration.rs` (about 4,300), `crates/labello-storage/src/import/formats.rs` (about 3,900), `crates/labello-api/src/handlers/imports/mod.rs` (about 3,900), `crates/labello-ui/src/admin.rs` (about 3,800), `crates/labello-ui/src/live.rs` (about 3,000), and `crates/labello-storage/src/assignment/mod.rs` (about 3,000).
+    - Recent changes repeatedly touch `crates/labello-ui/src/app.rs`, `live.rs`, `panels.rs`, `admin.rs`, `crates/labello-client/src/http.rs`, and the broad API/UI test modules. These are change-collision hotspots, not just large files.
+    - `LabelloApp` remains a wide aggregate and dereferences implicitly to `WorkState`. Rendering, navigation, feature state, async request ownership, response reduction, persistence scheduling, and workflow orchestration can therefore mutate shared state through a broad surface.
+    - `UiCommand` and `UiMessage` are useful static protocols, but their global declarations and exhaustive dispatch/reduction matches have become feature-spanning bottlenecks. `process_messages` alone contains roughly 1,100 lines of response reduction.
+    - `import_flow.rs` combines draft models, local validation, request construction, recovery hydration, workflow orchestration, browser file selection/upload, and rendering. Its local validation necessarily overlaps the authoritative API conversion and storage planner, making rule drift likely.
+    - Import concepts are represented separately in domain manifest types, storage planning/runtime types, client transport DTOs, API conversion code, and UI drafts. Separate wire, durable, and editable representations are legitimate, but repeated enums and hand-written mappings currently have no single documented semantic owner.
+    - The import API handler performs authentication and transport work alongside durable control-file reads/writes, idempotency persistence, job coordination, DTO conversion, and validation. Raw filesystem mechanics under `.labello-server/imports` leak above storage even though transport ownership must remain in API.
+    - `DatasetRepository` is a valuable facade, but its state currently owns layout, artifact migration, event I/O, replayed state-cache behavior, snapshots, per-image locks, and multiple caches. Workflow implementations then spread policy and the common lock/validate/append/replay/cache/invalidate sequence across several large `impl DatasetRepository` modules.
+    - Event and workflow rules are exhaustively checked, which is good, but related decisions are distributed among domain replay, API ingress policy, storage claim/review/migration code, offline sync, and statistics. The refactor must distinguish pure domain validity, route authorization, and storage transaction policy instead of creating another copy.
+    - `labello-client` already has capability-oriented traits, but transport DTOs, the HTTP implementation, and the demo implementation are each broad files. The UI `SpyApi` must implement every capability in one large support module, so feature tests have excessive setup and weak ownership cues.
+    - Server configuration has a large import-limit mirror and conversion function. The explicit validation is valuable, but defaults, field names, range checks, and storage conversion are difficult to review as one block.
+    - The test base is substantial and is an asset: approximately 27 domain, 121 storage, 19 client, 59 API, 224 UI, and 17 app tests. The problem is discoverability and fixture duplication: UI tests exceed 7,000 lines, API tests exceed 6,000, and several storage suites remain embedded in production modules.
+    - `cargo clippy --workspace --all-targets` is clean at this baseline. Preserve that signal; the refactor is not a response to compiler warnings.
+  - Invariants and non-negotiable boundaries:
+    - Keep per-image `events.jsonl` authoritative and `state.json` rebuildable exclusively through replay.
+    - Preserve historical event bytes, schema versions, canonical migration hashes, import manifests, snapshots, offline wire contracts, and current Serde names/defaults.
+    - Preserve assignment eligibility, lease, idempotency, lock scope, review-round, migration, import publication/recovery, and cache-invalidation behavior.
+    - Keep authentication, dataset-role checks, bootstrap-admin restrictions, OAuth state, cookie, CSRF, CORS, request limits, matched-route logging, and all redaction rules at least as strict as they are now.
+    - Keep incremental ingest distinct from transactional new-dataset import.
+    - Keep `labello-wasm` thin and the inspector outside the production workspace.
+    - Do not mix visual redesign, new import behavior, persistence migration, or performance optimization into mechanical extraction changes.
+  - YAGNI evaluation:
+    - Accept a proposed abstraction only when it removes an observed ownership leak, protects an existing invariant, or consolidates the same mechanism already used by at least two current features. Record the concrete callers and deleted duplication in the change.
+    - Prefer moving cohesive code behind the existing facade before changing its API. Do not introduce a generic repository, dependency-injection framework, dynamic command bus, reducer registry, CQRS/event-sourcing framework, or universal state machine.
+    - Share the workflow transaction sequence only after annotation, review/adjudication, and migration can use identical lock and commit mechanics without passing feature-specific policy through generic callbacks.
+    - Share validation only for rules that are truly identical and context-free. Keep UI field-level guidance, API trust-boundary validation, and storage source-dependent validation separate where their inputs or error semantics differ.
+    - Keep explicit YOLO and COCO adapters, explicit assignment kinds, and explicit box/skeleton tools. Do not build a universal annotation parser, job framework, workflow engine, or canvas scene graph.
+    - Do not add a database, multi-process locking, sharding, indexing, background job platform, or cache framework without measured requirements. This issue must not claim scalability improvements.
+    - Do not add support for a hypothetical native client or wire the currently unwired browser-offline UI as part of this refactor. Preserve existing offline contracts and tests, but do not expand them for architectural symmetry.
+    - Do not mechanically merge every domain, storage, and transport type. Retain distinct representations when they enforce a real boundary; centralize only their shared semantic rules and make adapters exhaustive and focused.
+    - Review each `allow(dead_code)` and `allow(clippy::too_many_arguments)` at the point its module is touched. Remove obsolete code, group proven parameter sets into meaningful context values, and retain target-specific or cohesive exceptions with a short reason. Do not create wrapper types solely to silence a lint.
+    - Add no dependency by default. Any proposed dependency must replace meaningful maintained code and be evaluated separately.
+    - Stop when the audited ownership leaks and collision hotspots are resolved. Do not split all modules to an arbitrary line limit or continue reorganizing stable, cohesive low-churn code.
+  - Refactor plan:
+    - Phase 0 — freeze and map behavior:
+      - Record the public route inventory, middleware order, client JSON fixtures, schema bundle, representative v2/v3 event logs, import job/control fixtures, migration hash goldens, and current module dependency graph.
+      - Add characterization tests only where moving a boundary would otherwise be unsafe: import idempotency/recovery, event transaction failure paths, stale UI responses, persistence retries, and server configuration conversion.
+      - Capture focused timing baselines for replay, assignment scans, statistics, representative import profiles, and UI test groups. Use them to detect regressions, not to promise optimization.
+      - Write a short ownership table for every production module over roughly 1,000 lines, naming its current responsibilities, callers, invariants, and intended destination. Document a reason for any module intentionally left cohesive.
+    - Phase 1 — make tests navigable before moving implementation:
+      - Split API tests by auth/security, datasets/admin, ingest, imports, snapshots, workflow assignment/review/migration, and logging/redaction while continuing to exercise the assembled router.
+      - Split UI tests by setup, admin, workspace, import, migration, persistence, accessibility, and responsive behavior. Split shared support into API fake, fixtures/builders, harness actions, and assertions without introducing a mocking framework.
+      - Move large inline storage tests into child test modules where private access is still needed. Preserve concurrency and failure-injection coverage rather than replacing it with shallow unit tests.
+    - Phase 2 — perform low-risk file decomposition:
+      - Split Admin by its existing sections and move statistics into its own UI feature. Keep staged changes, last-admin protection, save/discard behavior, busy gating, and AccessKit labels at the page-shell boundary.
+      - Split client DTO, trait, HTTP, and demo implementations by current capability families while retaining `LabelloApi` as a compatibility facade.
+      - Group server import configuration defaults, validation, and conversion into focused modules or meaningful value conversions; keep the external TOML contract exact.
+      - Preserve public paths with temporary re-exports and reduce visibility only after all internal callers move.
+    - Phase 3 — clarify domain and workflow policy:
+      - Separate current in-memory event/state models, version-specific wire decoding, replay, import provenance/coverage, migration digests, and review policy into cohesive domain modules without changing serialized representations.
+      - Inventory every exhaustive `EventPayload` and `AssignmentKind` match. Give each rule one named owner: domain shape/replay validity, API actor/authorization policy, or storage workflow/transaction policy.
+      - Extract pure transition planners only where they can be tested without filesystem, Axum, client DTO, or egui types. Keep authorization out of domain.
+    - Phase 4 — separate repository mechanics from feature policy:
+      - Keep `DatasetRepository` as the public facade while extracting layout/path validation, config/index I/O, event append/load, replayed state cache, snapshots, artifact migration, locking, and cache lifecycle.
+      - Make the authoritative transaction order explicit and covered by failure/concurrency tests. A helper may own mechanics only; annotation, review, adjudication, and migration modules must continue to own their distinct validation and event batches.
+      - Split statistics into cache lifecycle, scan, and pure aggregation. Do not change scan strategy in this phase.
+    - Phase 5 — establish one clear import vertical slice:
+      - In storage, separate capabilities/limits, durable jobs and reservations, browser/server sources, sealing, profile parsers, IR, planning/diagnostics, building, verification, publication, and recovery.
+      - In API, retain request extraction, authentication/authorization, idempotency semantics, safe error mapping, and DTO adaptation. Move raw durable-file operations behind narrow storage-owned methods without making storage depend on client DTOs.
+      - Document the semantic owner and exhaustive adapter for every duplicated import concept. Move context-free mapping validation to that owner, keep browser-only draft validation close to the UI, and keep source-content validation authoritative in storage.
+      - Split `import_flow` into editable state/drafts, pure local validation, request mapping, command/recovery orchestration, browser upload, and stage views. Preserve stale-plan invalidation and exact-request ownership.
+    - Phase 6 — decompose UI state and runtime by feature:
+      - Remove implicit `Deref<Target = WorkState>` access after callers use explicit `work`, `datasets`, `admin`, `import`, `auth`, and runtime state.
+      - Keep `LabelloApp` as the egui root and keep static `UiCommand`/`UiMessage` envelopes, but delegate exhaustive dispatch and response reduction to auth, dataset/admin, workflow, import, and persistence modules.
+      - Centralize request IDs, epochs, stale-response rejection, rollback, and reservation release. Feature reducers may mutate only their owned state plus explicitly named navigation/session effects.
+      - Split workspace rendering by toolbar, task selector, inspector, annotation/review/adjudication, manual migration, and overlays. Split canvas only along proven viewport, painting, hit-testing, and interaction boundaries; preserve gesture tests.
+      - Split browser persistence into records/validation, identity, retry queue, restore orchestration, memory test store, IndexedDB, and local-storage adapters. Browser state must never become authoritative workflow state.
+    - Phase 7 — remove scaffolding and document the result:
+      - Remove temporary re-exports/facades only when repository-wide search proves no caller needs them.
+      - Reduce visibility, delete obsolete conversion helpers and duplicate validators, and document justified large-module/lint exceptions.
+      - Update `README.md`, `AGENTS.md`, and architecture documentation to describe actual ownership rather than an aspirational design.
+      - Compare the final dependency graph, public API/JSON fixtures, behavioral tests, and timing baselines with Phase 0, then stop the refactor.
+  - Delivery and review rules:
+    - Land one responsibility move per reviewable change. Move first, prove parity, and redesign only in a later change when the benefit is independently testable.
+    - Do not combine unrelated formatting, naming, feature, visual, or performance changes with a move.
+    - Keep compatibility facades only while callers migrate; give each one a removal condition so the refactor does not leave a second architecture behind.
+    - If an extraction changes a persisted format, authorization decision, lock boundary, route contract, or user-visible workflow, stop and split that behavior change into a separately approved issue.
+  - Completion criteria:
+    - Root modules primarily compose and delegate, and each extracted module has one dominant reason to change.
+    - API route code no longer performs raw import control-file persistence; storage code does not depend on client or API types.
+    - Pure domain validity, API authorization/trust policy, and storage transaction policy have explicit non-overlapping owners.
+    - Import representations and adapters are documented, exhaustive, and free of accidental rule duplication.
+    - UI views do not construct HTTP clients or own async transport mechanics; feature state, command dispatch, response reduction, and browser persistence are separable and focused.
+    - Event append/replay/cache ordering and import publication/recovery remain explicit, atomic where currently atomic, and covered by concurrency/failure tests.
+    - Test suites are feature-discoverable while retaining router-level, repository-level, and UI integration coverage.
+    - No persistence schema, historical event, public route, client JSON, security, redaction, or user-visible behavior changed unintentionally.
+    - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `trunk build --release` pass. Run native inspector and Chromium coverage for any UI/browser module whose ownership changed.
 - [x] Promote a prepared assignment immediately after confirming a manual migration.
   - Do not release or clear valid prepared assignments when migration confirmation completes the current annotation assignment.
   - Reuse the normal annotation transition's prepared-image fast path, while retaining the blocking claim/load fallback when the queue is empty or expired.
