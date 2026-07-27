@@ -460,6 +460,9 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
         screen,
         crate::import_flow::ImportScreen::Ready | crate::import_flow::ImportScreen::Success
     ) {
+        app.import_flow.normalize_mapping_draft();
+        let accepted_request = app.import_plan_request();
+        app.import_flow.accepted_plan_request = Some(accepted_request.clone());
         app.import_flow.plan = Some(ImportPlan {
             import_id: labello_domain::ImportId::from("imp_inspector"),
             source_fingerprint: "source-inspector".to_string(),
@@ -469,7 +472,7 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
             required_acknowledgement_codes: Vec::new(),
             report: import_report(),
             source_categories: Vec::new(),
-            accepted_request: app.import_flow.pending_plan_request.clone(),
+            accepted_request: Some(accepted_request),
         });
     }
     app

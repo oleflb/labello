@@ -738,6 +738,7 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
         flow.screen = crate::import_flow::ImportScreen::Preflight;
         flow.job.as_mut().unwrap().preflight_report = Some(test_import_report());
         flow.categories = vec![contract_import_category()];
+        flow.exhaustive = true;
     }
     harness.step();
     harness.state_mut().request_update_import_plan();
@@ -794,6 +795,7 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
         flow.open = true;
         flow.job = Some(job);
         flow.screen = crate::import_flow::ImportScreen::Preflight;
+        flow.exhaustive = true;
         let person = contract_import_category();
         let mut vehicle = contract_import_category();
         vehicle.source_category_key = "release:vehicle:18".to_string();
@@ -806,9 +808,28 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
         vehicle.skeleton_task_id = "skeleton:vehicle".to_string();
         vehicle.skeleton_task_name = "Vehicle skeletons".to_string();
         flow.categories = vec![person, vehicle];
-        flow.geometry_policy = labello_client::ImportGeometryPolicy::ManualBoxGuideV1;
-        flow.workflow_intent = labello_client::ImportWorkflowIntent::RequireApproval;
-        flow.keypoint_names = "nose,left_eye".to_string();
+        for category in &mut flow.categories {
+            category.source_skeleton = None;
+            category.direct_geometry = vec![labello_client::ImportGeometryKind::BoundingBox];
+            category.target_keypoint_names = "nose,left_eye".to_string();
+            category.workflow_intent = labello_client::ImportWorkflowIntent::RequireApproval;
+            category.geometry_mappings = vec![
+                labello_client::ImportGeometryMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    source_geometry: labello_client::ImportGeometryKind::BoundingBox,
+                    target_geometry: labello_client::ImportGeometryKind::BoundingBox,
+                    policy: labello_client::ImportGeometryPolicy::Direct,
+                    parameters: Vec::new(),
+                },
+                labello_client::ImportGeometryMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    source_geometry: labello_client::ImportGeometryKind::BoundingBox,
+                    target_geometry: labello_client::ImportGeometryKind::Skeleton,
+                    policy: labello_client::ImportGeometryPolicy::ManualBoxGuideV1,
+                    parameters: Vec::new(),
+                },
+            ];
+        }
     }
 
     harness.state_mut().request_update_import_plan();
@@ -1250,6 +1271,199 @@ fn import_progress_overview_exposes_stage_and_activity_status() {
             )
             .next()
             .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn import_mapping_feedback_is_immediate_and_ready_tracks_the_exact_draft() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1180.0, 1200.0))
+        .build_eframe(|ctx| inspector_presets::build(InspectorPreset::ImportReady, &ctx.egui_ctx));
+    harness.step();
+
+    assert!(
+        !harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(harness.query_by_label("COCO crowd objects").is_some());
+    assert!(harness.query_by_label("YOLO missing labels").is_none());
+
+    harness.state_mut().import_flow.categories[0].class_id = "bad/class".to_string();
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label("Class ID must be a non-empty safe path segment of at most 255 bytes.")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Step 3 of 5: Preflight, current")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label(
+                "Last accepted preflight — current edits are not included. Save the corrected mappings to refresh diagnostics and readiness."
+            )
+            .is_some()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Save mappings and re-run preflight"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    harness.state_mut().import_flow.categories[0].class_id = "person".to_string();
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label("Step 4 of 5: Ready, current")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Class ID must be a non-empty safe path segment of at most 255 bytes.")
+            .is_none()
+    );
+    assert!(
+        !harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    harness.state_mut().import_flow.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label(
+                "Out-of-bounds geometry will be clipped as derived pending data and requires acknowledgement."
+            )
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Step 3 of 5: Preflight, current")
+            .is_some()
+    );
+    assert!(
+        !harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Save mappings and re-run preflight"
+            )
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn target_keypoint_typing_does_not_echo_into_template_controls() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1180.0, 1600.0))
+        .build_eframe(|ctx| {
+            let mut app = inspector_presets::build(InspectorPreset::ImportReady, &ctx.egui_ctx);
+            let category = &mut app.import_flow.categories[0];
+            category.target_keypoint_names = "nose".to_string();
+            category
+                .geometry_mappings
+                .push(labello_client::ImportGeometryMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    source_geometry: labello_client::ImportGeometryKind::BoundingBox,
+                    target_geometry: labello_client::ImportGeometryKind::Skeleton,
+                    policy: labello_client::ImportGeometryPolicy::BoxRelativeTemplateV1,
+                    parameters: Vec::new(),
+                });
+            app
+        });
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label(
+                "Required outputs for the current mapping — categories: 1, tasks: 2. Accepted \
+                 preflight outputs — categories: 1, tasks: 1. Click “Save mappings and re-run \
+                 preflight”; commit remains disabled until the refreshed plan includes every \
+                 required output."
+            )
+            .is_some()
+    );
+
+    let input = harness.get_by_role_and_label(
+        egui::accesskit::Role::TextInput,
+        "Target keypoint names (comma separated)",
+    );
+    let input_top = input.rect().top();
+    assert!(
+        harness
+            .get_by_label("Template point positions")
+            .rect()
+            .top()
+            > input_top
+    );
+
+    input.focus();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label(
+                "Template-point controls will update after you finish editing keypoint names."
+            )
+            .is_some()
+    );
+    assert!(harness.query_by_label("Template point positions").is_none());
+
+    harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::TextInput,
+            "Target keypoint names (comma separated)",
+        )
+        .type_text(",left_eye");
+    harness.step();
+    assert!(harness.query_by_label("Template point positions").is_none());
+
+    harness.key_press(egui::Key::Tab);
+    harness.step();
+    assert!(harness.query_by_label("Template point positions").is_some());
+    assert_eq!(
+        harness.state().import_flow.categories[0].geometry_mappings[1]
+            .parameters
+            .iter()
+            .filter_map(|parameter| {
+                let labello_client::ImportMappingParameter::Point { name, .. } = parameter else {
+                    return None;
+                };
+                Some(name.as_str())
+            })
+            .collect::<Vec<_>>(),
+        ["nose", "left_eye"]
     );
 }
 

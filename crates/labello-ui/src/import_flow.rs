@@ -208,6 +208,101 @@ struct ActiveStageProgress {
     fraction: Option<f32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMappingIssueSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMappingField {
+    Form,
+    CategorySelection,
+    ClassId,
+    ClassName,
+    ClassColor,
+    BoundingBoxTaskId,
+    BoundingBoxTaskName,
+    SkeletonTaskId,
+    SkeletonTaskName,
+    Geometry(ImportGeometryKind),
+    TargetKeypointNames,
+    WorkflowIntent,
+    SeedConfirmation,
+    Compatibility(ImportCompatibilityField),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportCompatibilityField {
+    YoloMissingLabels,
+    YoloDuplicateRows,
+    CocoCrowds,
+    CocoStructure,
+    GeometryBounds,
+    CrossSplitDuplicates,
+    MissingKeypointNames,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImportMappingIssue {
+    severity: ImportMappingIssueSeverity,
+    category_index: Option<usize>,
+    field: ImportMappingField,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ImportMappingValidation {
+    issues: Vec<ImportMappingIssue>,
+}
+
+impl ImportMappingValidation {
+    fn error_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.severity == ImportMappingIssueSeverity::Error)
+            .count()
+    }
+
+    fn warning_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.severity == ImportMappingIssueSeverity::Warning)
+            .count()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.error_count() == 0
+    }
+
+    fn for_field(
+        &self,
+        category_index: Option<usize>,
+        field: ImportMappingField,
+    ) -> impl Iterator<Item = &ImportMappingIssue> {
+        self.issues
+            .iter()
+            .filter(move |issue| issue.category_index == category_index && issue.field == field)
+    }
+
+    fn category_counts(&self, category_index: usize) -> (usize, usize) {
+        self.issues
+            .iter()
+            .filter(|issue| issue.category_index == Some(category_index))
+            .fold((0, 0), |(errors, warnings), issue| match issue.severity {
+                ImportMappingIssueSeverity::Error => (errors + 1, warnings),
+                ImportMappingIssueSeverity::Warning => (errors, warnings + 1),
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImportGeometryChoice {
+    source: ImportGeometryKind,
+    policy: ImportGeometryPolicy,
+    label: &'static str,
+}
+
 pub(crate) struct ImportFlowState {
     pub capabilities: Option<ImportCapabilities>,
     pub capabilities_loading: bool,
@@ -240,11 +335,6 @@ pub(crate) struct ImportFlowState {
     pub yolo_inspection_retry_after_current: bool,
     pub registered_paths: Vec<RegisteredImportPath>,
     pub categories: Vec<ImportCategoryDraft>,
-    pub direct_bounding_boxes: bool,
-    pub direct_skeletons: bool,
-    pub target_geometry: ImportGeometryKind,
-    pub geometry_policy: ImportGeometryPolicy,
-    pub workflow_intent: ImportWorkflowIntent,
     pub yolo_missing_labels: labello_client::YoloMissingLabelPolicy,
     pub yolo_duplicate_rows: labello_client::YoloDuplicateRowPolicy,
     pub coco_crowds: labello_client::CocoCrowdPolicy,
@@ -252,8 +342,8 @@ pub(crate) struct ImportFlowState {
     pub geometry_bounds: labello_client::GeometryBoundsPolicy,
     pub cross_split_duplicates: labello_client::CrossSplitDuplicatePolicy,
     pub missing_keypoint_names: labello_client::MissingKeypointNamesPolicy,
-    pub keypoint_names: String,
     pub seed_workflow_confirmed: bool,
+    pub seed_workflow_confirmation_scope: Option<String>,
     pub acknowledgements: std::collections::BTreeSet<String>,
     pub pending_plan_request: Option<UpdateImportPlanRequest>,
     pub accepted_plan_request: Option<UpdateImportPlanRequest>,
@@ -302,11 +392,6 @@ impl Default for ImportFlowState {
             yolo_inspection_retry_after_current: false,
             registered_paths: Vec::new(),
             categories: Vec::new(),
-            direct_bounding_boxes: true,
-            direct_skeletons: false,
-            target_geometry: ImportGeometryKind::BoundingBox,
-            geometry_policy: ImportGeometryPolicy::Direct,
-            workflow_intent: ImportWorkflowIntent::AuthoritativeGroundTruth,
             yolo_missing_labels: Default::default(),
             yolo_duplicate_rows: Default::default(),
             coco_crowds: Default::default(),
@@ -314,8 +399,8 @@ impl Default for ImportFlowState {
             geometry_bounds: Default::default(),
             cross_split_duplicates: Default::default(),
             missing_keypoint_names: Default::default(),
-            keypoint_names: String::new(),
             seed_workflow_confirmed: false,
+            seed_workflow_confirmation_scope: None,
             acknowledgements: Default::default(),
             pending_plan_request: None,
             accepted_plan_request: None,
@@ -371,17 +456,10 @@ impl ImportFlowState {
                 .map(|root| root.root_id.clone())
                 .unwrap_or_default();
         }
-        if self.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1
-            && !capabilities.manual_box_guide_migration
-        {
-            self.geometry_policy = ImportGeometryPolicy::Direct;
-        }
         if self.profile != previous_profile {
             self.descriptors = vec![descriptor_draft(self.profile)];
             self.invalidate_yolo_inspection();
             self.categories.clear();
-            self.direct_bounding_boxes = true;
-            self.direct_skeletons = profile_has_skeletons(self.profile);
         }
     }
 
@@ -536,9 +614,14 @@ impl ImportFlowState {
                 .filter(|acknowledgement| acknowledgement.acknowledged)
                 .map(|acknowledgement| acknowledgement.diagnostic_code.clone())
                 .collect();
+            self.seed_workflow_confirmed = request.task_mappings.iter().any(|mapping| {
+                mapping.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
+            });
         }
         self.accepted_plan_request = accepted;
         self.plan = Some(plan.clone());
+        self.normalize_mapping_draft();
+        self.seed_workflow_confirmation_scope = self.seed_workflow_scope();
     }
 
     pub(crate) fn invalidate_yolo_inspection(&mut self) {
@@ -548,6 +631,61 @@ impl ImportFlowState {
         self.yolo_inspected_descriptor_file_id = None;
         self.pending_yolo_inspection_request_id = None;
         self.yolo_inspection_retry_after_current = false;
+    }
+
+    pub(crate) fn normalize_mapping_draft(&mut self) {
+        for category in &mut self.categories {
+            if !category.geometry_mappings.is_empty() {
+                continue;
+            }
+            let key = category.source_category_key.clone();
+            category.geometry_mappings = category
+                .direct_geometry
+                .iter()
+                .map(|geometry| ImportGeometryMappingRequest {
+                    source_category_key: key.clone(),
+                    source_geometry: *geometry,
+                    target_geometry: *geometry,
+                    policy: ImportGeometryPolicy::Direct,
+                    parameters: Vec::new(),
+                })
+                .collect();
+        }
+    }
+
+    fn sync_seed_workflow_confirmation_scope(&mut self) {
+        let scope = self.seed_workflow_scope();
+        if self.seed_workflow_confirmation_scope != scope {
+            self.seed_workflow_confirmation_scope = scope;
+            self.seed_workflow_confirmed = false;
+        }
+    }
+
+    fn seed_workflow_scope(&self) -> Option<String> {
+        let values = self
+            .categories
+            .iter()
+            .filter(|category| {
+                category.selected
+                    && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
+            })
+            .map(|category| {
+                let outputs = category
+                    .geometry_mappings
+                    .iter()
+                    .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                    .map(|mapping| {
+                        format!(
+                            "{:?}:{:?}:{:?}",
+                            mapping.source_geometry, mapping.target_geometry, mapping.policy
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}={outputs}", category.source_category_key)
+            })
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| values.join("|"))
     }
 }
 
@@ -600,6 +738,9 @@ impl LabelloApp {
                 self.import_flow.destination_name = "Imported dataset".to_string();
             }
         }
+        self.import_flow.normalize_mapping_draft();
+        self.import_flow.sync_seed_workflow_confirmation_scope();
+        self.sync_import_decision_screen();
         ui.heading("Import dataset");
         ui.label(
             RichText::new("Register, validate, and import an existing dataset.")
@@ -628,6 +769,36 @@ impl LabelloApp {
             self.import_flow_contents(ui, &capabilities);
         });
         self.import_source_picker_modal(ui.ctx());
+    }
+
+    fn sync_import_decision_screen(&mut self) {
+        if self.import_flow.pending_plan_request.is_some()
+            || !self
+                .import_flow
+                .job
+                .as_ref()
+                .is_some_and(|job| job.lifecycle == ImportLifecycle::AwaitingDecision)
+            || self.import_flow.plan.is_none()
+            || !matches!(
+                self.import_flow.screen,
+                ImportScreen::Preflight | ImportScreen::Ready
+            )
+        {
+            return;
+        }
+        let ready = self
+            .import_flow
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.commit_ready)
+            && self.import_plan_is_current()
+            && self.import_mapping_validation().is_valid()
+            && self.import_plan_covers_all_categories();
+        self.import_flow.screen = if ready {
+            ImportScreen::Ready
+        } else {
+            ImportScreen::Preflight
+        };
     }
 
     fn import_flow_contents(&mut self, ui: &mut egui::Ui, capabilities: &ImportCapabilities) {
@@ -1014,18 +1185,9 @@ impl LabelloApp {
         if self.import_flow.profile != previous_profile {
             self.import_flow.plan = None;
             self.import_flow.accepted_plan_request = None;
-            self.import_flow.geometry_policy = ImportGeometryPolicy::Direct;
             self.import_flow.categories.clear();
             self.import_flow.descriptors = vec![descriptor_draft(self.import_flow.profile)];
             self.import_flow.invalidate_yolo_inspection();
-            self.import_flow.direct_bounding_boxes = true;
-            self.import_flow.direct_skeletons = profile_has_skeletons(self.import_flow.profile);
-            self.import_flow.target_geometry = match self.import_flow.profile {
-                ImportProfile::UltralyticsYoloPoseV1 | ImportProfile::CocoKeypointsGtV1 => {
-                    ImportGeometryKind::Skeleton
-                }
-                _ => ImportGeometryKind::BoundingBox,
-            };
         }
         ui.label(RichText::new("Transport").strong());
         let previous_transport = self.import_flow.transport;
@@ -1391,6 +1553,8 @@ impl LabelloApp {
                 .job
                 .as_ref()
                 .is_some_and(|job| job.preflight_report.is_some());
+        let report_stale =
+            previous_report || (self.import_flow.plan.is_some() && !self.import_plan_is_current());
         let report = self
             .import_flow
             .pending_plan_request
@@ -1410,11 +1574,11 @@ impl LabelloApp {
             .flatten()
             .cloned();
         if let Some(report) = report {
-            if previous_report {
+            if report_stale {
                 theme::inline_message(
                     ui,
                     theme::Intent::Warning,
-                    "This is the last accepted preflight and does not include the current unsaved mappings.",
+                    "Last accepted preflight — current edits are not included. Save the corrected mappings to refresh diagnostics and readiness.",
                 );
             }
             ui.label(RichText::new("Preflight summary").strong());
@@ -1453,11 +1617,23 @@ impl LabelloApp {
         self.import_mapping_editor(ui);
         let mappings_complete = self.import_mappings_complete();
         let plan_covers_source = self.import_plan_covers_all_categories();
-        if self.import_flow.plan.is_some() && !plan_covers_source {
+        if let Some(plan) = self
+            .import_flow
+            .plan
+            .as_ref()
+            .filter(|_| !plan_covers_source)
+        {
+            let (required_categories, required_tasks) = self.import_required_output_counts();
             theme::inline_message(
                 ui,
                 theme::Intent::Error,
-                "The accepted plan does not output every selected category and required workflow. Correct the exact source keys; commit remains disabled.",
+                format!(
+                    "Required outputs for the current mapping — categories: \
+                     {required_categories}, tasks: {required_tasks}. Accepted preflight outputs — \
+                     categories: {}, tasks: {}. Click “Save mappings and re-run preflight”; commit \
+                     remains disabled until the refreshed plan includes every required output.",
+                    plan.report.output.classes, plan.report.output.tasks
+                ),
             );
         }
         let commit_ready = self
@@ -1594,6 +1770,36 @@ impl LabelloApp {
 
     fn import_mapping_editor(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Category and task mapping").strong());
+        let validation = self.import_mapping_validation();
+        let errors = validation.error_count();
+        let warnings = validation.warning_count();
+        if errors > 0 {
+            theme::inline_message(
+                ui,
+                theme::Intent::Error,
+                format!(
+                    "{errors} mapping {} must be fixed before saving. Each affected input is explained below.",
+                    if errors == 1 { "error" } else { "errors" }
+                ),
+            );
+        } else if warnings > 0 {
+            theme::inline_message(
+                ui,
+                theme::Intent::Warning,
+                format!(
+                    "{warnings} mapping {}. Review the highlighted consequences before saving.",
+                    if warnings == 1 { "warning" } else { "warnings" }
+                ),
+            );
+        } else {
+            theme::inline_message(
+                ui,
+                theme::Intent::Success,
+                "All mapping inputs are locally valid.",
+            );
+        }
+        show_mapping_issues(ui, &validation, None, ImportMappingField::Form);
+        show_mapping_issues(ui, &validation, None, ImportMappingField::CategorySelection);
         let discovered = self
             .import_flow
             .plan
@@ -1630,8 +1836,30 @@ impl LabelloApp {
         ));
         for (index, category) in self.import_flow.categories.iter_mut().enumerate() {
             ui.push_id(("import-category", index), |ui| {
-                ui.label(RichText::new(format!("Category {}", index + 1)).strong());
+                let (category_errors, category_warnings) = validation.category_counts(index);
+                let status = if category_errors > 0 {
+                    format!("{category_errors} errors")
+                } else if category_warnings > 0 {
+                    format!("{category_warnings} warnings")
+                } else {
+                    "Valid".to_string()
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Category {} · {} · {status}",
+                        index + 1,
+                        category.source_name
+                    ))
+                    .strong(),
+                );
                 ui.checkbox(&mut category.selected, "Include this source category");
+                show_mapping_issues(
+                    ui,
+                    &validation,
+                    Some(index),
+                    ImportMappingField::CategorySelection,
+                );
+                show_mapping_issues(ui, &validation, Some(index), ImportMappingField::Form);
                 status_row(ui, "Source category key", &category.source_category_key);
                 status_row(ui, "Source category ID", &category.source_category_id);
                 status_row(ui, "Source category name", &category.source_name);
@@ -1648,65 +1876,127 @@ impl LabelloApp {
                         .collect::<Vec<_>>()
                         .join(", "),
                 );
-                for (label, value) in [
-                    ("Class ID", &mut category.class_id),
-                    ("Class name", &mut category.class_name),
-                    ("Class color", &mut category.class_color),
-                ] {
-                    theme::labeled_text_field(ui, label, value, theme::COMPACT_TEXT_FIELD_HEIGHT);
-                }
-                let category_specific = !category.geometry_mappings.is_empty();
+                theme::labeled_text_field(
+                    ui,
+                    "Class ID",
+                    &mut category.class_id,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                );
+                show_mapping_issues(ui, &validation, Some(index), ImportMappingField::ClassId);
+                theme::labeled_text_field(
+                    ui,
+                    "Class name",
+                    &mut category.class_name,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                );
+                show_mapping_issues(ui, &validation, Some(index), ImportMappingField::ClassName);
+                theme::labeled_text_field(
+                    ui,
+                    "Class color",
+                    &mut category.class_color,
+                    theme::COMPACT_TEXT_FIELD_HEIGHT,
+                );
+                show_mapping_issues(ui, &validation, Some(index), ImportMappingField::ClassColor);
                 let active_target = |target| {
                     category.geometry_mappings.iter().any(|mapping| {
                         mapping.target_geometry == target
                             && mapping.policy != ImportGeometryPolicy::Omit
                     })
                 };
-                let bounding_box_task = if category_specific {
-                    active_target(ImportGeometryKind::BoundingBox)
-                } else {
-                    (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                        && self.import_flow.direct_bounding_boxes)
-                        || self.import_flow.geometry_policy
-                            == ImportGeometryPolicy::ManualBoxGuideV1
-                };
-                let skeleton_task = if category_specific {
-                    active_target(ImportGeometryKind::Skeleton)
-                } else {
-                    (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                        && self.import_flow.direct_skeletons)
-                        || self.import_flow.geometry_policy
-                            == ImportGeometryPolicy::ManualBoxGuideV1
-                };
-                if bounding_box_task {
-                    theme::labeled_text_field(
-                        ui,
-                        "Bounding-box task ID",
-                        &mut category.bounding_box_task_id,
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    );
-                    theme::labeled_text_field(
-                        ui,
-                        "Bounding-box task name",
-                        &mut category.bounding_box_task_name,
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    );
-                }
-                if skeleton_task {
-                    theme::labeled_text_field(
-                        ui,
-                        "Skeleton task ID",
-                        &mut category.skeleton_task_id,
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    );
-                    theme::labeled_text_field(
-                        ui,
-                        "Skeleton task name",
-                        &mut category.skeleton_task_name,
-                        theme::COMPACT_TEXT_FIELD_HEIGHT,
-                    );
-                }
+                let bounding_box_task = active_target(ImportGeometryKind::BoundingBox);
+                let skeleton_task = active_target(ImportGeometryKind::Skeleton);
+                let task_identity_invalid = [
+                    ImportMappingField::BoundingBoxTaskId,
+                    ImportMappingField::BoundingBoxTaskName,
+                    ImportMappingField::SkeletonTaskId,
+                    ImportMappingField::SkeletonTaskName,
+                ]
+                .into_iter()
+                .any(|field| validation.for_field(Some(index), field).next().is_some());
+                egui::CollapsingHeader::new("Advanced task identity")
+                    .default_open(task_identity_invalid)
+                    .show(ui, |ui| {
+                        if bounding_box_task {
+                            theme::labeled_text_field(
+                                ui,
+                                "Bounding-box task ID",
+                                &mut category.bounding_box_task_id,
+                                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                            );
+                            show_mapping_issues(
+                                ui,
+                                &validation,
+                                Some(index),
+                                ImportMappingField::BoundingBoxTaskId,
+                            );
+                            theme::labeled_text_field(
+                                ui,
+                                "Bounding-box task name",
+                                &mut category.bounding_box_task_name,
+                                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                            );
+                            show_mapping_issues(
+                                ui,
+                                &validation,
+                                Some(index),
+                                ImportMappingField::BoundingBoxTaskName,
+                            );
+                        }
+                        if skeleton_task {
+                            theme::labeled_text_field(
+                                ui,
+                                "Skeleton task ID",
+                                &mut category.skeleton_task_id,
+                                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                            );
+                            show_mapping_issues(
+                                ui,
+                                &validation,
+                                Some(index),
+                                ImportMappingField::SkeletonTaskId,
+                            );
+                            theme::labeled_text_field(
+                                ui,
+                                "Skeleton task name",
+                                &mut category.skeleton_task_name,
+                                theme::COMPACT_TEXT_FIELD_HEIGHT,
+                            );
+                            show_mapping_issues(
+                                ui,
+                                &validation,
+                                Some(index),
+                                ImportMappingField::SkeletonTaskName,
+                            );
+                        }
+                    });
                 if !category.geometry_mappings.is_empty() {
+                    let needs_target_keypoint_names = category.source_skeleton.is_none()
+                        && category.geometry_mappings.iter().any(|mapping| {
+                            mapping.target_geometry == ImportGeometryKind::Skeleton
+                                && mapping.source_geometry == ImportGeometryKind::BoundingBox
+                                && mapping.policy != ImportGeometryPolicy::Omit
+                        });
+                    let editing_target_keypoint_names = if needs_target_keypoint_names {
+                        ui.label(RichText::new("Target skeleton schema").strong());
+                        let response = theme::labeled_text_field(
+                            ui,
+                            "Target keypoint names (comma separated)",
+                            &mut category.target_keypoint_names,
+                            theme::COMPACT_TEXT_FIELD_HEIGHT,
+                        );
+                        ui.small(
+                            "Each keypoint name creates one template-point control after editing is finished.",
+                        );
+                        show_mapping_issues(
+                            ui,
+                            &validation,
+                            Some(index),
+                            ImportMappingField::TargetKeypointNames,
+                        );
+                        response.has_focus()
+                    } else {
+                        false
+                    };
                     ui.label(RichText::new("Category geometry outputs").strong());
                     let direct_geometry = category.direct_geometry.clone();
                     let source_skeleton = category.source_skeleton.clone();
@@ -1718,49 +2008,53 @@ impl LabelloApp {
                             ImportGeometryKind::BoundingBox => "bounding box",
                             ImportGeometryKind::Skeleton => "skeleton",
                         };
-                        egui::ComboBox::from_label(format!("{target} source geometry"))
-                            .selected_text(match mapping.source_geometry {
-                                ImportGeometryKind::BoundingBox => "Bounding box",
-                                ImportGeometryKind::Skeleton => "Skeleton",
-                            })
+                        let choices =
+                            geometry_choices_for_target(
+                                mapping.target_geometry,
+                                &direct_geometry,
+                                self.import_flow.capabilities.as_ref().is_some_and(
+                                    |capabilities| capabilities.manual_box_guide_migration,
+                                ),
+                                source_skeleton.is_some(),
+                            );
+                        let current = choices.iter().copied().find(|choice| {
+                            choice.policy == mapping.policy
+                                && (mapping.policy == ImportGeometryPolicy::Omit
+                                    || choice.source == mapping.source_geometry)
+                        });
+                        let mut selected = current.unwrap_or(ImportGeometryChoice {
+                            source: mapping.source_geometry,
+                            policy: mapping.policy,
+                            label: "Invalid output mapping",
+                        });
+                        let previous = selected;
+                        egui::ComboBox::from_label(format!("{target} output"))
+                            .selected_text(selected.label)
                             .show_ui(ui, |ui| {
-                                for source in &direct_geometry {
-                                    ui.selectable_value(
-                                        &mut mapping.source_geometry,
-                                        *source,
-                                        match source {
-                                            ImportGeometryKind::BoundingBox => "Bounding box",
-                                            ImportGeometryKind::Skeleton => "Skeleton",
-                                        },
-                                    );
+                                for choice in choices {
+                                    ui.selectable_value(&mut selected, choice, choice.label);
                                 }
                             });
-                        egui::ComboBox::from_label(format!("{target} policy"))
-                            .selected_text(policy_label(mapping.policy))
-                            .show_ui(ui, |ui| {
-                                for policy in policies_for_mapping(
-                                    mapping.source_geometry,
-                                    mapping.target_geometry,
-                                    &direct_geometry,
-                                    self.import_flow.capabilities.as_ref().is_some_and(
-                                        |capabilities| capabilities.manual_box_guide_migration,
-                                    ),
-                                ) {
-                                    ui.selectable_value(
-                                        &mut mapping.policy,
-                                        policy,
-                                        policy_label(policy),
-                                    );
-                                }
-                            });
+                        if selected != previous {
+                            mapping.source_geometry = selected.source;
+                            mapping.policy = selected.policy;
+                            mapping.parameters.clear();
+                        }
                         ui.push_id(("mapping-parameters", mapping_index), |ui| {
                             mapping_parameter_editor(
                                 ui,
                                 mapping,
                                 source_skeleton.as_ref(),
                                 &target_keypoint_names,
+                                !editing_target_keypoint_names,
                             );
                         });
+                        show_mapping_issues(
+                            ui,
+                            &validation,
+                            Some(index),
+                            ImportMappingField::Geometry(mapping.target_geometry),
+                        );
                     }
                     if category
                         .direct_geometry
@@ -1781,17 +2075,6 @@ impl LabelloApp {
                                 parameters: Vec::new(),
                             });
                     }
-                    if category.geometry_mappings.iter().any(|mapping| {
-                        mapping.target_geometry == ImportGeometryKind::Skeleton
-                            && mapping.source_geometry == ImportGeometryKind::BoundingBox
-                    }) {
-                        theme::labeled_text_field(
-                            ui,
-                            "Target keypoint names (comma separated)",
-                            &mut category.target_keypoint_names,
-                            theme::COMPACT_TEXT_FIELD_HEIGHT,
-                        );
-                    }
                     egui::ComboBox::from_label("Category workflow intent")
                         .selected_text(intent_label(category.workflow_intent))
                         .show_ui(ui, |ui| {
@@ -1807,21 +2090,20 @@ impl LabelloApp {
                                 );
                             }
                         });
+                    show_mapping_issues(
+                        ui,
+                        &validation,
+                        Some(index),
+                        ImportMappingField::WorkflowIntent,
+                    );
                 }
                 ui.separator();
             });
         }
-        let category_specific = self
-            .import_flow
-            .categories
-            .iter()
-            .any(|category| !category.geometry_mappings.is_empty());
-        if category_specific
-            && self.import_flow.categories.iter().any(|category| {
-                category.selected
-                    && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
-            })
-        {
+        if self.import_flow.categories.iter().any(|category| {
+            category.selected
+                && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
+        }) {
             theme::inline_message(
                 ui,
                 theme::Intent::Warning,
@@ -1831,152 +2113,126 @@ impl LabelloApp {
                 &mut self.import_flow.seed_workflow_confirmed,
                 "Create the selected pending seed workflows",
             );
-        }
-        if !category_specific {
-            egui::ComboBox::from_label("Geometry policy")
-                .selected_text(policy_label(self.import_flow.geometry_policy))
-                .show_ui(ui, |ui| {
-                    let mut policies =
-                        vec![ImportGeometryPolicy::Direct, ImportGeometryPolicy::Omit];
-                    if self
-                        .import_flow
-                        .capabilities
-                        .as_ref()
-                        .is_some_and(|capabilities| capabilities.manual_box_guide_migration)
-                    {
-                        policies.insert(1, ImportGeometryPolicy::ManualBoxGuideV1);
-                    }
-                    for policy in policies {
-                        ui.selectable_value(
-                            &mut self.import_flow.geometry_policy,
-                            policy,
-                            policy_label(policy),
-                        );
-                    }
-                });
-            if self.import_flow.geometry_policy == ImportGeometryPolicy::Direct {
-                ui.checkbox(
-                    &mut self.import_flow.direct_bounding_boxes,
-                    "Import direct bounding boxes",
-                );
-                if profile_has_skeletons(self.import_flow.profile) {
-                    ui.checkbox(
-                        &mut self.import_flow.direct_skeletons,
-                        "Import direct skeletons",
-                    );
-                } else {
-                    self.import_flow.direct_skeletons = false;
-                }
-                self.import_flow.target_geometry = if self.import_flow.direct_skeletons {
-                    ImportGeometryKind::Skeleton
-                } else {
-                    ImportGeometryKind::BoundingBox
-                };
-            } else if self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1 {
-                self.import_flow.target_geometry = ImportGeometryKind::Skeleton;
-                theme::inline_message(
-                    ui,
-                    theme::Intent::Info,
-                    "Manual migration creates a separate read-only bounding-box guide and skeleton target for each selected source category.",
-                );
-            }
-            egui::ComboBox::from_label("Workflow intent")
-                .selected_text(intent_label(self.import_flow.workflow_intent))
-                .show_ui(ui, |ui| {
-                    for intent in [
-                        ImportWorkflowIntent::AuthoritativeGroundTruth,
-                        ImportWorkflowIntent::RequireApproval,
-                        ImportWorkflowIntent::SeedFutureAnnotation,
-                    ] {
-                        ui.selectable_value(
-                            &mut self.import_flow.workflow_intent,
-                            intent,
-                            intent_label(intent),
-                        );
-                    }
-                });
-            if self.import_flow.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation {
-                theme::inline_message(
-                    ui,
-                    theme::Intent::Warning,
-                    "Seed workflow keeps imported geometry pending for future human annotation instead of completing it as ground truth.",
-                );
-                ui.checkbox(
-                    &mut self.import_flow.seed_workflow_confirmed,
-                    "Create pending seed workflows for every mapped category",
-                );
-            } else {
-                self.import_flow.seed_workflow_confirmed = false;
-            }
-            if self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1 {
-                theme::labeled_text_field(
-                    ui,
-                    "Manual target keypoint names (comma separated)",
-                    &mut self.import_flow.keypoint_names,
-                    theme::COMPACT_TEXT_FIELD_HEIGHT,
-                );
-            }
+            show_mapping_issues(ui, &validation, None, ImportMappingField::SeedConfirmation);
         }
         ui.separator();
         ui.label(RichText::new("Compatibility policies").strong());
-        egui::ComboBox::from_label("YOLO missing labels")
-            .selected_text(format!("{:?}", self.import_flow.yolo_missing_labels))
-            .show_ui(ui, |ui| {
-                for policy in [
-                    labello_client::YoloMissingLabelPolicy::Block,
-                    labello_client::YoloMissingLabelPolicy::Incomplete,
-                    labello_client::YoloMissingLabelPolicy::MissingIsBackground,
-                ] {
-                    ui.selectable_value(
-                        &mut self.import_flow.yolo_missing_labels,
-                        policy,
-                        format!("{policy:?}"),
-                    );
-                }
-            });
-        egui::ComboBox::from_label("YOLO duplicate rows")
-            .selected_text(format!("{:?}", self.import_flow.yolo_duplicate_rows))
-            .show_ui(ui, |ui| {
-                for policy in [
-                    labello_client::YoloDuplicateRowPolicy::Block,
-                    labello_client::YoloDuplicateRowPolicy::Deduplicate,
-                ] {
-                    ui.selectable_value(
-                        &mut self.import_flow.yolo_duplicate_rows,
-                        policy,
-                        format!("{policy:?}"),
-                    );
-                }
-            });
-        egui::ComboBox::from_label("COCO crowd objects")
-            .selected_text(format!("{:?}", self.import_flow.coco_crowds))
-            .show_ui(ui, |ui| {
-                for policy in [
-                    labello_client::CocoCrowdPolicy::Block,
-                    labello_client::CocoCrowdPolicy::Incomplete,
-                    labello_client::CocoCrowdPolicy::ExcludeImageTask,
-                ] {
-                    ui.selectable_value(
-                        &mut self.import_flow.coco_crowds,
-                        policy,
-                        format!("{policy:?}"),
-                    );
-                }
-            });
-        egui::ComboBox::from_label("COCO structure")
-            .selected_text(format!("{:?}", self.import_flow.coco_structure))
-            .show_ui(ui, |ui| {
-                for policy in [
-                    labello_client::CocoStructurePolicy::Canonical,
-                    labello_client::CocoStructurePolicy::BboxCompatibility,
-                ] {
-                    ui.selectable_value(
-                        &mut self.import_flow.coco_structure,
-                        policy,
-                        format!("{policy:?}"),
-                    );
-                }
-            });
+        if matches!(
+            self.import_flow.profile,
+            ImportProfile::UltralyticsYoloDetectV1 | ImportProfile::UltralyticsYoloPoseV1
+        ) {
+            egui::ComboBox::from_label("YOLO missing labels")
+                .selected_text(format!("{:?}", self.import_flow.yolo_missing_labels))
+                .show_ui(ui, |ui| {
+                    for policy in [
+                        labello_client::YoloMissingLabelPolicy::Block,
+                        labello_client::YoloMissingLabelPolicy::Incomplete,
+                        labello_client::YoloMissingLabelPolicy::MissingIsBackground,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.import_flow.yolo_missing_labels,
+                            policy,
+                            format!("{policy:?}"),
+                        );
+                    }
+                });
+            show_mapping_issues(
+                ui,
+                &validation,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::YoloMissingLabels),
+            );
+            egui::ComboBox::from_label("YOLO duplicate rows")
+                .selected_text(format!("{:?}", self.import_flow.yolo_duplicate_rows))
+                .show_ui(ui, |ui| {
+                    for policy in [
+                        labello_client::YoloDuplicateRowPolicy::Block,
+                        labello_client::YoloDuplicateRowPolicy::Deduplicate,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.import_flow.yolo_duplicate_rows,
+                            policy,
+                            format!("{policy:?}"),
+                        );
+                    }
+                });
+            show_mapping_issues(
+                ui,
+                &validation,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::YoloDuplicateRows),
+            );
+            if self.import_flow.profile == ImportProfile::UltralyticsYoloPoseV1 {
+                egui::ComboBox::from_label("Missing keypoint names")
+                    .selected_text(format!("{:?}", self.import_flow.missing_keypoint_names))
+                    .show_ui(ui, |ui| {
+                        for policy in [
+                            labello_client::MissingKeypointNamesPolicy::Block,
+                            labello_client::MissingKeypointNamesPolicy::GenerateIndexed,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.import_flow.missing_keypoint_names,
+                                policy,
+                                format!("{policy:?}"),
+                            );
+                        }
+                    });
+                show_mapping_issues(
+                    ui,
+                    &validation,
+                    None,
+                    ImportMappingField::Compatibility(
+                        ImportCompatibilityField::MissingKeypointNames,
+                    ),
+                );
+            }
+        }
+        if matches!(
+            self.import_flow.profile,
+            ImportProfile::CocoInstancesGtV1 | ImportProfile::CocoKeypointsGtV1
+        ) {
+            egui::ComboBox::from_label("COCO crowd objects")
+                .selected_text(format!("{:?}", self.import_flow.coco_crowds))
+                .show_ui(ui, |ui| {
+                    for policy in [
+                        labello_client::CocoCrowdPolicy::Block,
+                        labello_client::CocoCrowdPolicy::Incomplete,
+                        labello_client::CocoCrowdPolicy::ExcludeImageTask,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.import_flow.coco_crowds,
+                            policy,
+                            format!("{policy:?}"),
+                        );
+                    }
+                });
+            show_mapping_issues(
+                ui,
+                &validation,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::CocoCrowds),
+            );
+            egui::ComboBox::from_label("COCO structure")
+                .selected_text(format!("{:?}", self.import_flow.coco_structure))
+                .show_ui(ui, |ui| {
+                    for policy in [
+                        labello_client::CocoStructurePolicy::Canonical,
+                        labello_client::CocoStructurePolicy::BboxCompatibility,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.import_flow.coco_structure,
+                            policy,
+                            format!("{policy:?}"),
+                        );
+                    }
+                });
+            show_mapping_issues(
+                ui,
+                &validation,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::CocoStructure),
+            );
+        }
         egui::ComboBox::from_label("Out-of-bounds geometry")
             .selected_text(format!("{:?}", self.import_flow.geometry_bounds))
             .show_ui(ui, |ui| {
@@ -1991,6 +2247,12 @@ impl LabelloApp {
                     );
                 }
             });
+        show_mapping_issues(
+            ui,
+            &validation,
+            None,
+            ImportMappingField::Compatibility(ImportCompatibilityField::GeometryBounds),
+        );
         egui::ComboBox::from_label("Cross-split duplicates")
             .selected_text(format!("{:?}", self.import_flow.cross_split_duplicates))
             .show_ui(ui, |ui| {
@@ -2005,20 +2267,12 @@ impl LabelloApp {
                     );
                 }
             });
-        egui::ComboBox::from_label("Missing keypoint names")
-            .selected_text(format!("{:?}", self.import_flow.missing_keypoint_names))
-            .show_ui(ui, |ui| {
-                for policy in [
-                    labello_client::MissingKeypointNamesPolicy::Block,
-                    labello_client::MissingKeypointNamesPolicy::GenerateIndexed,
-                ] {
-                    ui.selectable_value(
-                        &mut self.import_flow.missing_keypoint_names,
-                        policy,
-                        format!("{policy:?}"),
-                    );
-                }
-            });
+        show_mapping_issues(
+            ui,
+            &validation,
+            None,
+            ImportMappingField::Compatibility(ImportCompatibilityField::CrossSplitDuplicates),
+        );
     }
 
     fn import_running_step(&mut self, ui: &mut egui::Ui) {
@@ -2625,7 +2879,10 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_commit_import(&mut self) {
-        if !self.import_plan_is_current() || !self.import_plan_covers_all_categories() {
+        if !self.import_plan_is_current()
+            || !self.import_plan_covers_all_categories()
+            || !self.import_mappings_complete()
+        {
             self.import_flow.error = Some(
                 "Mappings changed or the accepted plan omits discovered categories/tasks. Save exact source mappings and wait for a complete matching plan before committing."
                     .to_string(),
@@ -2963,20 +3220,7 @@ impl LabelloApp {
         }
     }
 
-    fn import_plan_request(&self) -> UpdateImportPlanRequest {
-        let manual = self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1;
-        let manual_skeleton = manual.then(|| SkeletonSpec {
-            keypoints: split_csv(&self.import_flow.keypoint_names)
-                .into_iter()
-                .map(|name| labello_domain::KeypointSpec {
-                    name,
-                    required: false,
-                })
-                .collect(),
-            edges: Vec::new(),
-            allow_hidden: true,
-            allow_absent: true,
-        });
+    pub(crate) fn import_plan_request(&self) -> UpdateImportPlanRequest {
         let acknowledgements = self
             .import_flow
             .job
@@ -2987,205 +3231,183 @@ impl LabelloApp {
             .filter(|diagnostic| self.import_flow.acknowledgements.contains(&diagnostic.code))
             .map(|diagnostic| ImportAcknowledgementRequest {
                 diagnostic_code: diagnostic.code.clone(),
-                policy: policy_label(self.import_flow.geometry_policy).to_string(),
+                policy: self
+                    .import_flow
+                    .accepted_plan_request
+                    .as_ref()
+                    .and_then(|request| {
+                        request.acknowledgements.iter().find(|acknowledgement| {
+                            acknowledgement.diagnostic_code == diagnostic.code
+                        })
+                    })
+                    .map(|acknowledgement| acknowledgement.policy.clone())
+                    .unwrap_or_else(|| "mapping selection".to_string()),
                 affected_count: diagnostic.count,
                 acknowledged: true,
             })
             .collect();
-        if self
+        let mut task_mappings = Vec::new();
+        let mut skeleton_mappings = Vec::new();
+        for category in self
             .import_flow
             .categories
             .iter()
-            .any(|category| !category.geometry_mappings.is_empty())
+            .filter(|category| category.selected)
         {
-            let mut task_mappings = Vec::new();
-            let mut skeleton_mappings = Vec::new();
-            for category in self
-                .import_flow
-                .categories
+            let class_id = ClassId::from(category.class_id.trim());
+            let active_targets = category
+                .geometry_mappings
                 .iter()
-                .filter(|category| category.selected)
-            {
-                let class_id = ClassId::from(category.class_id.trim());
-                let active_targets = category
-                    .geometry_mappings
-                    .iter()
-                    .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
-                    .map(|mapping| mapping.target_geometry)
-                    .collect::<std::collections::BTreeSet<_>>();
-                for stored in category.task_mappings.iter().filter(|mapping| {
-                    active_targets.contains(&match mapping.task.annotation_type {
-                        AnnotationType::BoundingBox => ImportGeometryKind::BoundingBox,
-                        AnnotationType::Skeleton => ImportGeometryKind::Skeleton,
-                    })
-                }) {
-                    let mut mapping = stored.clone();
-                    mapping.source_category_key = category.source_category_key.trim().to_string();
-                    mapping.workflow_intent = category.workflow_intent;
-                    mapping.task.class_ids = vec![class_id.clone()];
-                    mapping.task.review = review_config(category.workflow_intent);
-                    match mapping.task.annotation_type {
-                        AnnotationType::BoundingBox => {
-                            mapping.task.task_id =
-                                TaskId::from(category.bounding_box_task_id.trim());
-                            mapping.task.name = category.bounding_box_task_name.trim().to_string();
-                        }
-                        AnnotationType::Skeleton => {
-                            mapping.task.task_id = TaskId::from(category.skeleton_task_id.trim());
-                            mapping.task.name = category.skeleton_task_name.trim().to_string();
-                            let manual = category.geometry_mappings.iter().any(|geometry| {
-                                geometry.target_geometry == ImportGeometryKind::Skeleton
-                                    && geometry.policy == ImportGeometryPolicy::ManualBoxGuideV1
-                            });
-                            mapping.task.manual_box_guide_migration =
-                                manual.then_some(labello_domain::ManualBoxGuideMigration {
-                                    guide_task_id: TaskId::from(
-                                        category.bounding_box_task_id.trim(),
-                                    ),
-                                    cardinality: labello_domain::MigrationCardinality::ExactlyOne,
-                                    allow_exclusion: true,
-                                    sequence:
-                                        labello_domain::MigrationSequence::ImportedSpatialOrderV1,
-                                });
-                        }
+                .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                .map(|mapping| mapping.target_geometry)
+                .collect::<std::collections::BTreeSet<_>>();
+            for stored in category.task_mappings.iter().filter(|mapping| {
+                active_targets.contains(&match mapping.task.annotation_type {
+                    AnnotationType::BoundingBox => ImportGeometryKind::BoundingBox,
+                    AnnotationType::Skeleton => ImportGeometryKind::Skeleton,
+                })
+            }) {
+                let mut mapping = stored.clone();
+                mapping.source_category_key = category.source_category_key.trim().to_string();
+                mapping.workflow_intent = category.workflow_intent;
+                mapping.task.class_ids = vec![class_id.clone()];
+                mapping.task.review = review_config(category.workflow_intent);
+                match mapping.task.annotation_type {
+                    AnnotationType::BoundingBox => {
+                        mapping.task.task_id = TaskId::from(category.bounding_box_task_id.trim());
+                        mapping.task.name = category.bounding_box_task_name.trim().to_string();
                     }
-                    task_mappings.push(mapping);
-                }
-                if active_targets.contains(&ImportGeometryKind::BoundingBox)
-                    && !task_mappings.iter().any(|mapping| {
-                        mapping.source_category_key == category.source_category_key
-                            && mapping.task.annotation_type == AnnotationType::BoundingBox
-                    })
-                {
-                    task_mappings.push(ImportTaskMappingRequest {
-                        source_category_key: category.source_category_key.clone(),
-                        task: mapped_task(
-                            TaskId::from(category.bounding_box_task_id.trim()),
-                            category.bounding_box_task_name.trim(),
-                            AnnotationType::BoundingBox,
-                            class_id.clone(),
-                            None,
-                            None,
-                            category.workflow_intent,
-                        ),
-                        workflow_intent: category.workflow_intent,
-                    });
-                }
-                if active_targets.contains(&ImportGeometryKind::Skeleton)
-                    && !task_mappings.iter().any(|mapping| {
-                        mapping.source_category_key == category.source_category_key
-                            && mapping.task.annotation_type == AnnotationType::Skeleton
-                    })
-                {
-                    let skeleton =
-                        category
-                            .source_skeleton
-                            .clone()
-                            .unwrap_or_else(|| SkeletonSpec {
-                                keypoints: split_csv(&category.target_keypoint_names)
-                                    .into_iter()
-                                    .map(|name| labello_domain::KeypointSpec {
-                                        name,
-                                        required: false,
-                                    })
-                                    .collect(),
-                                edges: Vec::new(),
-                                allow_hidden: true,
-                                allow_absent: true,
-                            });
-                    let manual = category.geometry_mappings.iter().any(|mapping| {
-                        mapping.target_geometry == ImportGeometryKind::Skeleton
-                            && mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1
-                    });
-                    task_mappings.push(ImportTaskMappingRequest {
-                        source_category_key: category.source_category_key.clone(),
-                        task: mapped_task(
-                            TaskId::from(category.skeleton_task_id.trim()),
-                            category.skeleton_task_name.trim(),
-                            AnnotationType::Skeleton,
-                            class_id.clone(),
-                            Some(skeleton.clone()),
+                    AnnotationType::Skeleton => {
+                        mapping.task.task_id = TaskId::from(category.skeleton_task_id.trim());
+                        mapping.task.name = category.skeleton_task_name.trim().to_string();
+                        let manual = category.geometry_mappings.iter().any(|geometry| {
+                            geometry.target_geometry == ImportGeometryKind::Skeleton
+                                && geometry.policy == ImportGeometryPolicy::ManualBoxGuideV1
+                        });
+                        mapping.task.manual_box_guide_migration =
                             manual.then_some(labello_domain::ManualBoxGuideMigration {
                                 guide_task_id: TaskId::from(category.bounding_box_task_id.trim()),
                                 cardinality: labello_domain::MigrationCardinality::ExactlyOne,
                                 allow_exclusion: true,
                                 sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
-                            }),
-                            category.workflow_intent,
-                        ),
-                        workflow_intent: category.workflow_intent,
-                    });
-                    skeleton_mappings.push(labello_client::ImportSkeletonMappingRequest {
-                        source_category_key: category.source_category_key.clone(),
-                        target_task_id: TaskId::from(category.skeleton_task_id.trim()),
-                        source_keypoint_names: if category
-                            .direct_geometry
-                            .contains(&ImportGeometryKind::Skeleton)
-                        {
-                            skeleton
-                                .keypoints
-                                .iter()
-                                .map(|point| point.name.clone())
-                                .collect()
-                        } else {
-                            Vec::new()
-                        },
-                        skeleton,
-                        names_confirmed: true,
-                    });
-                }
-                for stored in category
-                    .skeleton_mappings
-                    .iter()
-                    .filter(|_| active_targets.contains(&ImportGeometryKind::Skeleton))
-                {
-                    let mut mapping = stored.clone();
-                    mapping.source_category_key = category.source_category_key.trim().to_string();
-                    mapping.target_task_id = TaskId::from(category.skeleton_task_id.trim());
-                    if let Some(task) = task_mappings.iter().find(|task| {
-                        task.source_category_key == mapping.source_category_key
-                            && task.task.annotation_type == AnnotationType::Skeleton
-                    }) && let Some(skeleton) = task.task.skeleton.clone()
-                    {
-                        mapping.skeleton = skeleton;
+                            });
                     }
-                    skeleton_mappings.push(mapping);
                 }
+                task_mappings.push(mapping);
             }
-            return UpdateImportPlanRequest {
-                category_mappings: self
-                    .import_flow
-                    .categories
-                    .iter()
-                    .map(|category| ImportCategoryMappingRequest {
-                        source_category_key: category.source_category_key.trim().to_string(),
-                        source_category_id: category.source_category_id.trim().to_string(),
-                        class_id: ClassId::from(category.class_id.trim()),
-                        class_name: category.class_name.trim().to_string(),
-                        color: category.class_color.trim().to_string(),
-                        selected: category.selected,
-                    })
-                    .collect(),
-                geometry_mappings: self
-                    .import_flow
-                    .categories
-                    .iter()
-                    .filter(|category| category.selected)
-                    .flat_map(|category| category.geometry_mappings.iter().cloned())
-                    .collect(),
-                task_mappings,
-                skeleton_mappings,
-                compatibility: labello_client::ImportCompatibilityPolicies {
-                    yolo_missing_labels: self.import_flow.yolo_missing_labels,
-                    yolo_duplicate_rows: self.import_flow.yolo_duplicate_rows,
-                    coco_crowds: self.import_flow.coco_crowds,
-                    coco_structure: self.import_flow.coco_structure,
-                    geometry_bounds: self.import_flow.geometry_bounds,
-                    cross_split_duplicates: self.import_flow.cross_split_duplicates,
-                    missing_keypoint_names: self.import_flow.missing_keypoint_names,
-                },
-                acknowledgements,
-            };
+            if active_targets.contains(&ImportGeometryKind::BoundingBox)
+                && !task_mappings.iter().any(|mapping| {
+                    mapping.source_category_key == category.source_category_key
+                        && mapping.task.annotation_type == AnnotationType::BoundingBox
+                })
+            {
+                task_mappings.push(ImportTaskMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    task: mapped_task(
+                        TaskId::from(category.bounding_box_task_id.trim()),
+                        category.bounding_box_task_name.trim(),
+                        AnnotationType::BoundingBox,
+                        class_id.clone(),
+                        None,
+                        None,
+                        category.workflow_intent,
+                    ),
+                    workflow_intent: category.workflow_intent,
+                });
+            }
+            if active_targets.contains(&ImportGeometryKind::Skeleton)
+                && !task_mappings.iter().any(|mapping| {
+                    mapping.source_category_key == category.source_category_key
+                        && mapping.task.annotation_type == AnnotationType::Skeleton
+                })
+            {
+                let skeleton = category
+                    .source_skeleton
+                    .clone()
+                    .unwrap_or_else(|| SkeletonSpec {
+                        keypoints: split_csv(&category.target_keypoint_names)
+                            .into_iter()
+                            .map(|name| labello_domain::KeypointSpec {
+                                name,
+                                required: false,
+                            })
+                            .collect(),
+                        edges: Vec::new(),
+                        allow_hidden: true,
+                        allow_absent: true,
+                    });
+                let manual = category.geometry_mappings.iter().any(|mapping| {
+                    mapping.target_geometry == ImportGeometryKind::Skeleton
+                        && mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1
+                });
+                task_mappings.push(ImportTaskMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    task: mapped_task(
+                        TaskId::from(category.skeleton_task_id.trim()),
+                        category.skeleton_task_name.trim(),
+                        AnnotationType::Skeleton,
+                        class_id.clone(),
+                        Some(skeleton.clone()),
+                        manual.then_some(labello_domain::ManualBoxGuideMigration {
+                            guide_task_id: TaskId::from(category.bounding_box_task_id.trim()),
+                            cardinality: labello_domain::MigrationCardinality::ExactlyOne,
+                            allow_exclusion: true,
+                            sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
+                        }),
+                        category.workflow_intent,
+                    ),
+                    workflow_intent: category.workflow_intent,
+                });
+                skeleton_mappings.push(labello_client::ImportSkeletonMappingRequest {
+                    source_category_key: category.source_category_key.clone(),
+                    target_task_id: TaskId::from(category.skeleton_task_id.trim()),
+                    source_keypoint_names: if category.geometry_mappings.iter().any(|mapping| {
+                        mapping.target_geometry == ImportGeometryKind::Skeleton
+                            && mapping.policy == ImportGeometryPolicy::Direct
+                    }) {
+                        skeleton
+                            .keypoints
+                            .iter()
+                            .map(|point| point.name.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    skeleton,
+                    names_confirmed: true,
+                });
+            }
+            for stored in category
+                .skeleton_mappings
+                .iter()
+                .filter(|_| active_targets.contains(&ImportGeometryKind::Skeleton))
+            {
+                let mut mapping = stored.clone();
+                mapping.source_category_key = category.source_category_key.trim().to_string();
+                mapping.target_task_id = TaskId::from(category.skeleton_task_id.trim());
+                if let Some(task) = task_mappings.iter().find(|task| {
+                    task.source_category_key == mapping.source_category_key
+                        && task.task.annotation_type == AnnotationType::Skeleton
+                }) && let Some(skeleton) = task.task.skeleton.clone()
+                {
+                    mapping.skeleton = skeleton;
+                }
+                mapping.source_keypoint_names =
+                    if category.geometry_mappings.iter().any(|geometry| {
+                        geometry.target_geometry == ImportGeometryKind::Skeleton
+                            && geometry.policy == ImportGeometryPolicy::Direct
+                    }) {
+                        mapping
+                            .skeleton
+                            .keypoints
+                            .iter()
+                            .map(|point| point.name.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                skeleton_mappings.push(mapping);
+            }
         }
         UpdateImportPlanRequest {
             category_mappings: self
@@ -3207,158 +3429,19 @@ impl LabelloApp {
                 .iter()
                 .filter(|category| category.selected)
                 .flat_map(|category| {
-                    let key = category.source_category_key.trim().to_string();
-                    let mapping =
-                        |source_geometry, target_geometry, policy| ImportGeometryMappingRequest {
-                            source_category_key: key.clone(),
-                            source_geometry,
-                            target_geometry,
-                            policy,
-                            parameters: Vec::<ImportMappingParameter>::new(),
-                        };
-                    match self.import_flow.geometry_policy {
-                        ImportGeometryPolicy::Direct => {
-                            let mut mappings = Vec::new();
-                            if self.import_flow.direct_bounding_boxes {
-                                mappings.push(mapping(
-                                    ImportGeometryKind::BoundingBox,
-                                    ImportGeometryKind::BoundingBox,
-                                    ImportGeometryPolicy::Direct,
-                                ));
-                            }
-                            if self.import_flow.direct_skeletons {
-                                mappings.push(mapping(
-                                    ImportGeometryKind::Skeleton,
-                                    ImportGeometryKind::Skeleton,
-                                    ImportGeometryPolicy::Direct,
-                                ));
-                            }
-                            mappings
-                        }
-                        ImportGeometryPolicy::ManualBoxGuideV1 => vec![
-                            mapping(
-                                ImportGeometryKind::BoundingBox,
-                                ImportGeometryKind::BoundingBox,
-                                ImportGeometryPolicy::Direct,
-                            ),
-                            mapping(
-                                ImportGeometryKind::BoundingBox,
-                                ImportGeometryKind::Skeleton,
-                                ImportGeometryPolicy::ManualBoxGuideV1,
-                            ),
-                        ],
-                        ImportGeometryPolicy::Omit => {
-                            let mut mappings = vec![mapping(
-                                ImportGeometryKind::BoundingBox,
-                                ImportGeometryKind::BoundingBox,
-                                ImportGeometryPolicy::Omit,
-                            )];
-                            if profile_has_skeletons(self.import_flow.profile) {
-                                mappings.push(mapping(
-                                    ImportGeometryKind::Skeleton,
-                                    ImportGeometryKind::Skeleton,
-                                    ImportGeometryPolicy::Omit,
-                                ));
-                            }
-                            mappings
-                        }
-                        ImportGeometryPolicy::KeypointEnvelopeV1
-                        | ImportGeometryPolicy::BoxRelativeTemplateV1 => Vec::new(),
-                    }
+                    category
+                        .geometry_mappings
+                        .iter()
+                        .cloned()
+                        .map(|mut mapping| {
+                            mapping.source_category_key =
+                                category.source_category_key.trim().to_string();
+                            mapping
+                        })
                 })
                 .collect(),
-            task_mappings: self
-                .import_flow
-                .categories
-                .iter()
-                .filter(|category| category.selected)
-                .flat_map(|category| {
-                    let class_id = ClassId::from(category.class_id.trim());
-                    let key = category.source_category_key.trim().to_string();
-                    let mut mappings = Vec::new();
-                    let include_box = manual
-                        || (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                            && self.import_flow.direct_bounding_boxes);
-                    if include_box {
-                        mappings.push(ImportTaskMappingRequest {
-                            source_category_key: key.clone(),
-                            task: mapped_task(
-                                TaskId::from(category.bounding_box_task_id.trim()),
-                                category.bounding_box_task_name.trim(),
-                                AnnotationType::BoundingBox,
-                                class_id.clone(),
-                                None,
-                                None,
-                                self.import_flow.workflow_intent,
-                            ),
-                            workflow_intent: self.import_flow.workflow_intent,
-                        });
-                    }
-                    let include_skeleton = manual
-                        || (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                            && self.import_flow.direct_skeletons);
-                    if include_skeleton {
-                        let guide_task_id = TaskId::from(category.bounding_box_task_id.trim());
-                        let migration = manual.then_some(labello_domain::ManualBoxGuideMigration {
-                            guide_task_id,
-                            cardinality: labello_domain::MigrationCardinality::ExactlyOne,
-                            allow_exclusion: true,
-                            sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
-                        });
-                        mappings.push(ImportTaskMappingRequest {
-                            source_category_key: key,
-                            task: mapped_task(
-                                TaskId::from(category.skeleton_task_id.trim()),
-                                category.skeleton_task_name.trim(),
-                                AnnotationType::Skeleton,
-                                class_id,
-                                if manual {
-                                    manual_skeleton.clone()
-                                } else {
-                                    category.source_skeleton.clone()
-                                },
-                                migration,
-                                self.import_flow.workflow_intent,
-                            ),
-                            workflow_intent: self.import_flow.workflow_intent,
-                        });
-                    }
-                    mappings
-                })
-                .collect(),
-            skeleton_mappings: self
-                .import_flow
-                .categories
-                .iter()
-                .filter(|category| {
-                    category.selected
-                        && (manual
-                            || (self.import_flow.geometry_policy == ImportGeometryPolicy::Direct
-                                && self.import_flow.direct_skeletons))
-                })
-                .filter_map(|category| {
-                    let skeleton = if manual {
-                        manual_skeleton.clone()
-                    } else {
-                        category.source_skeleton.clone()
-                    }?;
-                    Some(labello_client::ImportSkeletonMappingRequest {
-                        source_category_key: category.source_category_key.trim().to_string(),
-                        target_task_id: TaskId::from(category.skeleton_task_id.trim()),
-                        source_keypoint_names: if manual {
-                            Vec::new()
-                        } else {
-                            skeleton
-                                .keypoints
-                                .iter()
-                                .map(|keypoint| keypoint.name.clone())
-                                .collect()
-                        },
-                        skeleton: skeleton.clone(),
-                        names_confirmed: true,
-                    })
-                })
-                .collect(),
+            task_mappings,
+            skeleton_mappings,
             compatibility: labello_client::ImportCompatibilityPolicies {
                 yolo_missing_labels: self.import_flow.yolo_missing_labels,
                 yolo_duplicate_rows: self.import_flow.yolo_duplicate_rows,
@@ -3460,7 +3543,8 @@ impl LabelloApp {
         })
     }
 
-    fn import_mappings_complete(&self) -> bool {
+    fn import_mapping_validation(&self) -> ImportMappingValidation {
+        let mut validation = ImportMappingValidation::default();
         let discovered = self
             .import_flow
             .job
@@ -3474,184 +3558,628 @@ impl LabelloApp {
                     .map(|plan| plan.report.source.categories as usize)
             })
             .unwrap_or(0);
-        let mut source_keys = std::collections::BTreeSet::new();
-        let mut class_ids = std::collections::BTreeSet::new();
-        let mut task_ids = std::collections::BTreeSet::new();
-        let selected = self
+        if discovered == 0 {
+            push_mapping_issue(
+                &mut validation,
+                ImportMappingIssueSeverity::Error,
+                None,
+                ImportMappingField::Form,
+                "Preflight has not reported any source categories to map.",
+            );
+        } else if self.import_flow.categories.len() != discovered {
+            push_mapping_issue(
+                &mut validation,
+                ImportMappingIssueSeverity::Error,
+                None,
+                ImportMappingField::Form,
+                format!(
+                    "Expected {discovered} source categories, but the mapping contract contains {}.",
+                    self.import_flow.categories.len()
+                ),
+            );
+        }
+
+        let selected_indices = self
             .import_flow
             .categories
             .iter()
-            .filter(|category| category.selected)
-            .count();
-        let direct = self.import_flow.geometry_policy == ImportGeometryPolicy::Direct;
-        let manual = self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1;
-        let category_specific = self
-            .import_flow
-            .categories
-            .iter()
-            .any(|category| !category.geometry_mappings.is_empty());
-        let manual_categories = if category_specific {
-            self.import_flow
-                .categories
-                .iter()
-                .filter(|category| {
-                    category.selected
-                        && category
-                            .geometry_mappings
-                            .iter()
-                            .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1)
-                })
-                .count()
-        } else if manual {
-            selected
-        } else {
-            0
-        };
+            .enumerate()
+            .filter_map(|(index, category)| category.selected.then_some(index))
+            .collect::<Vec<_>>();
+        if selected_indices.is_empty() {
+            push_mapping_issue(
+                &mut validation,
+                ImportMappingIssueSeverity::Error,
+                None,
+                ImportMappingField::CategorySelection,
+                "Include at least one source category.",
+            );
+        }
+
+        let mut source_key_owners = std::collections::BTreeMap::<String, Vec<usize>>::new();
+        let mut class_id_owners = std::collections::BTreeMap::<String, Vec<usize>>::new();
+        let mut task_id_owners =
+            std::collections::BTreeMap::<String, Vec<(usize, ImportMappingField)>>::new();
+        let mut generated_tasks = 0_usize;
         let manual_available = self
             .import_flow
             .capabilities
             .as_ref()
             .is_some_and(|capabilities| capabilities.manual_box_guide_migration);
-        let has_seed_workflow = if category_specific {
-            self.import_flow.categories.iter().any(|category| {
-                category.selected
-                    && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
-            })
-        } else {
-            self.import_flow.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
-        };
-        discovered > 0
-            && self.import_flow.categories.len() == discovered
-            && selected > 0
-            && self.import_flow.categories.iter().all(|category| {
-                let active_targets = category
-                    .geometry_mappings
-                    .iter()
-                    .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
-                    .map(|mapping| mapping.target_geometry)
-                    .collect::<std::collections::BTreeSet<_>>();
-                let category_manual = category
-                    .geometry_mappings
-                    .iter()
-                    .any(|mapping| mapping.policy == ImportGeometryPolicy::ManualBoxGuideV1);
-                let bounding_boxes = if category_specific {
-                    active_targets.contains(&ImportGeometryKind::BoundingBox)
-                } else {
-                    (direct && self.import_flow.direct_bounding_boxes) || manual
-                };
-                let skeletons = if category_specific {
-                    active_targets.contains(&ImportGeometryKind::Skeleton)
-                } else {
-                    (direct && self.import_flow.direct_skeletons) || manual
-                };
-                let skeleton_schema_valid = if category_specific {
-                    category.geometry_mappings.iter().all(|mapping| {
-                        mapping.policy == ImportGeometryPolicy::Omit
-                            || mapping.target_geometry != ImportGeometryKind::Skeleton
-                            || match mapping.source_geometry {
-                                ImportGeometryKind::Skeleton => category.source_skeleton.is_some(),
-                                ImportGeometryKind::BoundingBox => {
-                                    !split_csv(&category.target_keypoint_names).is_empty()
-                                }
-                            }
+        let max_keypoints = self
+            .import_flow
+            .capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.limits.max_keypoints_per_skeleton as usize)
+            .unwrap_or(usize::MAX);
+
+        for (index, category) in self.import_flow.categories.iter().enumerate() {
+            source_key_owners
+                .entry(category.source_category_key.trim().to_string())
+                .or_default()
+                .push(index);
+            if category.source_category_key.trim().is_empty()
+                || category.source_category_id.trim().is_empty()
+            {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::Form,
+                    "The server mapping contract is missing this category's source key or ID.",
+                );
+            }
+            if ClassId::from(category.class_id.trim())
+                .validate_path_segment()
+                .is_err()
+            {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::ClassId,
+                    "Class ID must be a non-empty safe path segment of at most 255 bytes.",
+                );
+            }
+            if category.class_name.trim().is_empty() {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::ClassName,
+                    "Class name cannot be empty.",
+                );
+            }
+            if !valid_color(category.class_color.trim()) {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::ClassColor,
+                    "Class color must use #RRGGBB hexadecimal format.",
+                );
+            }
+            if category.selected {
+                class_id_owners
+                    .entry(category.class_id.trim().to_string())
+                    .or_default()
+                    .push(index);
+            }
+
+            if !category.selected {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Warning,
+                    Some(index),
+                    ImportMappingField::CategorySelection,
+                    "This source category and its annotations will be excluded from the import.",
+                );
+                continue;
+            }
+
+            let mut targets = std::collections::BTreeSet::new();
+            let active_targets = category
+                .geometry_mappings
+                .iter()
+                .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                .map(|mapping| mapping.target_geometry)
+                .collect::<std::collections::BTreeSet<_>>();
+            if active_targets.is_empty() {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::CategorySelection,
+                    "An included category must produce at least one annotation output.",
+                );
+            }
+
+            for mapping in &category.geometry_mappings {
+                let field = ImportMappingField::Geometry(mapping.target_geometry);
+                if !targets.insert(mapping.target_geometry) {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        field,
+                        "Each category can define a target output only once.",
+                    );
+                }
+                if mapping.policy != ImportGeometryPolicy::Omit
+                    && !category.direct_geometry.contains(&mapping.source_geometry)
+                {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        field,
+                        "The selected source geometry was not discovered for this category.",
+                    );
+                }
+                if !geometry_choices_for_target(
+                    mapping.target_geometry,
+                    &category.direct_geometry,
+                    manual_available,
+                    category.source_skeleton.is_some(),
+                )
+                .iter()
+                .any(|choice| {
+                    choice.policy == mapping.policy
+                        && (mapping.policy == ImportGeometryPolicy::Omit
+                            || choice.source == mapping.source_geometry)
+                }) {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        field,
+                        "Choose a supported source-to-output transformation.",
+                    );
+                }
+                let target_skeleton = category.source_skeleton.as_ref().cloned().or_else(|| {
+                    let names = split_csv(&category.target_keypoint_names);
+                    (!names.is_empty()).then(|| SkeletonSpec {
+                        keypoints: names
+                            .into_iter()
+                            .map(|name| labello_domain::KeypointSpec {
+                                name,
+                                required: false,
+                            })
+                            .collect(),
+                        edges: Vec::new(),
+                        allow_hidden: true,
+                        allow_absent: true,
                     })
-                } else if manual {
-                    !split_csv(&self.import_flow.keypoint_names).is_empty()
-                } else {
-                    !skeletons || category.source_skeleton.is_some()
-                };
-                !category.source_category_key.trim().is_empty()
-                    && !category.source_category_id.trim().is_empty()
-                    && ClassId::from(category.class_id.trim())
-                        .validate_path_segment()
-                        .is_ok()
-                    && !category.class_name.trim().is_empty()
-                    && valid_color(&category.class_color)
-                    && source_keys.insert(category.source_category_key.trim())
-                    && (!category.selected || class_ids.insert(category.class_id.trim()))
-                    && (!category.selected || !category_manual || bounding_boxes)
-                    && (!category.selected || !category_specific || bounding_boxes || skeletons)
-                    && (!category.selected
-                        || !bounding_boxes
-                        || (!category.bounding_box_task_name.trim().is_empty()
-                            && TaskId::from(category.bounding_box_task_id.trim())
-                                .validate_path_segment()
-                                .is_ok()
-                            && task_ids.insert(category.bounding_box_task_id.trim())))
-                    && (!category.selected
-                        || !skeletons
-                        || (!category.skeleton_task_name.trim().is_empty()
-                            && TaskId::from(category.skeleton_task_id.trim())
-                                .validate_path_segment()
-                                .is_ok()
-                            && task_ids.insert(category.skeleton_task_id.trim())
-                            && skeleton_schema_valid))
-            })
-            && (category_specific
-                || !direct
-                || self.import_flow.direct_bounding_boxes
-                || self.import_flow.direct_skeletons)
-            && (category_specific || self.import_flow.geometry_policy != ImportGeometryPolicy::Omit)
-            && (!has_seed_workflow || self.import_flow.seed_workflow_confirmed)
-            && (manual_categories == 0 || manual_available)
+                });
+                for message in mapping_parameter_errors(mapping, target_skeleton.as_ref()) {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        field,
+                        message,
+                    );
+                }
+                match mapping.policy {
+                    ImportGeometryPolicy::KeypointEnvelopeV1 => push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Warning,
+                        Some(index),
+                        field,
+                        "Derived envelopes are pending seeds and require acknowledgement after preflight.",
+                    ),
+                    ImportGeometryPolicy::BoxRelativeTemplateV1 => push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Warning,
+                        Some(index),
+                        field,
+                        "Template skeletons are derived pending seeds and require acknowledgement after preflight.",
+                    ),
+                    ImportGeometryPolicy::ManualBoxGuideV1 => {
+                        if !manual_available {
+                            push_mapping_issue(
+                                &mut validation,
+                                ImportMappingIssueSeverity::Error,
+                                Some(index),
+                                field,
+                                "Manual box-guide migration is not available on this server.",
+                            );
+                        }
+                        if !self.import_flow.exhaustive {
+                            push_mapping_issue(
+                                &mut validation,
+                                ImportMappingIssueSeverity::Error,
+                                Some(index),
+                                field,
+                                "Manual box-guide migration requires an exhaustive source attestation.",
+                            );
+                        }
+                        if category.source_skeleton.is_some()
+                            || category
+                                .direct_geometry
+                                .contains(&ImportGeometryKind::Skeleton)
+                        {
+                            push_mapping_issue(
+                                &mut validation,
+                                ImportMappingIssueSeverity::Error,
+                                Some(index),
+                                field,
+                                "Manual box-guide migration only supports categories without source skeleton geometry.",
+                            );
+                        }
+                        if !active_targets.contains(&ImportGeometryKind::BoundingBox) {
+                            push_mapping_issue(
+                                &mut validation,
+                                ImportMappingIssueSeverity::Error,
+                                Some(index),
+                                field,
+                                "Manual migration requires a direct bounding-box guide output.",
+                            );
+                        }
+                    }
+                    ImportGeometryPolicy::Omit => push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Warning,
+                        Some(index),
+                        field,
+                        "This annotation output will not be imported for the category.",
+                    ),
+                    ImportGeometryPolicy::Direct => {}
+                }
+            }
+
+            let bounding_boxes = active_targets.contains(&ImportGeometryKind::BoundingBox);
+            let skeletons = active_targets.contains(&ImportGeometryKind::Skeleton);
+            if bounding_boxes {
+                generated_tasks += 1;
+                if TaskId::from(category.bounding_box_task_id.trim())
+                    .validate_path_segment()
+                    .is_err()
+                {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::BoundingBoxTaskId,
+                        "Bounding-box task ID must be a non-empty safe path segment of at most 255 bytes.",
+                    );
+                }
+                if category.bounding_box_task_name.trim().is_empty() {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::BoundingBoxTaskName,
+                        "Bounding-box task name cannot be empty.",
+                    );
+                }
+                task_id_owners
+                    .entry(category.bounding_box_task_id.trim().to_string())
+                    .or_default()
+                    .push((index, ImportMappingField::BoundingBoxTaskId));
+            }
+            if skeletons {
+                generated_tasks += 1;
+                if TaskId::from(category.skeleton_task_id.trim())
+                    .validate_path_segment()
+                    .is_err()
+                {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::SkeletonTaskId,
+                        "Skeleton task ID must be a non-empty safe path segment of at most 255 bytes.",
+                    );
+                }
+                if category.skeleton_task_name.trim().is_empty() {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::SkeletonTaskName,
+                        "Skeleton task name cannot be empty.",
+                    );
+                }
+                task_id_owners
+                    .entry(category.skeleton_task_id.trim().to_string())
+                    .or_default()
+                    .push((index, ImportMappingField::SkeletonTaskId));
+                let target_names = category.source_skeleton.as_ref().map_or_else(
+                    || split_csv(&category.target_keypoint_names),
+                    |skeleton| {
+                        skeleton
+                            .keypoints
+                            .iter()
+                            .map(|point| point.name.clone())
+                            .collect()
+                    },
+                );
+                let unique = target_names
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                if target_names.is_empty() {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::TargetKeypointNames,
+                        "Skeleton output requires at least one target keypoint.",
+                    );
+                } else if unique.len() != target_names.len() {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::TargetKeypointNames,
+                        "Target keypoint names must be unique.",
+                    );
+                }
+                if target_names.len() > max_keypoints {
+                    push_mapping_issue(
+                        &mut validation,
+                        ImportMappingIssueSeverity::Error,
+                        Some(index),
+                        ImportMappingField::TargetKeypointNames,
+                        format!(
+                            "Target skeleton has {} keypoints; the server limit is {max_keypoints}.",
+                            target_names.len()
+                        ),
+                    );
+                }
+            }
+
+            if category.workflow_intent == ImportWorkflowIntent::AuthoritativeGroundTruth
+                && !self.import_flow.exhaustive
+            {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(index),
+                    ImportMappingField::WorkflowIntent,
+                    "Authoritative ground truth requires an exhaustive source attestation.",
+                );
+            }
+            if category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Warning,
+                    Some(index),
+                    ImportMappingField::WorkflowIntent,
+                    "Imported geometry remains pending for future human annotation.",
+                );
+            } else if category.workflow_intent == ImportWorkflowIntent::RequireApproval {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Warning,
+                    Some(index),
+                    ImportMappingField::WorkflowIntent,
+                    "Imported annotations require one human approval before completion.",
+                );
+            }
+        }
+
+        for owners in source_key_owners.values().filter(|owners| owners.len() > 1) {
+            for index in owners {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(*index),
+                    ImportMappingField::Form,
+                    "The server mapping contract contains a duplicate source category key.",
+                );
+            }
+        }
+        for owners in class_id_owners.values().filter(|owners| owners.len() > 1) {
+            for index in owners {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(*index),
+                    ImportMappingField::ClassId,
+                    "Included categories must use unique class IDs.",
+                );
+            }
+        }
+        for owners in task_id_owners.values().filter(|owners| owners.len() > 1) {
+            for (index, field) in owners {
+                push_mapping_issue(
+                    &mut validation,
+                    ImportMappingIssueSeverity::Error,
+                    Some(*index),
+                    *field,
+                    "Every generated task must use a unique task ID.",
+                );
+            }
+        }
+        if let Some(limit) = self
+            .import_flow
+            .capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.limits.max_generated_tasks as usize)
+            && generated_tasks > limit
+        {
+            push_mapping_issue(
+                &mut validation,
+                ImportMappingIssueSeverity::Error,
+                None,
+                ImportMappingField::Form,
+                format!(
+                    "The mapping generates {generated_tasks} tasks; the server limit is {limit}."
+                ),
+            );
+        }
+
+        let has_seed_workflow = self.import_flow.categories.iter().any(|category| {
+            category.selected
+                && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
+        });
+        if has_seed_workflow && !self.import_flow.seed_workflow_confirmed {
+            push_mapping_issue(
+                &mut validation,
+                ImportMappingIssueSeverity::Error,
+                None,
+                ImportMappingField::SeedConfirmation,
+                "Confirm the selected pending seed workflows before saving.",
+            );
+        }
+
+        self.add_compatibility_policy_issues(&mut validation);
+        validation
+    }
+
+    fn add_compatibility_policy_issues(&self, validation: &mut ImportMappingValidation) {
+        let profile = self.import_flow.profile;
+        if matches!(
+            profile,
+            ImportProfile::UltralyticsYoloDetectV1 | ImportProfile::UltralyticsYoloPoseV1
+        ) {
+            match self.import_flow.yolo_missing_labels {
+                labello_client::YoloMissingLabelPolicy::Incomplete => push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::YoloMissingLabels),
+                    "If a label file is missing, coverage remains incomplete.",
+                ),
+                labello_client::YoloMissingLabelPolicy::MissingIsBackground => push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::YoloMissingLabels),
+                    "Missing label files will be treated as verified background and require acknowledgement when encountered.",
+                ),
+                labello_client::YoloMissingLabelPolicy::Block => {}
+            }
+            if self.import_flow.yolo_duplicate_rows
+                == labello_client::YoloDuplicateRowPolicy::Deduplicate
+            {
+                push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::YoloDuplicateRows),
+                    "Exact duplicate YOLO rows will be discarded and require acknowledgement when encountered.",
+                );
+            }
+            if profile == ImportProfile::UltralyticsYoloPoseV1
+                && self.import_flow.missing_keypoint_names
+                    == labello_client::MissingKeypointNamesPolicy::GenerateIndexed
+            {
+                push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(
+                        ImportCompatibilityField::MissingKeypointNames,
+                    ),
+                    "Missing keypoint names will be generated by index without inferred edges.",
+                );
+            }
+        }
+        if matches!(
+            profile,
+            ImportProfile::CocoInstancesGtV1 | ImportProfile::CocoKeypointsGtV1
+        ) {
+            match self.import_flow.coco_crowds {
+                labello_client::CocoCrowdPolicy::Incomplete => push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::CocoCrowds),
+                    "Crowd objects will be skipped and leave coverage incomplete.",
+                ),
+                labello_client::CocoCrowdPolicy::ExcludeImageTask => push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::CocoCrowds),
+                    "Crowd objects will exclude the affected image-task pair.",
+                ),
+                labello_client::CocoCrowdPolicy::Block => {}
+            }
+            if self.import_flow.coco_structure
+                == labello_client::CocoStructurePolicy::BboxCompatibility
+            {
+                push_mapping_issue(
+                    validation,
+                    ImportMappingIssueSeverity::Warning,
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::CocoStructure),
+                    "BBox compatibility may synthesize noncanonical COCO fields and always requires acknowledgement.",
+                );
+            }
+        }
+        if self.import_flow.geometry_bounds == labello_client::GeometryBoundsPolicy::Clip {
+            push_mapping_issue(
+                validation,
+                ImportMappingIssueSeverity::Warning,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::GeometryBounds),
+                "Out-of-bounds geometry will be clipped as derived pending data and requires acknowledgement.",
+            );
+        }
+        if self.import_flow.cross_split_duplicates
+            == labello_client::CrossSplitDuplicatePolicy::MergeMemberships
+        {
+            push_mapping_issue(
+                validation,
+                ImportMappingIssueSeverity::Warning,
+                None,
+                ImportMappingField::Compatibility(ImportCompatibilityField::CrossSplitDuplicates),
+                "Duplicate images will retain multiple split memberships and require acknowledgement when encountered.",
+            );
+        }
+    }
+
+    fn import_mappings_complete(&self) -> bool {
+        self.import_mapping_validation().is_valid()
     }
 
     fn import_plan_is_current(&self) -> bool {
         let Some(plan) = self.import_flow.plan.as_ref() else {
             return false;
         };
-        if let Some(accepted) = self.import_flow.accepted_plan_request.as_ref() {
-            return accepted == &self.import_plan_request();
-        }
-        self.import_flow.job.as_ref().is_some_and(|job| {
-            job.plan_hash.as_deref() == Some(plan.plan_hash.as_str())
-                && job.source_fingerprint.as_deref() == Some(plan.source_fingerprint.as_str())
-        })
+        self.import_flow
+            .accepted_plan_request
+            .as_ref()
+            .or(plan.accepted_request.as_ref())
+            .is_some_and(|accepted| accepted == &self.import_plan_request())
     }
 
     fn import_plan_covers_all_categories(&self) -> bool {
         let Some(plan) = self.import_flow.plan.as_ref() else {
             return false;
         };
+        let (selected, required_tasks) = self.import_required_output_counts();
+        selected > 0
+            && plan.report.output.classes == selected
+            && plan.report.output.tasks >= required_tasks
+    }
+
+    fn import_required_output_counts(&self) -> (u64, u64) {
         let selected = self
             .import_flow
             .categories
             .iter()
             .filter(|category| category.selected)
             .count() as u64;
-        let category_specific = self
+        let required_tasks = self
             .import_flow
             .categories
             .iter()
-            .any(|category| !category.geometry_mappings.is_empty());
-        let required_tasks = if category_specific {
-            self.import_flow
-                .categories
-                .iter()
-                .filter(|category| category.selected)
-                .map(|category| {
-                    category
-                        .geometry_mappings
-                        .iter()
-                        .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
-                        .map(|mapping| mapping.target_geometry)
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len() as u64
-                })
-                .sum()
-        } else {
-            let tasks_per_category =
-                if self.import_flow.geometry_policy == ImportGeometryPolicy::ManualBoxGuideV1 {
-                    2
-                } else {
-                    u64::from(self.import_flow.direct_bounding_boxes)
-                        + u64::from(self.import_flow.direct_skeletons)
-                };
-            selected.saturating_mul(tasks_per_category)
-        };
-        selected > 0
-            && plan.report.output.classes == selected
-            && plan.report.output.tasks >= required_tasks
+            .filter(|category| category.selected)
+            .map(|category| {
+                category
+                    .geometry_mappings
+                    .iter()
+                    .filter(|mapping| mapping.policy != ImportGeometryPolicy::Omit)
+                    .map(|mapping| mapping.target_geometry)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len() as u64
+            })
+            .sum();
+        (selected, required_tasks)
     }
 
     fn restart_import_setup(&mut self) {
@@ -3780,13 +4308,6 @@ fn is_coco_profile(profile: ImportProfile) -> bool {
     matches!(
         profile,
         ImportProfile::CocoInstancesGtV1 | ImportProfile::CocoKeypointsGtV1
-    )
-}
-
-fn profile_has_skeletons(profile: ImportProfile) -> bool {
-    matches!(
-        profile,
-        ImportProfile::UltralyticsYoloPoseV1 | ImportProfile::CocoKeypointsGtV1
     )
 }
 
@@ -4152,16 +4673,7 @@ fn descriptor_kind(profile: ImportProfile) -> ImportDescriptorKind {
     }
 }
 
-fn policy_label(policy: ImportGeometryPolicy) -> &'static str {
-    match policy {
-        ImportGeometryPolicy::Direct => "Direct",
-        ImportGeometryPolicy::KeypointEnvelopeV1 => "Keypoint envelope",
-        ImportGeometryPolicy::ManualBoxGuideV1 => "Manual box guide",
-        ImportGeometryPolicy::BoxRelativeTemplateV1 => "Box-relative template",
-        ImportGeometryPolicy::Omit => "Omit",
-    }
-}
-
+#[cfg(test)]
 fn policies_for_mapping(
     source: ImportGeometryKind,
     target: ImportGeometryKind,
@@ -4190,11 +4702,204 @@ fn policies_for_mapping(
     policies
 }
 
+fn geometry_choices_for_target(
+    target: ImportGeometryKind,
+    available: &[ImportGeometryKind],
+    manual_box_guide_available: bool,
+    has_source_skeleton: bool,
+) -> Vec<ImportGeometryChoice> {
+    let mut choices = Vec::new();
+    match target {
+        ImportGeometryKind::BoundingBox => {
+            if available.contains(&ImportGeometryKind::BoundingBox) {
+                choices.push(ImportGeometryChoice {
+                    source: ImportGeometryKind::BoundingBox,
+                    policy: ImportGeometryPolicy::Direct,
+                    label: "Direct bounding boxes",
+                });
+            }
+            if available.contains(&ImportGeometryKind::Skeleton) {
+                choices.push(ImportGeometryChoice {
+                    source: ImportGeometryKind::Skeleton,
+                    policy: ImportGeometryPolicy::KeypointEnvelopeV1,
+                    label: "Derive boxes from skeletons",
+                });
+            }
+        }
+        ImportGeometryKind::Skeleton => {
+            if available.contains(&ImportGeometryKind::Skeleton) {
+                choices.push(ImportGeometryChoice {
+                    source: ImportGeometryKind::Skeleton,
+                    policy: ImportGeometryPolicy::Direct,
+                    label: "Direct skeletons",
+                });
+            }
+            if available.contains(&ImportGeometryKind::BoundingBox) {
+                choices.push(ImportGeometryChoice {
+                    source: ImportGeometryKind::BoundingBox,
+                    policy: ImportGeometryPolicy::BoxRelativeTemplateV1,
+                    label: "Template skeletons from boxes",
+                });
+                if manual_box_guide_available && !has_source_skeleton {
+                    choices.push(ImportGeometryChoice {
+                        source: ImportGeometryKind::BoundingBox,
+                        policy: ImportGeometryPolicy::ManualBoxGuideV1,
+                        label: "Manual box guide",
+                    });
+                }
+            }
+        }
+    }
+    choices.push(ImportGeometryChoice {
+        source: available.first().copied().unwrap_or(target),
+        policy: ImportGeometryPolicy::Omit,
+        label: "Do not import this output",
+    });
+    choices
+}
+
+fn mapping_parameter_errors(
+    mapping: &ImportGeometryMappingRequest,
+    skeleton: Option<&SkeletonSpec>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    match mapping.policy {
+        ImportGeometryPolicy::Direct
+        | ImportGeometryPolicy::ManualBoxGuideV1
+        | ImportGeometryPolicy::Omit => {
+            if !mapping.parameters.is_empty() {
+                errors.push("This output policy does not accept parameters.".to_string());
+            }
+        }
+        ImportGeometryPolicy::KeypointEnvelopeV1 => {
+            let mut padding = None;
+            let mut minimum_pixels = None;
+            let mut include_hidden = None;
+            for parameter in &mapping.parameters {
+                match parameter {
+                    ImportMappingParameter::Scalar { name, value }
+                        if matches!(
+                            name.as_str(),
+                            "padding" | "padding_ratio" | "paddingRatio"
+                        ) && padding.replace(*value).is_none() => {}
+                    ImportMappingParameter::Scalar { name, value }
+                        if matches!(
+                            name.as_str(),
+                            "minimum_pixels" | "minimumPixels" | "min_pixels" | "minPixels"
+                        ) && minimum_pixels.replace(*value).is_none() => {}
+                    ImportMappingParameter::Boolean { name, value }
+                        if matches!(
+                            name.as_str(),
+                            "include_hidden" | "includeHidden" | "hidden"
+                        ) && include_hidden.replace(*value).is_none() => {}
+                    _ => errors.push(
+                        "Envelope parameters must contain one padding, minimum-pixels, and hidden value."
+                            .to_string(),
+                    ),
+                }
+            }
+            if padding.is_none_or(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+                errors.push("Envelope padding must be between 0 and 1.".to_string());
+            }
+            if minimum_pixels.is_none_or(|value| {
+                !value.is_finite()
+                    || value.fract() != 0.0
+                    || value < 1.0
+                    || value > f64::from(u32::MAX)
+            }) {
+                errors.push(
+                    "Envelope minimum pixels must be a whole number from 1 through 4294967295."
+                        .to_string(),
+                );
+            }
+            if include_hidden.is_none() {
+                errors.push("Choose whether hidden keypoints contribute to envelopes.".to_string());
+            }
+        }
+        ImportGeometryPolicy::BoxRelativeTemplateV1 => {
+            let Some(skeleton) = skeleton else {
+                errors.push("Define a target skeleton before editing template points.".to_string());
+                return errors;
+            };
+            if mapping.parameters.len() != skeleton.keypoints.len() || mapping.parameters.is_empty()
+            {
+                errors.push(
+                    "Template points must define every target keypoint exactly once.".to_string(),
+                );
+                return errors;
+            }
+            let mut any_present = false;
+            for (parameter, spec) in mapping.parameters.iter().zip(&skeleton.keypoints) {
+                let ImportMappingParameter::Point { name, x, y, state } = parameter else {
+                    errors.push("Template parameters must be named points.".to_string());
+                    continue;
+                };
+                if name != &spec.name {
+                    errors.push(
+                        "Template point names and order must match the target skeleton."
+                            .to_string(),
+                    );
+                }
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !(0.0..=1.0).contains(x)
+                    || !(0.0..=1.0).contains(y)
+                {
+                    errors.push("Template point coordinates must be between 0 and 1.".to_string());
+                }
+                match state {
+                    labello_domain::KeypointState::Visible => any_present = true,
+                    labello_domain::KeypointState::Hidden => {
+                        any_present = true;
+                        if !skeleton.allow_hidden {
+                            errors.push(
+                                "This target skeleton does not allow hidden keypoints.".to_string(),
+                            );
+                        }
+                    }
+                    labello_domain::KeypointState::Absent => {
+                        if !skeleton.allow_absent || spec.required {
+                            errors.push(
+                                "A required target keypoint cannot be marked absent.".to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            if !any_present {
+                errors.push("At least one template keypoint must be present.".to_string());
+            }
+        }
+    }
+    errors.sort();
+    errors.dedup();
+    errors
+}
+
+fn push_mapping_issue(
+    validation: &mut ImportMappingValidation,
+    severity: ImportMappingIssueSeverity,
+    category_index: Option<usize>,
+    field: ImportMappingField,
+    message: impl Into<String>,
+) {
+    let issue = ImportMappingIssue {
+        severity,
+        category_index,
+        field,
+        message: message.into(),
+    };
+    if !validation.issues.contains(&issue) {
+        validation.issues.push(issue);
+    }
+}
+
 fn mapping_parameter_editor(
     ui: &mut egui::Ui,
     mapping: &mut ImportGeometryMappingRequest,
     skeleton: Option<&SkeletonSpec>,
     target_keypoint_names: &str,
+    show_template_points: bool,
 ) {
     match mapping.policy {
         ImportGeometryPolicy::KeypointEnvelopeV1 => {
@@ -4226,7 +4931,18 @@ fn mapping_parameter_editor(
                     ImportMappingParameter::Scalar { name, value } => {
                         ui.horizontal(|ui| {
                             ui.label(name.as_str());
-                            ui.add(egui::DragValue::new(value).speed(0.01));
+                            let editor = egui::DragValue::new(value);
+                            if matches!(name.as_str(), "padding" | "padding_ratio" | "paddingRatio")
+                            {
+                                ui.add(editor.range(0.0..=1.0).speed(0.01));
+                            } else {
+                                ui.add(
+                                    editor
+                                        .range(1.0..=f64::from(u32::MAX))
+                                        .speed(1.0)
+                                        .fixed_decimals(0),
+                                );
+                            }
                         });
                     }
                     ImportMappingParameter::Boolean { name, value } => {
@@ -4237,33 +4953,57 @@ fn mapping_parameter_editor(
             }
         }
         ImportGeometryPolicy::BoxRelativeTemplateV1 => {
-            if !mapping
+            let names = skeleton.map_or_else(
+                || split_csv(target_keypoint_names),
+                |skeleton| {
+                    skeleton
+                        .keypoints
+                        .iter()
+                        .map(|point| point.name.clone())
+                        .collect()
+                },
+            );
+            let current_names = mapping
                 .parameters
                 .iter()
-                .all(|parameter| matches!(parameter, ImportMappingParameter::Point { .. }))
-                || mapping.parameters.is_empty()
-            {
-                let names = skeleton.map_or_else(
-                    || split_csv(target_keypoint_names),
-                    |skeleton| {
-                        skeleton
-                            .keypoints
-                            .iter()
-                            .map(|point| point.name.clone())
-                            .collect()
-                    },
-                );
+                .filter_map(|parameter| {
+                    let ImportMappingParameter::Point { name, .. } = parameter else {
+                        return None;
+                    };
+                    Some(name.as_str())
+                })
+                .collect::<Vec<_>>();
+            if current_names != names.iter().map(String::as_str).collect::<Vec<_>>() {
+                let previous = mapping
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| {
+                        let ImportMappingParameter::Point { name, x, y, state } = parameter else {
+                            return None;
+                        };
+                        Some((name.clone(), (*x, *y, state.clone())))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 mapping.parameters = names
                     .into_iter()
-                    .map(|name| ImportMappingParameter::Point {
-                        name,
-                        x: 0.5,
-                        y: 0.5,
-                        state: labello_domain::KeypointState::Visible,
+                    .map(|name| {
+                        let (x, y, state) = previous.get(&name).cloned().unwrap_or((
+                            0.5,
+                            0.5,
+                            labello_domain::KeypointState::Visible,
+                        ));
+                        ImportMappingParameter::Point { name, x, y, state }
                     })
                     .collect();
             }
-            for parameter in &mut mapping.parameters {
+            if !show_template_points {
+                ui.small(
+                    "Template-point controls will update after you finish editing keypoint names.",
+                );
+                return;
+            }
+            ui.label(RichText::new("Template point positions").strong());
+            for (point_index, parameter) in mapping.parameters.iter_mut().enumerate() {
                 if let ImportMappingParameter::Point { name, x, y, state } = parameter {
                     ui.horizontal(|ui| {
                         ui.label(name.as_str());
@@ -4271,14 +5011,21 @@ fn mapping_parameter_editor(
                         ui.add(egui::DragValue::new(x).range(0.0..=1.0).speed(0.01));
                         ui.label("y");
                         ui.add(egui::DragValue::new(y).range(0.0..=1.0).speed(0.01));
-                        egui::ComboBox::from_id_salt("state")
+                        egui::ComboBox::from_id_salt(("state", point_index))
                             .selected_text(format!("{state:?}"))
                             .show_ui(ui, |ui| {
-                                for candidate in [
-                                    labello_domain::KeypointState::Visible,
-                                    labello_domain::KeypointState::Hidden,
-                                    labello_domain::KeypointState::Absent,
-                                ] {
+                                let spec = skeleton
+                                    .and_then(|skeleton| skeleton.keypoints.get(point_index));
+                                let mut candidates = vec![labello_domain::KeypointState::Visible];
+                                if skeleton.is_none_or(|skeleton| skeleton.allow_hidden) {
+                                    candidates.push(labello_domain::KeypointState::Hidden);
+                                }
+                                if skeleton.is_none_or(|skeleton| skeleton.allow_absent)
+                                    && spec.is_none_or(|spec| !spec.required)
+                                {
+                                    candidates.push(labello_domain::KeypointState::Absent);
+                                }
+                                for candidate in candidates {
                                     ui.selectable_value(
                                         state,
                                         candidate.clone(),
@@ -4432,6 +5179,24 @@ fn status_row(ui: &mut egui::Ui, label: &str, value: impl ToString) {
         ui.label(RichText::new(format!("{label}:")).strong());
         ui.label(value.to_string());
     });
+}
+
+fn show_mapping_issues(
+    ui: &mut egui::Ui,
+    validation: &ImportMappingValidation,
+    category_index: Option<usize>,
+    field: ImportMappingField,
+) {
+    for issue in validation.for_field(category_index, field) {
+        theme::inline_message(
+            ui,
+            match issue.severity {
+                ImportMappingIssueSeverity::Error => theme::Intent::Error,
+                ImportMappingIssueSeverity::Warning => theme::Intent::Warning,
+            },
+            &issue.message,
+        );
+    }
 }
 
 pub(crate) fn import_key(action: &str, request_id: u64) -> String {
@@ -4757,7 +5522,22 @@ mod tests {
                 ImportGeometryKind::BoundingBox,
                 ImportGeometryKind::Skeleton,
             ],
-            geometry_mappings: Vec::new(),
+            geometry_mappings: vec![
+                ImportGeometryMappingRequest {
+                    source_category_key: key.to_string(),
+                    source_geometry: ImportGeometryKind::BoundingBox,
+                    target_geometry: ImportGeometryKind::BoundingBox,
+                    policy: ImportGeometryPolicy::Direct,
+                    parameters: Vec::new(),
+                },
+                ImportGeometryMappingRequest {
+                    source_category_key: key.to_string(),
+                    source_geometry: ImportGeometryKind::Skeleton,
+                    target_geometry: ImportGeometryKind::Skeleton,
+                    policy: ImportGeometryPolicy::Direct,
+                    parameters: Vec::new(),
+                },
+            ],
             task_mappings: Vec::new(),
             skeleton_mappings: Vec::new(),
             workflow_intent: ImportWorkflowIntent::AuthoritativeGroundTruth,
@@ -4794,6 +5574,237 @@ mod tests {
         category
     }
 
+    fn validation_app(categories: Vec<ImportCategoryDraft>) -> LabelloApp {
+        let report = labello_client::ImportPreflightReport {
+            source: labello_client::ImportSourceCounts {
+                categories: categories.len() as u64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut app = LabelloApp::default();
+        app.import_flow.profile = ImportProfile::CocoInstancesGtV1;
+        app.import_flow.exhaustive = true;
+        app.import_flow.categories = categories;
+        app.import_flow.job = Some(ImportJob {
+            import_id: labello_domain::ImportId::from("imp-validation"),
+            owner_user_id: labello_domain::UserId::from("admin"),
+            destination_dataset_id: DatasetId::from("imported"),
+            destination_name: "Imported".to_string(),
+            profile: app.import_flow.profile,
+            transport: ImportTransport::ServerDirectory,
+            lifecycle: ImportLifecycle::AwaitingDecision,
+            progress: Default::default(),
+            failure: None,
+            source_fingerprint: Some("source".to_string()),
+            plan_hash: None,
+            preflight_report: Some(report),
+            can_cancel: true,
+            created_at: labello_domain::now(),
+            updated_at: labello_domain::now(),
+            expires_at: None,
+            recovery: None,
+        });
+        app
+    }
+
+    fn has_mapping_issue(
+        validation: &ImportMappingValidation,
+        category_index: Option<usize>,
+        field: ImportMappingField,
+        message: &str,
+    ) -> bool {
+        validation
+            .for_field(category_index, field)
+            .any(|issue| issue.message.contains(message))
+    }
+
+    #[test]
+    fn mapping_validation_reports_each_invalid_field_at_its_input() {
+        let mut invalid = category("release:person:17", "17", "person");
+        invalid.class_id = "bad/class".to_string();
+        invalid.class_name.clear();
+        invalid.class_color = "teal".to_string();
+        invalid.bounding_box_task_id = "bad/task".to_string();
+        let app = validation_app(vec![invalid]);
+
+        let validation = app.import_mapping_validation();
+
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            ImportMappingField::ClassId,
+            "safe path segment"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            ImportMappingField::ClassName,
+            "cannot be empty"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            ImportMappingField::ClassColor,
+            "#RRGGBB"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            ImportMappingField::BoundingBoxTaskId,
+            "safe path segment"
+        ));
+    }
+
+    #[test]
+    fn mapping_validation_marks_every_duplicate_owner() {
+        let first = category("release:person:17", "17", "person");
+        let mut second = category("release:vehicle:18", "18", "person");
+        second.bounding_box_task_id = first.bounding_box_task_id.clone();
+        let app = validation_app(vec![first, second]);
+
+        let validation = app.import_mapping_validation();
+
+        for index in 0..2 {
+            assert!(has_mapping_issue(
+                &validation,
+                Some(index),
+                ImportMappingField::ClassId,
+                "unique class IDs"
+            ));
+            assert!(has_mapping_issue(
+                &validation,
+                Some(index),
+                ImportMappingField::BoundingBoxTaskId,
+                "unique task ID"
+            ));
+        }
+    }
+
+    #[test]
+    fn mapping_validation_reports_parameter_and_template_schema_errors() {
+        let mut envelope = category("release:person:17", "17", "person");
+        envelope.geometry_mappings = vec![ImportGeometryMappingRequest {
+            source_category_key: envelope.source_category_key.clone(),
+            source_geometry: ImportGeometryKind::Skeleton,
+            target_geometry: ImportGeometryKind::BoundingBox,
+            policy: ImportGeometryPolicy::KeypointEnvelopeV1,
+            parameters: vec![
+                ImportMappingParameter::Scalar {
+                    name: "paddingRatio".to_string(),
+                    value: 1.5,
+                },
+                ImportMappingParameter::Scalar {
+                    name: "minimumPixels".to_string(),
+                    value: 0.5,
+                },
+            ],
+        }];
+        let app = validation_app(vec![envelope]);
+
+        let validation = app.import_mapping_validation();
+        let field = ImportMappingField::Geometry(ImportGeometryKind::BoundingBox);
+
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            field,
+            "padding must be between 0 and 1"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            field,
+            "minimum pixels must be a whole number"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            field,
+            "hidden keypoints"
+        ));
+
+        let mut template = category("release:person:17", "17", "person");
+        template.direct_geometry = vec![ImportGeometryKind::BoundingBox];
+        template.source_skeleton = None;
+        template.target_keypoint_names = "nose".to_string();
+        template.geometry_mappings = vec![
+            ImportGeometryMappingRequest {
+                source_category_key: template.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::BoundingBox,
+                policy: ImportGeometryPolicy::Direct,
+                parameters: Vec::new(),
+            },
+            ImportGeometryMappingRequest {
+                source_category_key: template.source_category_key.clone(),
+                source_geometry: ImportGeometryKind::BoundingBox,
+                target_geometry: ImportGeometryKind::Skeleton,
+                policy: ImportGeometryPolicy::BoxRelativeTemplateV1,
+                parameters: vec![ImportMappingParameter::Point {
+                    name: "nose".to_string(),
+                    x: 0.5,
+                    y: 0.5,
+                    state: labello_domain::KeypointState::Absent,
+                }],
+            },
+        ];
+        let validation = validation_app(vec![template]).import_mapping_validation();
+        assert!(has_mapping_issue(
+            &validation,
+            Some(0),
+            ImportMappingField::Geometry(ImportGeometryKind::Skeleton),
+            "At least one template keypoint must be present"
+        ));
+    }
+
+    #[test]
+    fn compatibility_warnings_are_profile_specific() {
+        let mut app = validation_app(vec![category("release:person:17", "17", "person")]);
+        app.import_flow.coco_crowds = labello_client::CocoCrowdPolicy::Incomplete;
+        app.import_flow.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
+        app.import_flow.yolo_missing_labels =
+            labello_client::YoloMissingLabelPolicy::MissingIsBackground;
+
+        let validation = app.import_mapping_validation();
+
+        assert!(has_mapping_issue(
+            &validation,
+            None,
+            ImportMappingField::Compatibility(ImportCompatibilityField::CocoCrowds),
+            "coverage incomplete"
+        ));
+        assert!(has_mapping_issue(
+            &validation,
+            None,
+            ImportMappingField::Compatibility(ImportCompatibilityField::GeometryBounds),
+            "clipped"
+        ));
+        assert!(
+            validation
+                .for_field(
+                    None,
+                    ImportMappingField::Compatibility(ImportCompatibilityField::YoloMissingLabels)
+                )
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn seed_confirmation_is_reset_when_its_mapping_scope_changes() {
+        let mut flow =
+            validation_app(vec![category("release:person:17", "17", "person")]).import_flow;
+        flow.categories[0].workflow_intent = ImportWorkflowIntent::SeedFutureAnnotation;
+        flow.seed_workflow_confirmation_scope = flow.seed_workflow_scope();
+        flow.seed_workflow_confirmed = true;
+
+        flow.categories[0].workflow_intent = ImportWorkflowIntent::RequireApproval;
+        flow.sync_seed_workflow_confirmation_scope();
+
+        assert!(!flow.seed_workflow_confirmed);
+    }
+
     #[test]
     fn browser_limits_are_checked_before_file_contents_are_needed() {
         let limits = labello_client::ImportLimits {
@@ -4815,12 +5826,9 @@ mod tests {
             manual_box_guide_migration: true,
             ..Default::default()
         });
-        app.import_flow.geometry_policy = ImportGeometryPolicy::ManualBoxGuideV1;
-        app.import_flow.target_geometry = ImportGeometryKind::Skeleton;
-        app.import_flow.keypoint_names = "nose,left_eye".to_string();
         app.import_flow.categories = vec![
-            category("release:v2:17", "17", "person"),
-            category("release:v2:18", "18", "vehicle"),
+            manual_category("release:v2:17", "17", "person", "nose,left_eye"),
+            manual_category("release:v2:18", "18", "vehicle", "nose,left_eye"),
         ];
 
         let request = app.import_plan_request();
@@ -4904,6 +5912,7 @@ mod tests {
         let person = manual_category("source:0", "0", "person", "nose");
         let vehicle = manual_category("source:1", "1", "vehicle", "wheel, axle");
         app.import_flow.categories = vec![person, vehicle];
+        app.import_flow.exhaustive = true;
 
         assert!(app.import_mappings_complete());
         let request = app.import_plan_request();
@@ -5031,6 +6040,12 @@ mod tests {
             updated_at: now,
             expires_at: None,
             recovery: Some(labello_client::ImportRecoveryState {
+                attestations: ImportAttestations {
+                    ground_truth: true,
+                    exhaustive: true,
+                    coverage_scope: Vec::new(),
+                    provenance: "fixture".to_string(),
+                },
                 accepted_plan: Some(plan),
                 ..Default::default()
             }),
@@ -5111,7 +6126,9 @@ mod tests {
     fn omit_geometry_emits_no_tasks() {
         let mut app = LabelloApp::default();
         app.import_flow.categories = vec![category("source:3", "3", "person")];
-        app.import_flow.geometry_policy = ImportGeometryPolicy::Omit;
+        for mapping in &mut app.import_flow.categories[0].geometry_mappings {
+            mapping.policy = ImportGeometryPolicy::Omit;
+        }
 
         let request = app.import_plan_request();
 
@@ -5131,17 +6148,15 @@ mod tests {
         let mut app = LabelloApp::default();
         app.import_flow.profile = ImportProfile::CocoKeypointsGtV1;
         app.import_flow.categories = vec![category("paired:person:17", "17", "person")];
-        app.import_flow.direct_bounding_boxes = true;
-        app.import_flow.direct_skeletons = true;
 
         let both = app.import_plan_request();
         assert_eq!(both.geometry_mappings.len(), 2);
         assert_eq!(both.task_mappings.len(), 2);
         assert_eq!(both.skeleton_mappings.len(), 1);
 
-        app.import_flow.direct_bounding_boxes = false;
+        app.import_flow.categories[0].geometry_mappings[0].policy = ImportGeometryPolicy::Omit;
         let skeleton_only = app.import_plan_request();
-        assert_eq!(skeleton_only.geometry_mappings.len(), 1);
+        assert_eq!(skeleton_only.geometry_mappings.len(), 2);
         assert_eq!(skeleton_only.task_mappings.len(), 1);
         assert_eq!(
             skeleton_only.task_mappings[0].task.annotation_type,
@@ -5156,10 +6171,8 @@ mod tests {
             manual_box_guide_migration: true,
             ..Default::default()
         });
-        app.import_flow.geometry_policy = ImportGeometryPolicy::ManualBoxGuideV1;
-        app.import_flow.keypoint_names = "nose".to_string();
-        let selected = category("release:person:17", "17", "person");
-        let mut omitted = category("release:vehicle:91", "91", "vehicle");
+        let selected = manual_category("release:person:17", "17", "person", "nose");
+        let mut omitted = manual_category("release:vehicle:91", "91", "vehicle", "nose");
         omitted.selected = false;
         app.import_flow.categories = vec![selected, omitted];
 
@@ -5312,12 +6325,11 @@ mod tests {
     }
 
     #[test]
-    fn capability_normalization_rejects_unadvertised_profile_transport_and_manual_mode() {
+    fn capability_normalization_rejects_unadvertised_profile_and_transport() {
         let mut flow = ImportFlowState {
             profile: ImportProfile::CocoKeypointsGtV1,
             transport: ImportTransport::ServerDirectory,
             server_root_id: "missing".to_string(),
-            geometry_policy: ImportGeometryPolicy::ManualBoxGuideV1,
             ..Default::default()
         };
         let capabilities = ImportCapabilities {
@@ -5339,6 +6351,5 @@ mod tests {
 
         assert_eq!(flow.profile, ImportProfile::CocoInstancesGtV1);
         assert_eq!(flow.transport, ImportTransport::BrowserFolder);
-        assert_eq!(flow.geometry_policy, ImportGeometryPolicy::Direct);
     }
 }

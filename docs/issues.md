@@ -34,7 +34,7 @@ Only after that continue with the next issue.
   - Replace singular manual-category state with per-category guide/target task pairs across import UI, API, planning, persistence, assignment, review, and statistics, with multi-class lifecycle tests.
 - [x] Make diagnostics in import preflight stage 3 collapsible.
   - Group diagnostics in an accessible disclosure that summarizes severity and count, preserves blocking visibility, and works at desktop and mobile widths.
-- [ ] LOCKED Give Import Stage 3/4 mapping inputs immediate, specific validation feedback.
+- [x] Give Import Stage 3/4 mapping inputs immediate, specific validation feedback.
   - Show every statically determinable mapping error next to the input that causes it, including invalid or duplicate class/task IDs, names, colors, output selections, geometry-policy combinations, parameters, and skeleton schemas.
   - Show immediate consequence warnings for workflow and compatibility choices, while keeping source-content-dependent findings authoritative to server preflight.
   - Replace the ambiguous global-versus-category-specific mapping state with one canonical per-category request model and make invalid geometry combinations unrepresentable where practical.
