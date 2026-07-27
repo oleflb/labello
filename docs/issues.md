@@ -12,7 +12,7 @@ When working on an issue, use the following workflow:
 6. validate
 7. Review
 8. then commit
-9. Ask if I approve of the changes and if the commit(s) should be merged into alex-probiert-dinge
+9. Ask if I approve of the changes and if the commit(s) should be merge squased into alex-probiert-dinge, with a useful descriptive commit message.
 
 Only after that continue with the next issue.
 
