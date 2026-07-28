@@ -413,7 +413,7 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     assert!(object.state().work.drawer.is_none());
 
     let mut roomy_compact = Harness::builder()
-        .with_size(egui::vec2(590.0, 667.0))
+        .with_size(egui::vec2(570.0, 667.0))
         .build_eframe(|ctx| {
             inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
         });
@@ -425,6 +425,15 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     assert!(inspector.width() > 80.0, "{inspector:?}");
     assert!((primary.top() - workflow.top()).abs() <= 1.0);
     assert!((primary.top() - inspector.top()).abs() <= 1.0);
+    let canvas = roomy_compact.get_by_label("Annotation canvas").rect();
+    click_at(&mut roomy_compact, canvas.center());
+    roomy_compact.step();
+    let undo = roomy_compact.get_by_label("Undo last keypoint").rect();
+    let canvas = roomy_compact.get_by_label("Annotation canvas").rect();
+    assert!(
+        canvas.bottom() <= undo.top(),
+        "canvas={canvas:?} undo={undo:?}"
+    );
 
     let mut medium = Harness::builder()
         .with_size(egui::vec2(900.0, 667.0))

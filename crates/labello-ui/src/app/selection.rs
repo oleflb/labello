@@ -235,16 +235,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn workspace_actions_height(&self, layout: LayoutMode, viewport: egui::Vec2) -> f32 {
-        let compact_migration_wraps = self.manual_migration_active()
-            && (self.view != AppView::Annotate
-                || viewport.x < if self.migration_keypoint_undo_available() {
-                    440.0
-                } else {
-                    370.0
-                });
         if layout == LayoutMode::Compact
             && (self.view == AppView::Review && self.work.correction_draft.is_none()
-                || compact_migration_wraps)
+                || self.manual_migration_active())
         {
             112.0
         } else if Self::short_viewport(viewport) || layout == LayoutMode::Compact {
