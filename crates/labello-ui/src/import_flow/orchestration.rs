@@ -3,25 +3,25 @@ impl LabelloApp {
         if self.runtime.api.is_none()
             || self.auth.account.is_none()
             || !self.auth.can_create_datasets
-            || self.import_flow.capabilities_loading
-            || self.import_flow.capabilities.is_some()
+            || self.import.capabilities_loading
+            || self.import.capabilities.is_some()
         {
             return;
         }
-        self.import_flow.capabilities_loading = true;
-        self.import_flow.capabilities_error = None;
+        self.import.capabilities_loading = true;
+        self.import.capabilities_error = None;
         let request = self.import_request_identity(None);
         self.queue_command(UiCommand::ImportCapabilities { request });
     }
 
     pub(crate) fn refresh_import_if_due(&mut self) {
-        let should_poll = self.import_flow.open
+        let should_poll = self.import.open
             && !self
-                .import_flow
+                .import
                 .active_operations
                 .values()
                 .any(|activity| *activity == ImportActivity::LoadStatus)
-            && self.import_flow.job.as_ref().is_some_and(|job| {
+            && self.import.job.as_ref().is_some_and(|job| {
                 matches!(
                     job.lifecycle,
                     ImportLifecycle::Preflighting
@@ -31,7 +31,7 @@ impl LabelloApp {
                 )
             })
             && self
-                .import_flow
+                .import
                 .poll_after
                 .is_none_or(|deadline| web_time::Instant::now() >= deadline);
         if should_poll {
@@ -41,31 +41,31 @@ impl LabelloApp {
 
 
     pub(crate) fn request_create_import(&mut self) {
-        let Some(capabilities) = self.import_flow.capabilities.as_ref() else {
+        let Some(capabilities) = self.import.capabilities.as_ref() else {
             return;
         };
         if !capabilities
             .profiles
             .iter()
-            .any(|entry| entry.enabled && entry.profile == self.import_flow.profile)
+            .any(|entry| entry.enabled && entry.profile == self.import.profile)
             || !capabilities
                 .transports
                 .iter()
-                .any(|entry| entry.enabled && entry.transport == self.import_flow.transport)
+                .any(|entry| entry.enabled && entry.transport == self.import.transport)
         {
-            self.import_flow.error = Some(
+            self.import.error = Some(
                 "The selected profile or transport is not advertised by the server.".to_string(),
             );
             return;
         }
         self.begin_import_epoch();
-        self.import_flow.busy = true;
-        self.import_flow.error = None;
-        let source = match self.import_flow.transport {
+        self.import.busy = true;
+        self.import.error = None;
+        let source = match self.import.transport {
             ImportTransport::BrowserFolder => ImportSourceSelection::BrowserFolder,
             ImportTransport::ServerDirectory => ImportSourceSelection::ServerDirectory {
-                import_root_id: self.import_flow.server_root_id.clone(),
-                relative_path: self.import_flow.server_relative_path.trim().to_string(),
+                import_root_id: self.import.server_root_id.clone(),
+                relative_path: self.import.server_relative_path.trim().to_string(),
             },
             ImportTransport::Unknown => return,
         };
@@ -74,9 +74,9 @@ impl LabelloApp {
         self.queue_command(UiCommand::CreateImport {
             request,
             body: CreateImportRequest {
-                destination_dataset_id: DatasetId::from(self.import_flow.destination_id.trim()),
-                destination_name: self.import_flow.destination_name.trim().to_string(),
-                profile: self.import_flow.profile,
+                destination_dataset_id: DatasetId::from(self.import.destination_id.trim()),
+                destination_name: self.import.destination_name.trim().to_string(),
+                profile: self.import.profile,
                 source,
                 attestations: self.import_attestations(),
             },
@@ -86,7 +86,7 @@ impl LabelloApp {
 
     pub(crate) fn request_seal_import(&mut self) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -94,23 +94,23 @@ impl LabelloApp {
             return;
         };
         if let Some(error) = self.import_descriptor_error() {
-            self.import_flow.error = Some(error);
+            self.import.error = Some(error);
             return;
         }
-        self.import_flow.busy = true;
-        self.import_flow.error = None;
+        self.import.busy = true;
+        self.import.error = None;
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("seal", request.request_id);
-        let yolo = !is_coco_profile(self.import_flow.profile);
+        let yolo = !is_coco_profile(self.import.profile);
         let selected_splits = if yolo {
-            self.import_flow
+            self.import
                 .yolo_splits
                 .iter()
                 .filter(|split| split.usable && split.selected)
                 .map(|split| split.name.clone())
                 .collect::<Vec<_>>()
         } else {
-            self.import_flow
+            self.import
                 .descriptors
                 .iter()
                 .map(|descriptor| descriptor.split.trim().to_string())
@@ -120,7 +120,7 @@ impl LabelloApp {
         };
         let yolo_descriptor_split = selected_splits.first().cloned().unwrap_or_default();
         let descriptors = self
-            .import_flow
+            .import
             .descriptors
             .iter()
             .map(|descriptor| ImportDescriptorSelection {
@@ -143,7 +143,7 @@ impl LabelloApp {
             import_id,
             body: SealImportRequest {
                 source: ImportSourceConfiguration {
-                    source_namespace: self.import_flow.source_namespace.trim().to_string(),
+                    source_namespace: self.import.source_namespace.trim().to_string(),
                     descriptors,
                     selected_splits,
                     selected_category_keys: Vec::new(),
@@ -156,7 +156,7 @@ impl LabelloApp {
 
     pub(crate) fn request_yolo_descriptor_inspection(&mut self) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -164,7 +164,7 @@ impl LabelloApp {
             return;
         };
         let Some(descriptor_file_id) = self
-            .import_flow
+            .import
             .descriptors
             .first()
             .map(|descriptor| descriptor.descriptor_file_id.trim().to_string())
@@ -172,13 +172,13 @@ impl LabelloApp {
         else {
             return;
         };
-        if self.import_flow.yolo_inspection_loading {
+        if self.import.yolo_inspection_loading {
             return;
         }
-        self.import_flow.invalidate_yolo_inspection();
-        self.import_flow.yolo_inspection_loading = true;
+        self.import.invalidate_yolo_inspection();
+        self.import.yolo_inspection_loading = true;
         let request = self.import_request_identity(Some(import_id.clone()));
-        self.import_flow.pending_yolo_inspection_request_id = Some(request.request_id);
+        self.import.pending_yolo_inspection_request_id = Some(request.request_id);
         self.queue_command(UiCommand::InspectYoloDescriptor {
             request,
             import_id,
@@ -189,15 +189,15 @@ impl LabelloApp {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn request_yolo_descriptor_inspection_after_upload(&mut self) {
-        if self.import_flow.yolo_inspection_loading {
-            self.import_flow.yolo_inspection_retry_after_current = true;
+        if self.import.yolo_inspection_loading {
+            self.import.yolo_inspection_retry_after_current = true;
         } else {
             self.request_yolo_descriptor_inspection();
         }
     }
 
     pub(crate) fn open_import_source_picker(&mut self, target: ImportSourcePickerTarget) {
-        self.import_flow.source_picker = ImportSourcePickerState {
+        self.import.source_picker = ImportSourcePickerState {
             target: Some(target),
             ..Default::default()
         };
@@ -205,7 +205,7 @@ impl LabelloApp {
             ImportSourcePickerTarget::DatasetFolder => String::new(),
             ImportSourcePickerTarget::Descriptor(_)
             | ImportSourcePickerTarget::CocoImageRoot(_) => {
-                match self.import_flow.server_relative_path.as_str() {
+                match self.import.server_relative_path.as_str() {
                     "" | "." => String::new(),
                     path => path.to_string(),
                 }
@@ -215,10 +215,10 @@ impl LabelloApp {
     }
 
     fn request_import_source_browse(&mut self, relative_path: String, offset: u32) {
-        let Some(target) = self.import_flow.source_picker.target else {
+        let Some(target) = self.import.source_picker.target else {
             return;
         };
-        if self.import_flow.source_picker.loading {
+        if self.import.source_picker.loading {
             return;
         }
         let request = match target {
@@ -226,26 +226,26 @@ impl LabelloApp {
             ImportSourcePickerTarget::Descriptor(_)
             | ImportSourcePickerTarget::CocoImageRoot(_) => {
                 let import_id = self
-                    .import_flow
+                    .import
                     .job
                     .as_ref()
                     .map(|job| job.import_id.clone());
                 self.import_request_identity(import_id)
             }
         };
-        self.import_flow.source_picker.loading = true;
-        self.import_flow.source_picker.error = None;
-        self.import_flow.source_picker.pending_request_id = Some(request.request_id);
-        self.import_flow.source_picker.pending_append = offset > 0;
+        self.import.source_picker.loading = true;
+        self.import.source_picker.error = None;
+        self.import.source_picker.pending_request_id = Some(request.request_id);
+        self.import.source_picker.pending_append = offset > 0;
         if offset == 0 {
-            self.import_flow.source_picker.relative_path = relative_path.clone();
+            self.import.source_picker.relative_path = relative_path.clone();
         }
         match target {
             ImportSourcePickerTarget::DatasetFolder => {
-                let root_id = self.import_flow.server_root_id.clone();
+                let root_id = self.import.server_root_id.clone();
                 if root_id.is_empty() {
-                    self.import_flow.source_picker.loading = false;
-                    self.import_flow.source_picker.error =
+                    self.import.source_picker.loading = false;
+                    self.import.source_picker.error =
                         Some("Choose a server import root first.".to_string());
                     return;
                 }
@@ -261,12 +261,12 @@ impl LabelloApp {
             ImportSourcePickerTarget::Descriptor(_)
             | ImportSourcePickerTarget::CocoImageRoot(_) => {
                 let Some(import_id) = self
-                    .import_flow
+                    .import
                     .job
                     .as_ref()
                     .map(|job| job.import_id.clone())
                 else {
-                    self.import_flow.source_picker.loading = false;
+                    self.import.source_picker.loading = false;
                     return;
                 };
                 let mode = match target {
@@ -292,16 +292,16 @@ impl LabelloApp {
     }
 
     fn import_source_picker_modal(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.import_flow.source_picker.target else {
+        let Some(target) = self.import.source_picker.target else {
             return;
         };
         let screen = ctx.content_rect();
         let width = (screen.width() - 32.0).clamp(1.0, 680.0);
         let max_height = (screen.height() - 32.0).max(1.0);
-        let page = self.import_flow.source_picker.page.clone();
-        let requested_path = self.import_flow.source_picker.relative_path.clone();
-        let loading = self.import_flow.source_picker.loading;
-        let error = self.import_flow.source_picker.error.clone();
+        let page = self.import.source_picker.page.clone();
+        let requested_path = self.import.source_picker.relative_path.clone();
+        let loading = self.import.source_picker.loading;
+        let error = self.import.source_picker.error.clone();
         let mut navigate = None;
         let mut select_folder = false;
         let mut selected_folder = None;
@@ -423,7 +423,7 @@ impl LabelloApp {
                 .as_ref()
                 .map(|page| page.relative_path.clone())
                 .unwrap_or(requested_path);
-            self.import_flow.server_relative_path = if selected.is_empty() {
+            self.import.server_relative_path = if selected.is_empty() {
                 ".".to_string()
             } else {
                 selected
@@ -431,7 +431,7 @@ impl LabelloApp {
             close = true;
         }
         if let Some(selected) = selected_folder {
-            self.import_flow.server_relative_path = selected;
+            self.import.server_relative_path = selected;
             close = true;
         }
         if let Some(entry) = selected_file
@@ -443,28 +443,28 @@ impl LabelloApp {
                 relative_path: entry.relative_path,
             };
             if let Some(existing) = self
-                .import_flow
+                .import
                 .registered_paths
                 .iter_mut()
                 .find(|path| path.file_id == file_id)
             {
                 *existing = selected_path;
             } else {
-                self.import_flow.registered_paths.push(selected_path);
+                self.import.registered_paths.push(selected_path);
             }
             match target {
                 ImportSourcePickerTarget::DatasetFolder => {}
                 ImportSourcePickerTarget::Descriptor(index) => {
-                    if let Some(descriptor) = self.import_flow.descriptors.get_mut(index) {
+                    if let Some(descriptor) = self.import.descriptors.get_mut(index) {
                         descriptor.descriptor_file_id = file_id;
                     }
-                    if !is_coco_profile(self.import_flow.profile) {
-                        self.import_flow.invalidate_yolo_inspection();
+                    if !is_coco_profile(self.import.profile) {
+                        self.import.invalidate_yolo_inspection();
                         self.request_yolo_descriptor_inspection();
                     }
                 }
                 ImportSourcePickerTarget::CocoImageRoot(index) => {
-                    if let Some(descriptor) = self.import_flow.descriptors.get_mut(index) {
+                    if let Some(descriptor) = self.import.descriptors.get_mut(index) {
                         descriptor.image_root_file_id = file_id;
                     }
                 }
@@ -472,27 +472,27 @@ impl LabelloApp {
             close = true;
         }
         if let Some(path) = navigate {
-            self.import_flow.source_picker.page = None;
+            self.import.source_picker.page = None;
             self.request_import_source_browse(path, 0);
         } else if let Some((path, offset)) = load_more {
             self.request_import_source_browse(path, offset);
         }
         if close || response.should_close() {
-            self.import_flow.source_picker = Default::default();
+            self.import.source_picker = Default::default();
         }
     }
 
     pub(crate) fn request_preflight_import(&mut self, restart: bool) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
         else {
             return;
         };
-        self.import_flow.busy = true;
-        self.import_flow.screen = ImportScreen::Preflight;
+        self.import.busy = true;
+        self.import.screen = ImportScreen::Preflight;
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("preflight", request.request_id);
         self.queue_command(UiCommand::PreflightImport {
@@ -505,7 +505,7 @@ impl LabelloApp {
 
     pub(crate) fn request_update_import_plan(&mut self) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -513,18 +513,18 @@ impl LabelloApp {
             return;
         };
         if !self.import_mappings_complete() {
-            self.import_flow.error = Some(
+            self.import.error = Some(
                 "Every discovered category needs one complete, uniquely keyed mapping.".to_string(),
             );
             return;
         }
         let body = self.import_plan_request();
-        self.import_flow.busy = true;
-        self.import_flow.plan = None;
-        self.import_flow.accepted_plan_request = None;
-        self.import_flow.diagnostics.clear();
-        self.import_flow.diagnostics_cursor = None;
-        self.import_flow.pending_plan_request = Some(body.clone());
+        self.import.busy = true;
+        self.import.plan = None;
+        self.import.accepted_plan_request = None;
+        self.import.diagnostics.clear();
+        self.import.diagnostics_cursor = None;
+        self.import.pending_plan_request = Some(body.clone());
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("plan", request.request_id);
         self.queue_command(UiCommand::UpdateImportPlan {
@@ -540,27 +540,27 @@ impl LabelloApp {
             || !self.import_plan_covers_all_categories()
             || !self.import_mappings_complete()
         {
-            self.import_flow.error = Some(
+            self.import.error = Some(
                 "Mappings changed or the accepted plan omits discovered categories/tasks. Save exact source mappings and wait for a complete matching plan before committing."
                     .to_string(),
             );
             return;
         }
         let Some((import_id, plan_hash)) = self
-            .import_flow
+            .import
             .plan
             .as_ref()
             .map(|plan| (plan.import_id.clone(), plan.plan_hash.clone()))
         else {
             return;
         };
-        self.import_flow.busy = true;
-        self.import_flow.screen = ImportScreen::Running;
-        if let Some(job) = self.import_flow.job.as_mut() {
+        self.import.busy = true;
+        self.import.screen = ImportScreen::Running;
+        if let Some(job) = self.import.job.as_mut() {
             job.lifecycle = ImportLifecycle::Building;
             job.progress.phase = labello_client::ImportProgressPhase::Build;
         }
-        self.import_flow.poll_after =
+        self.import.poll_after =
             Some(web_time::Instant::now() + web_time::Duration::from_millis(500));
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("commit", request.request_id);
@@ -574,16 +574,16 @@ impl LabelloApp {
 
     pub(crate) fn request_cancel_import(&mut self) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
         else {
             self.begin_import_epoch();
-            self.import_flow.reset_job();
+            self.import.reset_job();
             return;
         };
-        self.import_flow.busy = true;
+        self.import.busy = true;
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("cancel", request.request_id);
         self.queue_command(UiCommand::CancelImport {
@@ -595,21 +595,21 @@ impl LabelloApp {
 
     pub(crate) fn request_import_poll(&mut self) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
         else {
             return;
         };
-        self.import_flow.poll_after = None;
+        self.import.poll_after = None;
         let request = self.import_request_identity(Some(import_id.clone()));
         self.queue_command(UiCommand::GetImport { request, import_id });
     }
 
     pub(crate) fn request_import_diagnostics(&mut self, restart: bool) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -617,18 +617,18 @@ impl LabelloApp {
             return;
         };
         if restart {
-            self.import_flow.diagnostics.clear();
-            self.import_flow.diagnostics_cursor = None;
+            self.import.diagnostics.clear();
+            self.import.diagnostics_cursor = None;
         }
-        self.import_flow.busy = true;
+        self.import.busy = true;
         let request = self.import_request_identity(Some(import_id.clone()));
         self.queue_command(UiCommand::ImportDiagnostics {
             request,
             import_id,
             query: labello_client::ImportDiagnosticsQuery {
-                cursor: self.import_flow.diagnostics_cursor.clone(),
+                cursor: self.import.diagnostics_cursor.clone(),
                 limit: self
-                    .import_flow
+                    .import
                     .capabilities
                     .as_ref()
                     .map(|capabilities| capabilities.limits.max_diagnostic_page_size.min(100))
@@ -641,18 +641,18 @@ impl LabelloApp {
 
     pub(crate) fn request_import_recovery(&mut self) {
         self.begin_import_epoch();
-        let recovery_import_id = self.import_flow.recovery_import_id.trim().to_string();
-        self.import_flow.reset_job();
-        self.import_flow.recovery_import_id = recovery_import_id.clone();
+        let recovery_import_id = self.import.recovery_import_id.trim().to_string();
+        self.import.reset_job();
+        self.import.recovery_import_id = recovery_import_id.clone();
         let import_id = labello_domain::ImportId::from(recovery_import_id);
-        self.import_flow.busy = true;
+        self.import.busy = true;
         let request = self.import_request_identity(Some(import_id.clone()));
         self.queue_command(UiCommand::GetImport { request, import_id });
     }
 
     fn request_retry_import(&mut self) {
         let phase = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .and_then(|job| job.failure.as_ref())
@@ -664,7 +664,7 @@ impl LabelloApp {
                     | labello_client::ImportProgressPhase::Verification
                     | labello_client::ImportProgressPhase::Commit
             )
-        ) && self.import_flow.plan.is_some()
+        ) && self.import.plan.is_some()
         {
             self.request_commit_import();
         } else {
@@ -676,7 +676,7 @@ impl LabelloApp {
         #[cfg(target_arch = "wasm32")]
         {
             let Some(import_id) = self
-                .import_flow
+                .import
                 .job
                 .as_ref()
                 .map(|job| job.import_id.clone())
@@ -685,12 +685,12 @@ impl LabelloApp {
             };
             let request = self.import_request_identity(Some(import_id));
             self.runtime.active_requests.insert(request.request_id);
-            self.import_flow
+            self.import
                 .active_operations
                 .insert(request.request_id, ImportActivity::SelectFolder);
-            self.import_flow.busy = true;
+            self.import.busy = true;
             let limits = self
-                .import_flow
+                .import
                 .capabilities
                 .as_ref()
                 .map(|capabilities| capabilities.limits.clone())
@@ -699,16 +699,16 @@ impl LabelloApp {
                 crate::import_flow::browser::pick_import_folder(self, request.clone(), limits)
             {
                 self.runtime.active_requests.remove(&request.request_id);
-                self.import_flow
+                self.import
                     .active_operations
                     .remove(&request.request_id);
-                self.import_flow.busy = false;
-                self.import_flow.error = Some(error);
+                self.import.busy = false;
+                self.import.error = Some(error);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.import_flow.error =
+            self.import.error =
                 Some("Browser folder selection is available in the WebAssembly build.".to_string());
         }
     }
@@ -716,7 +716,7 @@ impl LabelloApp {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn register_selected_import_files(&mut self, files: Vec<BrowserImportFile>) {
         let Some(import_id) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -724,7 +724,7 @@ impl LabelloApp {
             return;
         };
         let limits = self
-            .import_flow
+            .import
             .capabilities
             .as_ref()
             .map(|capabilities| capabilities.limits.clone())
@@ -737,18 +737,18 @@ impl LabelloApp {
                 .iter()
                 .any(|file| file.byte_size > limits.max_single_file_bytes)
         {
-            self.import_flow.busy = false;
-            self.import_flow.error = Some(
+            self.import.busy = false;
+            self.import.error = Some(
                 "Selected folder is empty or exceeds the advertised browser import limits."
                     .to_string(),
             );
             return;
         }
-        self.import_flow.browser_files = files
+        self.import.browser_files = files
             .iter()
             .map(|file| (file.client_file_id.clone(), file.file.clone()))
             .collect();
-        self.import_flow.registered_paths = files
+        self.import.registered_paths = files
             .iter()
             .map(|file| RegisteredImportPath {
                 client_file_id: file.client_file_id.clone(),
@@ -769,7 +769,7 @@ impl LabelloApp {
         };
         let request = self.import_request_identity(Some(import_id.clone()));
         let key = import_key("register", request.request_id);
-        self.import_flow.busy = true;
+        self.import.busy = true;
         self.queue_command(UiCommand::RegisterImportFiles {
             request,
             import_id,
@@ -781,7 +781,7 @@ impl LabelloApp {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn upload_next_import_chunk(&mut self) {
         let Some(import_id_value) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .map(|job| job.import_id.clone())
@@ -789,42 +789,42 @@ impl LabelloApp {
             return;
         };
         let Some(file) = self
-            .import_flow
+            .import
             .browser_uploads
             .iter()
             .find(|file| !file.complete)
             .cloned()
         else {
-            self.import_flow.busy = false;
+            self.import.busy = false;
             return;
         };
         let Some(source) = self
-            .import_flow
+            .import
             .browser_files
             .get(&file.client_file_id)
             .cloned()
         else {
-            self.import_flow.busy = false;
-            self.import_flow.error = Some(
+            self.import.busy = false;
+            self.import.error = Some(
                 "Upload source is no longer selected. Reselect the same folder to continue."
                     .to_string(),
             );
             return;
         };
         let Some(uploader) = self.runtime.import_chunk_uploader.clone() else {
-            self.import_flow.busy = false;
-            self.import_flow.error =
+            self.import.busy = false;
+            self.import.error =
                 Some("Raw browser import transport is unavailable.".to_string());
             return;
         };
         let Some(csrf_token) = self.runtime.api.as_ref().and_then(|api| api.csrf_token()) else {
-            self.import_flow.busy = false;
-            self.import_flow.error =
+            self.import.busy = false;
+            self.import.error =
                 Some("Import upload requires an authenticated session.".to_string());
             return;
         };
         let chunk_bytes = self
-            .import_flow
+            .import
             .capabilities
             .as_ref()
             .map(|capabilities| capabilities.limits.upload_chunk_bytes)
@@ -834,10 +834,10 @@ impl LabelloApp {
         let length = (file.byte_size - offset).min(chunk_bytes);
         let request = self.import_request_identity(Some(import_id_value.clone()));
         self.runtime.active_requests.insert(request.request_id);
-        self.import_flow
+        self.import
             .active_operations
             .insert(request.request_id, ImportActivity::UploadChunk);
-        self.import_flow.busy = true;
+        self.import.busy = true;
         let api_base_url = self.config.api_base_url.clone();
         let import_id = import_id_value.to_string();
         let file_id = file.file_id.clone();
@@ -871,7 +871,7 @@ impl LabelloApp {
 
     fn restart_import_setup(&mut self) {
         self.begin_import_epoch();
-        self.import_flow.reset_job();
-        self.import_flow.open = true;
+        self.import.reset_job();
+        self.import.open = true;
     }
 }

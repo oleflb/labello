@@ -18,7 +18,7 @@ fn setup_sections_are_permission_gated_responsive_and_preserve_import_state() {
     assert!(harness.query_by_label("Setup navigation").is_some());
     click_accesskit_button(&mut harness, "Import");
     assert_eq!(harness.state().setup.section, SetupSection::Import);
-    assert!(harness.state().import_flow.open);
+    assert!(harness.state().import.open);
 
     harness.set_size(egui::vec2(900.0, 780.0));
     harness.step();
@@ -27,15 +27,15 @@ fn setup_sections_are_permission_gated_responsive_and_preserve_import_state() {
             .query_by_role_and_label(egui::accesskit::Role::ComboBox, "Setup section")
             .is_some()
     );
-    harness.state_mut().import_flow.destination_id = "active-import".to_string();
+    harness.state_mut().import.destination_id = "active-import".to_string();
     harness
         .get_by_role_and_label(egui::accesskit::Role::ComboBox, "Setup section")
         .click_accesskit();
     harness.step();
     click_accesskit_button(&mut harness, "Connection");
     assert_eq!(harness.state().setup.section, SetupSection::Connection);
-    assert!(harness.state().import_flow.open);
-    assert_eq!(harness.state().import_flow.destination_id, "active-import");
+    assert!(harness.state().import.open);
+    assert_eq!(harness.state().import.destination_id, "active-import");
 
     harness.state_mut().setup.section = SetupSection::Import;
     harness.state_mut().auth.can_create_datasets = false;
@@ -106,7 +106,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_admin_harness(api);
     step_until(&mut harness, 12, |app| {
-        app.admin_tools.images.is_some() && app.admin_tools.snapshots_loaded
+        app.admin.images.is_some() && app.admin.snapshots_loaded
     });
 
     harness.set_size(egui::vec2(1440.0, 1000.0));
@@ -139,10 +139,10 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         "status={status:?}, reload={reload:?}"
     );
 
-    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.state_mut().admin.section = AdminSection::Overview;
     harness.step();
     let unscrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
-    harness.state_mut().admin_tools.section = AdminSection::Schema;
+    harness.state_mut().admin.section = AdminSection::Schema;
     harness.step();
     for label in [
         "Class Workflows card",
@@ -155,7 +155,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     }
     let scrolled_admin_x = harness.get_by_label("Dataset Admin").rect().left();
     assert!((unscrolled_admin_x - scrolled_admin_x).abs() <= 0.5);
-    harness.state_mut().admin_tools.section = AdminSection::Automation;
+    harness.state_mut().admin.section = AdminSection::Automation;
     harness.step();
     let prelabels_card = harness.get_by_label("Prelabels card").rect();
     for label in ["Prelabels card", "Assignment Balance card"] {
@@ -172,7 +172,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
             "{label} does not fill its Automation column: field={field:?}, card={prelabels_card:?}"
         );
     }
-    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.state_mut().admin.section = AdminSection::Overview;
     harness.step();
     harness
         .state_mut()
@@ -192,8 +192,8 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         .clear();
     harness.step();
     click_accesskit_button(&mut harness, "Explore images");
-    assert_eq!(harness.state().admin_tools.section, AdminSection::Images);
-    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    assert_eq!(harness.state().admin.section, AdminSection::Images);
+    harness.state_mut().admin.section = AdminSection::Overview;
     harness.step();
 
     harness.state_mut().loading.admin = true;
@@ -217,7 +217,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     );
     harness.state_mut().loading.admin = false;
 
-    harness.state_mut().admin_tools.section = AdminSection::People;
+    harness.state_mut().admin.section = AdminSection::People;
     harness.state_mut().loading.uploading = true;
     harness.step();
     assert!(
@@ -231,43 +231,43 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     );
     harness.state_mut().loading.uploading = false;
 
-    harness.state_mut().admin_tools.section = AdminSection::Images;
+    harness.state_mut().admin.section = AdminSection::Images;
     harness.state_mut().loading.images = true;
     harness.step();
     assert!(harness.query_by_label("Refreshing images...").is_some());
     harness.state_mut().loading.images = false;
-    harness.state_mut().admin_tools.images_error = Some("offline".to_string());
+    harness.state_mut().admin.images_error = Some("offline".to_string());
     harness.step();
     assert!(
         harness
             .query_by_label("Showing saved image results. Refresh failed: offline")
             .is_some()
     );
-    let mut empty_page = harness.state().admin_tools.images.clone().unwrap();
+    let mut empty_page = harness.state().admin.images.clone().unwrap();
     empty_page.items.clear();
-    harness.state_mut().admin_tools.images = Some(empty_page);
-    harness.state_mut().admin_tools.images_error = None;
+    harness.state_mut().admin.images = Some(empty_page);
+    harness.state_mut().admin.images_error = None;
     harness.state_mut().loading.images = true;
     harness.step();
     assert!(harness.query_by_label("Refreshing images...").is_some());
     assert!(harness.query_by_label("No matching images").is_none());
     harness.state_mut().loading.images = false;
 
-    harness.state_mut().admin_tools.section = AdminSection::Backups;
+    harness.state_mut().admin.section = AdminSection::Backups;
     harness.state_mut().loading.snapshots = true;
     harness.step();
     assert!(harness.query_by_label("Refreshing backups...").is_some());
     harness.state_mut().loading.snapshots = false;
-    harness.state_mut().admin_tools.snapshots_error = Some("offline".to_string());
+    harness.state_mut().admin.snapshots_error = Some("offline".to_string());
     harness.step();
     assert!(
         harness
             .query_by_label("Showing the last loaded backups. Refresh failed: offline")
             .is_some()
     );
-    harness.state_mut().admin_tools.snapshots_loaded = false;
-    harness.state_mut().admin_tools.snapshots = vec![test_snapshot(DatasetId::from("demo"))];
-    harness.state_mut().admin_tools.snapshots_error = Some("offline".to_string());
+    harness.state_mut().admin.snapshots_loaded = false;
+    harness.state_mut().admin.snapshots = vec![test_snapshot(DatasetId::from("demo"))];
+    harness.state_mut().admin.snapshots_error = Some("offline".to_string());
     harness.step();
     assert!(
         harness
@@ -275,7 +275,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
             .is_some()
     );
 
-    harness.state_mut().admin_tools.section = AdminSection::Overview;
+    harness.state_mut().admin.section = AdminSection::Overview;
     harness.set_size(egui::vec2(900.0, 780.0));
     harness.step();
     assert!(
@@ -297,7 +297,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
             .count(),
         0
     );
-    harness.state_mut().admin_tools.section = AdminSection::People;
+    harness.state_mut().admin.section = AdminSection::People;
     harness.step();
     let people_search = harness
         .get_by_role_and_label(egui::accesskit::Role::TextInput, "Search people")
@@ -309,7 +309,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
     assert!(person_card.left() <= 38.5 && person_card.right() >= 347.5);
     harness.set_size(egui::vec2(320.0, 568.0));
     harness.step();
-    harness.state_mut().admin_tools.section = AdminSection::Images;
+    harness.state_mut().admin.section = AdminSection::Images;
     harness.step();
     let root_path = harness
         .get_by_role_and_label(egui::accesskit::Role::TextInput, "Root path")
@@ -320,7 +320,7 @@ fn admin_navigation_and_remote_states_are_responsive_and_explicit() {
         .rect();
     assert!((image_search.height() - theme::COMPACT_TEXT_FIELD_HEIGHT).abs() <= 1.0);
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
-    harness.state_mut().admin_tools.section = AdminSection::Automation;
+    harness.state_mut().admin.section = AdminSection::Automation;
     harness.step();
     let prelabels_card = harness.get_by_label("Prelabels card").rect();
     let location = harness
@@ -340,7 +340,7 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     let mut harness = loaded_work_harness(api);
     let image_name = harness
         .state()
-        .current
+        .work.current
         .as_ref()
         .unwrap()
         .image
@@ -482,7 +482,7 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
         (SaveStatus::Saving, "Saving"),
         (SaveStatus::Retry, "Retry"),
     ] {
-        harness.state_mut().save_status = status;
+        harness.state_mut().work.save_status = status;
         harness.step();
         let status_label = format!("Status: {label}");
         assert!(harness.query_by_label(&status_label).is_some());
@@ -558,7 +558,7 @@ fn compact_long_work_context_preserves_canvas_and_controls() {
     let mut harness = loaded_work_harness(api);
     harness
         .state_mut()
-        .current
+        .work.current
         .as_mut()
         .unwrap()
         .image
@@ -566,7 +566,7 @@ fn compact_long_work_context_preserves_canvas_and_controls() {
         "a-very-long-image-name-that-must-not-collapse-the-annotation-workspace.jpg".to_string();
     harness
         .state_mut()
-        .tasks
+        .work.tasks
         .iter_mut()
         .find(|task| task.task_id == TaskId::from("bounding_box:person"))
         .unwrap()
@@ -611,17 +611,17 @@ fn tutorial_overlay_does_not_change_canvas_geometry() {
     harness.set_size(egui::vec2(390.0, 667.0));
     harness.step();
     let before = harness.get_by_label("Annotation canvas").rect();
-    let selected = harness.state().selected_task_id.clone().unwrap();
+    let selected = harness.state().work.selected_task_id.clone().unwrap();
     harness
         .state_mut()
-        .tasks
+        .work.tasks
         .iter_mut()
         .find(|task| task.task_id == selected)
         .unwrap()
         .instructions
         .example_text = "Detailed tutorial guidance. ".repeat(100);
 
-    harness.state_mut().show_tutorial = true;
+    harness.state_mut().work.show_tutorial = true;
     harness.step();
 
     assert_eq!(harness.get_by_label("Annotation canvas").rect(), before);
@@ -706,20 +706,20 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
     let mut harness = loaded_review_harness(api);
 
     click(&mut harness, "Zoom in");
-    assert!(harness.state().canvas.current_zoom() > 1.0);
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
     let pan_before = harness.get_by_label("Pan").rect();
     let zoom_out_before = harness.get_by_label("Zoom out").rect();
     click(&mut harness, "Pan");
-    assert!(harness.state().canvas.pan_mode());
+    assert!(harness.state().work.canvas.pan_mode());
     assert_eq!(harness.get_by_label("Pan").rect(), pan_before);
     assert_eq!(harness.get_by_label("Zoom out").rect(), zoom_out_before);
     click(&mut harness, "Pan");
-    assert!(!harness.state().canvas.pan_mode());
+    assert!(!harness.state().work.canvas.pan_mode());
     click(&mut harness, "Fit");
-    assert_eq!(harness.state().canvas.current_zoom(), 1.0);
+    assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
     harness.key_press(egui::Key::Plus);
     harness.step();
-    assert!(harness.state().canvas.current_zoom() > 1.0);
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
     click(&mut harness, "Fit");
 
     for (width, height) in viewport_sizes() {
@@ -746,7 +746,7 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
             );
         }
         if LayoutMode::for_width(width) != LayoutMode::Wide {
-            harness.state_mut().drawer = Some(Drawer::Inspector);
+            harness.state_mut().work.drawer = Some(Drawer::Inspector);
             harness.step();
             assert_eq!(
                 harness
@@ -755,7 +755,7 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 1,
                 "review action duplicated when the Inspector drawer opened"
             );
-            harness.state_mut().drawer = None;
+            harness.state_mut().work.drawer = None;
         }
     }
 
@@ -773,7 +773,7 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
     }
 
-    harness.state_mut().review_index = 1;
+    harness.state_mut().work.review_index = 1;
     harness.set_size(egui::vec2(320.0, 568.0));
     harness.step();
     assert_label_inside(&harness, "Final check", 320.0, 568.0);
@@ -795,9 +795,9 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
     let mut harness = loaded_adjudication_harness(api);
 
     click(&mut harness, "Zoom in");
-    assert!(harness.state().canvas.current_zoom() > 1.0);
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
     click(&mut harness, "Fit");
-    assert_eq!(harness.state().canvas.current_zoom(), 1.0);
+    assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
 
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
@@ -826,7 +826,7 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
             );
         }
         if LayoutMode::for_width(width) != LayoutMode::Wide {
-            harness.state_mut().drawer = Some(Drawer::Inspector);
+            harness.state_mut().work.drawer = Some(Drawer::Inspector);
             harness.step();
             assert_eq!(
                 harness
@@ -835,7 +835,7 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
                 1,
                 "adjudication action duplicated when the Inspector drawer opened"
             );
-            harness.state_mut().drawer = None;
+            harness.state_mut().work.drawer = None;
         }
     }
 }
@@ -1024,7 +1024,7 @@ fn settings_and_transition_modals_are_viewport_constrained() {
     let mut harness = loaded_work_harness(api);
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
-        harness.state_mut().show_settings = true;
+        harness.state_mut().work.show_settings = true;
         harness.step();
         harness.step();
         assert_label_inside(&harness, "Keyboard shortcuts", width, height);
@@ -1032,7 +1032,7 @@ fn settings_and_transition_modals_are_viewport_constrained() {
         if width == 320.0 {
             let draft = harness
                 .state_mut()
-                .shortcut_settings
+                .work.shortcut_settings
                 .draft
                 .as_mut()
                 .expect("settings draft");
@@ -1059,8 +1059,8 @@ fn settings_and_transition_modals_are_viewport_constrained() {
             assert_visible_controls_clamped(&harness, width, height);
         }
 
-        harness.state_mut().show_settings = false;
-        harness.state_mut().pending_transition =
+        harness.state_mut().work.show_settings = false;
+        harness.state_mut().work.pending_transition =
             Some(crate::app::PendingTransition::View(AppView::Review));
         harness.step();
         for label in ["Release and switch", "Cancel"] {
@@ -1073,11 +1073,11 @@ fn settings_and_transition_modals_are_viewport_constrained() {
             );
         }
         assert_visible_controls_clamped(&harness, width, height);
-        harness.state_mut().pending_transition = None;
+        harness.state_mut().work.pending_transition = None;
     }
 
     harness.set_size(egui::vec2(600.0, 568.0));
-    harness.state_mut().show_settings = true;
+    harness.state_mut().work.show_settings = true;
     harness.step();
     harness.step();
     for label in ["Restore all defaults", "Cancel", "Save changes"] {

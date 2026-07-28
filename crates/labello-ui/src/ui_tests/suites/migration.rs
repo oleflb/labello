@@ -6,8 +6,8 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
     let api = Rc::new(SpyApi::new());
     let mut app =
         inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
-    let image_id = app.current.as_ref().unwrap().image.image_id.clone();
-    api.set_image_state(app.current_state.clone().unwrap());
+    let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
+    api.set_image_state(app.work.current_state.clone().unwrap());
     app.runtime.api = Some(api.clone());
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1440.0, 1000.0))
@@ -20,21 +20,21 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
         .state_mut()
         .request_exclude_migration_target(labello_domain::ObjectGroupId::from("group-left"));
     harness.step();
-    step_until(&mut harness, 8, |app| !app.migration.busy);
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
     assert!(
         harness
             .state()
-            .migration
+            .work.migration
             .error
             .as_deref()
             .is_some_and(|error| error.contains("migration command failed")),
         "counts={:?} migration_error={:?} runtime_error={:?}",
         api.counts(),
-        harness.state().migration.error,
+        harness.state().work.migration.error,
         harness.state().runtime.error,
     );
     assert!(matches!(
-        harness.state().migration.cursor,
+        harness.state().work.migration.cursor,
         Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
             if object_group_id == &labello_domain::ObjectGroupId::from("group-left")
     ));
@@ -45,7 +45,7 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
     harness.step();
     step_until(&mut harness, 8, |app| {
         matches!(
-            app.migration.cursor,
+            app.work.migration.cursor,
             Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
                 if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
         )
@@ -63,7 +63,7 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
         .build_eframe(|_| reloaded);
     reload_harness.step();
     assert!(matches!(
-        reload_harness.state().migration.cursor,
+        reload_harness.state().work.migration.cursor,
         Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
             if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
     ));
@@ -82,16 +82,16 @@ fn migration_draft_supports_undo_and_delete() {
     harness.step();
 
     let place_first_keypoint = |app: &mut LabelloApp| {
-        let draft = app.migration.draft.as_mut().unwrap();
+        let draft = app.work.migration.draft.as_mut().unwrap();
         draft.keypoints[0].point = Some(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
         draft.keypoints[0].state = labello_domain::KeypointState::Visible;
-        app.migration.keypoint_index = 1;
+        app.work.migration.keypoint_index = 1;
     };
 
-    let task_id = harness.state().selected_task_id.clone().unwrap();
+    let task_id = harness.state().work.selected_task_id.clone().unwrap();
     let guide_id = harness
         .state()
-        .current_state
+        .work.current_state
         .as_ref()
         .unwrap()
         .migration_target_sets[&task_id]
@@ -100,7 +100,7 @@ fn migration_draft_supports_undo_and_delete() {
         .clone();
     let guide_before = harness
         .state()
-        .current_state
+        .work.current_state
         .as_ref()
         .unwrap()
         .current_annotation(&guide_id)
@@ -108,20 +108,20 @@ fn migration_draft_supports_undo_and_delete() {
         .clone();
 
     place_first_keypoint(harness.state_mut());
-    harness.state_mut().migration.next_hidden = true;
+    harness.state_mut().work.migration.next_hidden = true;
     harness.step();
     click_accesskit_button(&mut harness, "Undo last keypoint");
-    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
     assert!(
-        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
             .point
             .is_none()
     );
-    assert!(!harness.state().migration.next_hidden);
+    assert!(!harness.state().work.migration.next_hidden);
     assert_eq!(
         harness
             .state()
-            .current_state
+            .work.current_state
             .as_ref()
             .unwrap()
             .current_annotation(&guide_id),
@@ -132,9 +132,9 @@ fn migration_draft_supports_undo_and_delete() {
     harness.step();
     harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     harness.step();
-    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
     assert!(
-        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
             .point
             .is_none()
     );
@@ -143,9 +143,9 @@ fn migration_draft_supports_undo_and_delete() {
     harness.step();
     harness.key_press(egui::Key::Delete);
     harness.step();
-    assert_eq!(harness.state().migration.keypoint_index, 0);
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
     assert!(
-        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
             .point
             .is_none()
     );
@@ -153,7 +153,7 @@ fn migration_draft_supports_undo_and_delete() {
     place_first_keypoint(harness.state_mut());
     harness
         .state_mut()
-        .current_state
+        .work.current_state
         .as_mut()
         .unwrap()
         .annotations
@@ -173,9 +173,9 @@ fn migration_draft_supports_undo_and_delete() {
     );
     harness.key_press(egui::Key::Delete);
     harness.step();
-    assert_eq!(harness.state().migration.keypoint_index, 1);
+    assert_eq!(harness.state().work.migration.keypoint_index, 1);
     assert!(
-        harness.state().migration.draft.as_ref().unwrap().keypoints[0]
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
             .point
             .is_some()
     );
@@ -193,13 +193,13 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
         InspectorPreset::MigrationFullImage,
         &egui::Context::default(),
     );
-    api.set_image_state(app.current_state.clone().unwrap());
-    api.complete_next_migration_with(app.assignment.clone().unwrap());
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    api.complete_next_migration_with(app.work.assignment.clone().unwrap());
     let next_image_id = ImageId::from("img_prepared_migration");
     let next_assignment = Assignment {
         assignment_id: AssignmentId::generate(),
         image_id: next_image_id.clone(),
-        task_id: app.selected_task_id.clone().unwrap(),
+        task_id: app.work.selected_task_id.clone().unwrap(),
         assigned_to: app.config.user_id.clone(),
         kind: AssignmentKind::Annotation,
         status: AssignmentStatus::Active,
@@ -207,8 +207,8 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
         created_at: now(),
         updated_at: now(),
     };
-    app.queue.clear();
-    assert!(app.queue.push_prepared(LoadedImage {
+    app.work.queue.clear();
+    assert!(app.work.queue.push_prepared(LoadedImage {
         assignment: next_assignment,
         queued: QueuedImage {
             image: image_record(next_image_id.as_str(), "prepared-migration.png", 640, 480),
@@ -229,9 +229,9 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
 
     click_accesskit_button(&mut harness, "Confirm all guides & finish");
     step_until(&mut harness, 8, |app| {
-        !app.migration.busy
+        !app.work.migration.busy
             && app
-                .assignment
+                .work.assignment
                 .as_ref()
                 .is_some_and(|assignment| assignment.image_id == next_image_id)
     });

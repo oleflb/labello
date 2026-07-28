@@ -1,6 +1,6 @@
 impl LabelloApp {
     fn import_running_step(&mut self, ui: &mut egui::Ui) {
-        if let Some(job) = &self.import_flow.job {
+        if let Some(job) = &self.import.job {
             status_row(ui, "Status", lifecycle_label(job.lifecycle));
             status_row(
                 ui,
@@ -20,7 +20,7 @@ impl LabelloApp {
             );
             if job.can_cancel
                 && ui
-                    .add_enabled(!self.import_flow.busy, egui::Button::new("Cancel import"))
+                    .add_enabled(!self.import.busy, egui::Button::new("Cancel import"))
                     .clicked()
             {
                 self.request_cancel_import();
@@ -30,7 +30,7 @@ impl LabelloApp {
 
     fn import_failure_step(&mut self, ui: &mut egui::Ui) {
         if let Some(failure) = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .and_then(|job| job.failure.as_ref())
@@ -49,7 +49,7 @@ impl LabelloApp {
             if failure.retryable
                 && theme::primary_button(
                     ui,
-                    !self.import_flow.busy,
+                    !self.import.busy,
                     egui::Button::new("Retry import"),
                 )
                 .clicked()
@@ -58,14 +58,14 @@ impl LabelloApp {
             }
         }
         if ui
-            .add_enabled(!self.import_flow.busy, egui::Button::new("Cancel import"))
+            .add_enabled(!self.import.busy, egui::Button::new("Cancel import"))
             .clicked()
         {
             self.request_cancel_import();
         }
         if ui.button("Start another import").clicked() {
             self.begin_import_epoch();
-            self.import_flow.reset_job();
+            self.import.reset_job();
         }
     }
 
@@ -75,11 +75,11 @@ impl LabelloApp {
             theme::Intent::Success,
             "Import committed and verified successfully.",
         );
-        if let Some(job) = &self.import_flow.job {
+        if let Some(job) = &self.import.job {
             status_row(ui, "Dataset ID", job.destination_dataset_id.to_string());
             status_row(ui, "Plan hash", job.plan_hash.clone().unwrap_or_default());
         }
-        let dataset_ready = self.import_flow.job.as_ref().is_some_and(|job| {
+        let dataset_ready = self.import.job.as_ref().is_some_and(|job| {
             self.datasets
                 .summaries
                 .iter()
@@ -95,15 +95,15 @@ impl LabelloApp {
         )
         .on_disabled_hover_text("Wait for the imported dataset to appear in the refreshed catalog.")
         .clicked()
-            && let Some(job) = &self.import_flow.job
+            && let Some(job) = &self.import.job
         {
             let dataset_id = job.destination_dataset_id.clone();
-            self.import_flow.open = false;
+            self.import.open = false;
             self.open_dataset(dataset_id, AppView::Admin);
         }
         if ui.button("Import another dataset").clicked() {
             self.begin_import_epoch();
-            self.import_flow.reset_job();
+            self.import.reset_job();
         }
     }
 }

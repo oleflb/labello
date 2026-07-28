@@ -19,7 +19,7 @@ impl LabelloApp {
                     ui.available_width().min(480.0),
                     theme::COMPACT_TEXT_FIELD_HEIGHT,
                 ],
-                theme::singleline_text_edit(&mut self.admin_tools.people_search)
+                theme::singleline_text_edit(&mut self.admin.people_search)
                     .hint_text("Name, login, or user ID"),
             )
             .labelled_by(search_label.id);
@@ -27,7 +27,7 @@ impl LabelloApp {
                 ui.spinner();
                 return;
             }
-            let search = self.admin_tools.people_search.trim().to_lowercase();
+            let search = self.admin.people_search.trim().to_lowercase();
             let current_user = self.config.user_id.clone();
             let admin_loading = self.loading.admin
                 || self.loading.roles_user.is_some()

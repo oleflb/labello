@@ -126,12 +126,12 @@ mod tests {
 
         assert!(app.queue_command(UiCommand::ImportCapabilities { request }));
         assert_eq!(
-            app.import_flow.active_operations.get(&request_id),
+            app.import.active_operations.get(&request_id),
             Some(&ImportActivity::CheckCapabilities)
         );
 
         app.begin_import_epoch();
-        assert!(app.import_flow.active_operations.is_empty());
+        assert!(app.import.active_operations.is_empty());
         assert!(app.runtime.commands.is_empty());
     }
 
@@ -222,15 +222,15 @@ mod tests {
             ..Default::default()
         };
         let mut app = LabelloApp::default();
-        app.import_flow.profile = ImportProfile::CocoInstancesGtV1;
-        app.import_flow.exhaustive = true;
-        app.import_flow.categories = categories;
-        app.import_flow.job = Some(ImportJob {
+        app.import.profile = ImportProfile::CocoInstancesGtV1;
+        app.import.exhaustive = true;
+        app.import.categories = categories;
+        app.import.job = Some(ImportJob {
             import_id: labello_domain::ImportId::from("imp-validation"),
             owner_user_id: labello_domain::UserId::from("admin"),
             destination_dataset_id: DatasetId::from("imported"),
             destination_name: "Imported".to_string(),
-            profile: app.import_flow.profile,
+            profile: app.import.profile,
             transport: ImportTransport::ServerDirectory,
             lifecycle: ImportLifecycle::AwaitingDecision,
             progress: Default::default(),
@@ -400,9 +400,9 @@ mod tests {
     #[test]
     fn compatibility_warnings_are_profile_specific() {
         let mut app = validation_app(vec![category("release:person:17", "17", "person")]);
-        app.import_flow.coco_crowds = labello_client::CocoCrowdPolicy::Incomplete;
-        app.import_flow.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
-        app.import_flow.yolo_missing_labels =
+        app.import.coco_crowds = labello_client::CocoCrowdPolicy::Incomplete;
+        app.import.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
+        app.import.yolo_missing_labels =
             labello_client::YoloMissingLabelPolicy::MissingIsBackground;
 
         let validation = app.import_mapping_validation();
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn seed_confirmation_is_reset_when_its_mapping_scope_changes() {
         let mut flow =
-            validation_app(vec![category("release:person:17", "17", "person")]).import_flow;
+            validation_app(vec![category("release:person:17", "17", "person")]).import;
         flow.categories[0].workflow_intent = ImportWorkflowIntent::SeedFutureAnnotation;
         flow.seed_workflow_confirmation_scope = flow.seed_workflow_scope();
         flow.seed_workflow_confirmed = true;
@@ -461,11 +461,11 @@ mod tests {
     #[test]
     fn manual_mapping_submits_guide_and_target_tasks_for_every_category() {
         let mut app = LabelloApp::default();
-        app.import_flow.capabilities = Some(ImportCapabilities {
+        app.import.capabilities = Some(ImportCapabilities {
             manual_box_guide_migration: true,
             ..Default::default()
         });
-        app.import_flow.categories = vec![
+        app.import.categories = vec![
             manual_category("release:v2:17", "17", "person", "nose,left_eye"),
             manual_category("release:v2:18", "18", "vehicle", "nose,left_eye"),
         ];
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn category_specific_manual_mapping_allows_multiple_categories() {
         let mut app = LabelloApp::default();
-        app.import_flow.capabilities = Some(ImportCapabilities {
+        app.import.capabilities = Some(ImportCapabilities {
             manual_box_guide_migration: true,
             ..Default::default()
         });
@@ -525,11 +525,11 @@ mod tests {
             },
             ..Default::default()
         };
-        app.import_flow.plan = Some(ImportPlan {
+        app.import.plan = Some(ImportPlan {
             report: report.clone(),
             ..Default::default()
         });
-        app.import_flow.job = Some(ImportJob {
+        app.import.job = Some(ImportJob {
             import_id: labello_domain::ImportId::from("imp-test"),
             owner_user_id: labello_domain::UserId::from("admin"),
             destination_dataset_id: DatasetId::from("imported"),
@@ -550,8 +550,8 @@ mod tests {
         });
         let person = manual_category("source:0", "0", "person", "nose");
         let vehicle = manual_category("source:1", "1", "vehicle", "wheel, axle");
-        app.import_flow.categories = vec![person, vehicle];
-        app.import_flow.exhaustive = true;
+        app.import.categories = vec![person, vehicle];
+        app.import.exhaustive = true;
 
         assert!(app.import_mappings_complete());
         let request = app.import_plan_request();
@@ -580,25 +580,25 @@ mod tests {
             );
         }
 
-        app.import_flow.diagnostics = vec![labello_client::ImportDiagnostic::default()];
-        app.import_flow.diagnostics_cursor = Some("old".to_string());
+        app.import.diagnostics = vec![labello_client::ImportDiagnostic::default()];
+        app.import.diagnostics_cursor = Some("old".to_string());
         app.request_update_import_plan();
-        assert!(app.import_flow.plan.is_none());
-        assert!(app.import_flow.pending_plan_request.is_some());
-        assert!(app.import_flow.diagnostics.is_empty());
-        assert!(app.import_flow.diagnostics_cursor.is_none());
+        assert!(app.import.plan.is_none());
+        assert!(app.import.pending_plan_request.is_some());
+        assert!(app.import.diagnostics.is_empty());
+        assert!(app.import.diagnostics_cursor.is_none());
     }
 
     #[test]
     fn recovery_restores_each_manual_category_target_schema() {
         let mut planned = LabelloApp::default();
-        planned.import_flow.categories = vec![
+        planned.import.categories = vec![
             manual_category("source:0", "0", "person", "nose, left_eye"),
             manual_category("source:1", "1", "vehicle", "wheel, axle"),
         ];
         let accepted = planned.import_plan_request();
         let source_categories = planned
-            .import_flow
+            .import
             .categories
             .iter()
             .map(|category| {
@@ -691,16 +691,16 @@ mod tests {
         };
 
         let mut recovered = LabelloApp::default();
-        recovered.import_flow.capabilities = Some(ImportCapabilities {
+        recovered.import.capabilities = Some(ImportCapabilities {
             manual_box_guide_migration: true,
             ..Default::default()
         });
-        recovered.import_flow.hydrate_job_contract(&job);
+        recovered.import.hydrate_job_contract(&job);
 
-        assert_eq!(recovered.import_flow.categories.len(), 2);
+        assert_eq!(recovered.import.categories.len(), 2);
         assert_eq!(
             recovered
-                .import_flow
+                .import
                 .categories
                 .iter()
                 .map(|category| (
@@ -710,7 +710,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("person", "nose, left_eye"), ("vehicle", "wheel, axle")]
         );
-        assert_eq!(recovered.import_flow.accepted_plan_request, Some(accepted));
+        assert_eq!(recovered.import.accepted_plan_request, Some(accepted));
         assert!(recovered.import_mappings_complete());
     }
 
@@ -764,8 +764,8 @@ mod tests {
     #[test]
     fn omit_geometry_emits_no_tasks() {
         let mut app = LabelloApp::default();
-        app.import_flow.categories = vec![category("source:3", "3", "person")];
-        for mapping in &mut app.import_flow.categories[0].geometry_mappings {
+        app.import.categories = vec![category("source:3", "3", "person")];
+        for mapping in &mut app.import.categories[0].geometry_mappings {
             mapping.policy = ImportGeometryPolicy::Omit;
         }
 
@@ -785,15 +785,15 @@ mod tests {
     #[test]
     fn pose_direct_box_and_skeleton_mappings_are_independent() {
         let mut app = LabelloApp::default();
-        app.import_flow.profile = ImportProfile::CocoKeypointsGtV1;
-        app.import_flow.categories = vec![category("paired:person:17", "17", "person")];
+        app.import.profile = ImportProfile::CocoKeypointsGtV1;
+        app.import.categories = vec![category("paired:person:17", "17", "person")];
 
         let both = app.import_plan_request();
         assert_eq!(both.geometry_mappings.len(), 2);
         assert_eq!(both.task_mappings.len(), 2);
         assert_eq!(both.skeleton_mappings.len(), 1);
 
-        app.import_flow.categories[0].geometry_mappings[0].policy = ImportGeometryPolicy::Omit;
+        app.import.categories[0].geometry_mappings[0].policy = ImportGeometryPolicy::Omit;
         let skeleton_only = app.import_plan_request();
         assert_eq!(skeleton_only.geometry_mappings.len(), 2);
         assert_eq!(skeleton_only.task_mappings.len(), 1);
@@ -806,14 +806,14 @@ mod tests {
     #[test]
     fn manual_mapping_uses_only_the_selected_real_category() {
         let mut app = LabelloApp::default();
-        app.import_flow.capabilities = Some(ImportCapabilities {
+        app.import.capabilities = Some(ImportCapabilities {
             manual_box_guide_migration: true,
             ..Default::default()
         });
         let selected = manual_category("release:person:17", "17", "person", "nose");
         let mut omitted = manual_category("release:vehicle:91", "91", "vehicle", "nose");
         omitted.selected = false;
-        app.import_flow.categories = vec![selected, omitted];
+        app.import.categories = vec![selected, omitted];
 
         let request = app.import_plan_request();
 
@@ -843,9 +843,9 @@ mod tests {
     #[test]
     fn paired_coco_descriptor_kinds_are_preserved_and_api_validated() {
         let mut app = LabelloApp::default();
-        app.import_flow.profile = ImportProfile::CocoKeypointsGtV1;
-        app.import_flow.transport = ImportTransport::ServerDirectory;
-        app.import_flow.descriptors = vec![
+        app.import.profile = ImportProfile::CocoKeypointsGtV1;
+        app.import.transport = ImportTransport::ServerDirectory;
+        app.import.descriptors = vec![
             ImportDescriptorDraft {
                 descriptor_file_id: "annotations/instances.json".to_string(),
                 kind: ImportDescriptorKind::CocoInstances,
@@ -861,13 +861,13 @@ mod tests {
                 ..Default::default()
             },
         ];
-        app.import_flow.job = Some(ImportJob {
+        app.import.job = Some(ImportJob {
             import_id: labello_domain::ImportId::from("imp-test"),
             owner_user_id: labello_domain::UserId::from("admin"),
             destination_dataset_id: DatasetId::from("imported"),
             destination_name: "Imported".to_string(),
-            profile: app.import_flow.profile,
-            transport: app.import_flow.transport,
+            profile: app.import.profile,
+            transport: app.import.transport,
             lifecycle: ImportLifecycle::Uploading,
             progress: Default::default(),
             failure: None,
@@ -883,7 +883,7 @@ mod tests {
 
         assert!(app.import_descriptors_valid());
         app.request_seal_import();
-        assert!(app.import_flow.error.is_none());
+        assert!(app.import.error.is_none());
         let UiCommand::SealImport { body, .. } = app.runtime.commands.pop_back().unwrap() else {
             panic!("seal command was not queued");
         };
@@ -903,16 +903,16 @@ mod tests {
     #[test]
     fn yolo_seal_uses_one_descriptor_and_all_checked_discovered_splits() {
         let mut app = LabelloApp::default();
-        app.import_flow.profile = ImportProfile::UltralyticsYoloDetectV1;
-        app.import_flow.transport = ImportTransport::ServerDirectory;
-        app.import_flow.descriptors = vec![ImportDescriptorDraft {
+        app.import.profile = ImportProfile::UltralyticsYoloDetectV1;
+        app.import.transport = ImportTransport::ServerDirectory;
+        app.import.descriptors = vec![ImportDescriptorDraft {
             descriptor_file_id: "dataset.yaml".to_string(),
             kind: ImportDescriptorKind::YoloDataset,
             release: "v1".to_string(),
             ..Default::default()
         }];
-        app.import_flow.yolo_inspected_descriptor_file_id = Some("dataset.yaml".to_string());
-        app.import_flow.yolo_splits = vec![
+        app.import.yolo_inspected_descriptor_file_id = Some("dataset.yaml".to_string());
+        app.import.yolo_splits = vec![
             ImportYoloSplitDraft {
                 name: "train".to_string(),
                 usable: true,
@@ -932,13 +932,13 @@ mod tests {
                 issue: Some("invalid split".to_string()),
             },
         ];
-        app.import_flow.job = Some(ImportJob {
+        app.import.job = Some(ImportJob {
             import_id: labello_domain::ImportId::from("imp-yolo"),
             owner_user_id: labello_domain::UserId::from("admin"),
             destination_dataset_id: DatasetId::from("imported-yolo"),
             destination_name: "Imported YOLO".to_string(),
-            profile: app.import_flow.profile,
-            transport: app.import_flow.transport,
+            profile: app.import.profile,
+            transport: app.import.transport,
             lifecycle: ImportLifecycle::Uploading,
             progress: Default::default(),
             failure: None,

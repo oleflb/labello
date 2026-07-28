@@ -101,6 +101,7 @@ Only after that continue with the next issue.
       - Centralize request IDs, epochs, stale-response rejection, rollback, and reservation release. Feature reducers may mutate only their owned state plus explicitly named navigation/session effects.
       - Split workspace rendering by toolbar, task selector, inspector, annotation/review/adjudication, manual migration, and overlays. Split canvas only along proven viewport, painting, hit-testing, and interaction boundaries; preserve gesture tests.
       - Split browser persistence into records/validation, identity, retry queue, restore orchestration, memory test store, IndexedDB, and local-storage adapters. Browser state must never become authoritative workflow state.
+      - Ownership map and YAGNI decisions: [`ui-ownership.md`](ui-ownership.md).
     - Phase 7 — remove scaffolding and document the result:
       - Remove temporary re-exports/facades only when repository-wide search proves no caller needs them.
       - Reduce visibility, delete obsolete conversion helpers and duplicate validators, and document justified large-module/lint exceptions.

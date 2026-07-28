@@ -9,7 +9,7 @@ pub(super) fn loaded_work_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloAp
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Continue with Demo Dataset");
-    step_until(&mut harness, 12, |app| app.current.is_some());
+    step_until(&mut harness, 12, |app| app.work.current.is_some());
     harness
 }
 
@@ -18,7 +18,7 @@ pub(super) fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, Labello
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Review Demo Dataset");
     step_until(&mut harness, 12, |app| {
-        app.view == AppView::Review && app.current.is_some()
+        app.view == AppView::Review && app.work.current.is_some()
     });
     harness
 }
@@ -28,7 +28,7 @@ pub(super) fn loaded_adjudication_harness(api: Rc<SpyApi>) -> Harness<'static, L
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Adjudicate Demo Dataset");
     step_until(&mut harness, 12, |app| {
-        app.view == AppView::Adjudicate && app.current.is_some()
+        app.view == AppView::Adjudicate && app.work.current.is_some()
     });
     harness
 }
@@ -142,7 +142,7 @@ pub(super) fn select_admin_section(harness: &mut Harness<'static, LabelloApp>, l
         .query_by_role_and_label(egui::accesskit::Role::ComboBox, "Admin section")
         .is_some()
     {
-        harness.state_mut().admin_tools.section = section;
+        harness.state_mut().admin.section = section;
         harness.step();
     } else {
         click_accesskit_button(harness, label);
@@ -223,22 +223,22 @@ pub(super) fn step_until(
         "view={:?} setup={:?} import(open={}, capabilities_loading={}) current={:?} assignment={:?} loading(dataset={}, image={}, saving={}) pending={:?} error={:?}",
         harness.state().view,
         harness.state().setup.section,
-        harness.state().import_flow.open,
-        harness.state().import_flow.capabilities_loading,
+        harness.state().import.open,
+        harness.state().import.capabilities_loading,
         harness
             .state()
-            .current
+            .work.current
             .as_ref()
             .map(|current| current.image.image_id.clone()),
         harness
             .state()
-            .assignment
+            .work.assignment
             .as_ref()
             .map(|assignment| assignment.assignment_id.clone()),
         harness.state().loading.dataset,
         harness.state().loading.image,
         harness.state().loading.saving,
-        harness.state().pending_transition,
+        harness.state().work.pending_transition,
         harness.state().runtime.error,
     );
 }

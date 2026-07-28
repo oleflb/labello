@@ -71,6 +71,7 @@ impl LabelloApp {
         };
         task.manual_box_guide_migration.is_some()
             && self
+                .work
                 .current_state
                 .as_ref()
                 .is_some_and(|state| state.migration_target_sets.contains_key(&task.task_id))
@@ -80,7 +81,7 @@ impl LabelloApp {
         if !self.manual_migration_active() || self.work.migration.busy {
             return;
         }
-        let Some(task_id) = self.selected_task_id.clone() else {
+        let Some(task_id) = self.work.selected_task_id.clone() else {
             return;
         };
         if self.work.migration.progress.is_some() {
@@ -90,18 +91,22 @@ impl LabelloApp {
             return;
         }
         if self.work.migration.active_pass_id.is_none() {
-            self.work.migration.active_pass_id = self.current_state.as_ref().and_then(|state| {
-                let assignment_id = &self.assignment.as_ref()?.assignment_id;
-                state
-                    .migration_passes
-                    .values()
-                    .filter(|pass| pass.task_id == task_id && &pass.assignment_id == assignment_id)
-                    .max_by_key(|pass| pass.started_at)
-                    .map(|pass| pass.pass_id.clone())
-            });
+            self.work.migration.active_pass_id =
+                self.work.current_state.as_ref().and_then(|state| {
+                    let assignment_id = &self.work.assignment.as_ref()?.assignment_id;
+                    state
+                        .migration_passes
+                        .values()
+                        .filter(|pass| {
+                            pass.task_id == task_id && &pass.assignment_id == assignment_id
+                        })
+                        .max_by_key(|pass| pass.started_at)
+                        .map(|pass| pass.pass_id.clone())
+                });
         }
         let active_pass = self.work.migration.active_pass_id.as_ref();
         let cursor = self
+            .work
             .current_state
             .as_ref()
             .and_then(|state| state.migration_cursor(&task_id, active_pass).ok());
@@ -119,14 +124,14 @@ impl LabelloApp {
     }
 
     pub(crate) fn migration_workspace_canvas(&mut self, ui: &mut egui::Ui) {
-        let Some(current) = self.current.clone() else {
+        let Some(current) = self.work.current.clone() else {
             return;
         };
-        let texture = self.current_texture.clone();
+        let texture = self.work.current_texture.clone();
         let Some(task) = self.selected_task().cloned() else {
             return;
         };
-        let Some(state) = self.current_state.clone() else {
+        let Some(state) = self.work.current_state.clone() else {
             return;
         };
         let active = self.migration_active_target();
@@ -136,9 +141,9 @@ impl LabelloApp {
                 .cloned()
         });
         if let Some(guide) = guide.as_ref().filter(|guide| !guide.deleted) {
-            self.canvas.set_review_focus(Some(guide));
+            self.work.canvas.set_review_focus(Some(guide));
         } else {
-            self.canvas.set_review_focus(None);
+            self.work.canvas.set_review_focus(None);
         }
         let task_id = task.task_id.clone();
         let mut annotations = Vec::new();
@@ -254,7 +259,7 @@ impl LabelloApp {
         };
         let action = show_canvas_colored(
             ui,
-            &mut self.canvas,
+            &mut self.work.canvas,
             texture.as_ref(),
             &annotations,
             [current.image.width, current.image.height],
@@ -343,10 +348,10 @@ impl LabelloApp {
             "Current status: {}",
             disposition_label(status.as_ref())
         ));
-        let guide = self.current_state.as_ref().and_then(|state| {
+        let guide = self.work.current_state.as_ref().and_then(|state| {
             let target = state
                 .migration_target_sets
-                .get(self.selected_task_id.as_ref()?)?
+                .get(self.work.selected_task_id.as_ref()?)?
                 .targets
                 .iter()
                 .find(|target| target.object_group_id == group_id)?;
@@ -361,15 +366,16 @@ impl LabelloApp {
                 .button(format!("Focus current box (guide v{})", guide.version))
                 .clicked()
         {
-            self.canvas.focus_annotation(guide);
+            self.work.canvas.focus_annotation(guide);
         }
         let dependency = self
+            .work
             .current_state
             .as_ref()
             .and_then(|state| {
                 state
                     .migration_dependencies
-                    .get(self.selected_task_id.as_ref()?)
+                    .get(self.work.selected_task_id.as_ref()?)
                     .and_then(|markers| markers.get(&group_id))
             })
             .is_some();
@@ -613,8 +619,8 @@ impl LabelloApp {
 
     fn migration_review_actions(&mut self, ui: &mut egui::Ui) {
         let Some((task_id, targets, confirmation)) =
-            self.current_state.as_ref().and_then(|state| {
-                let task_id = self.selected_task_id.clone()?;
+            self.work.current_state.as_ref().and_then(|state| {
+                let task_id = self.work.selected_task_id.clone()?;
                 let mut targets = state.migration_target_sets.get(&task_id)?.targets.clone();
                 targets.sort_by_key(|target| target.sequence_index);
                 Some((
@@ -651,7 +657,7 @@ impl LabelloApp {
             } else {
                 ui.label("Review the skeleton against the read-only canonical guide.");
             }
-            let review_target = self.current_state.as_ref().and_then(|state| {
+            let review_target = self.work.current_state.as_ref().and_then(|state| {
                 let disposition = state
                     .migration_dispositions
                     .get(&task_id)?
@@ -728,8 +734,8 @@ impl LabelloApp {
     }
 
     fn migration_status_list(&self, ui: &mut egui::Ui) {
-        let Some((task_id, set, state)) = self.current_state.as_ref().and_then(|state| {
-            let task_id = self.selected_task_id.as_ref()?;
+        let Some((task_id, set, state)) = self.work.current_state.as_ref().and_then(|state| {
+            let task_id = self.work.selected_task_id.as_ref()?;
             Some((task_id, state.migration_target_sets.get(task_id)?, state))
         }) else {
             return;
@@ -785,8 +791,8 @@ impl LabelloApp {
                 progress.pending,
             );
         }
-        let Some((task_id, set, state)) = self.current_state.as_ref().and_then(|state| {
-            let task_id = self.selected_task_id.as_ref()?;
+        let Some((task_id, set, state)) = self.work.current_state.as_ref().and_then(|state| {
+            let task_id = self.work.selected_task_id.as_ref()?;
             Some((task_id, state.migration_target_sets.get(task_id)?, state))
         }) else {
             return (0, 0, 0, 0);
@@ -810,8 +816,8 @@ impl LabelloApp {
     }
 
     pub(crate) fn canonical_migration_review_index(&self) -> usize {
-        let Some((task_id, set, state)) = self.current_state.as_ref().and_then(|state| {
-            let task_id = self.selected_task_id.as_ref()?;
+        let Some((task_id, set, state)) = self.work.current_state.as_ref().and_then(|state| {
+            let task_id = self.work.selected_task_id.as_ref()?;
             Some((task_id, state.migration_target_sets.get(task_id)?, state))
         }) else {
             return 0;
@@ -866,8 +872,9 @@ impl LabelloApp {
 
     fn migration_active_target(&self) -> Option<(ObjectGroupId, labello_domain::MigrationTarget)> {
         if self.view == AppView::Review {
-            let task_id = self.selected_task_id.as_ref()?;
+            let task_id = self.work.selected_task_id.as_ref()?;
             let target = self
+                .work
                 .current_state
                 .as_ref()?
                 .migration_target_sets
@@ -883,8 +890,9 @@ impl LabelloApp {
         else {
             return None;
         };
-        let task_id = self.selected_task_id.as_ref()?;
+        let task_id = self.work.selected_task_id.as_ref()?;
         let target = self
+            .work
             .current_state
             .as_ref()?
             .migration_target_sets
@@ -900,8 +908,9 @@ impl LabelloApp {
         &self,
         group_id: &ObjectGroupId,
     ) -> Option<MigrationDispositionStatus> {
-        let task_id = self.selected_task_id.as_ref()?;
-        self.current_state
+        let task_id = self.work.selected_task_id.as_ref()?;
+        self.work
+            .current_state
             .as_ref()?
             .migration_dispositions
             .get(task_id)?
@@ -913,8 +922,8 @@ impl LabelloApp {
         if self.work.migration.draft_group.as_ref() == Some(group_id) {
             return;
         }
-        let existing = self.selected_task_id.as_ref().and_then(|task_id| {
-            let state = self.current_state.as_ref()?;
+        let existing = self.work.selected_task_id.as_ref().and_then(|task_id| {
+            let state = self.work.current_state.as_ref()?;
             let disposition = state.migration_dispositions.get(task_id)?.get(group_id)?;
             let MigrationDispositionStatus::Annotated {
                 skeleton_annotation_id,
@@ -1021,7 +1030,7 @@ impl LabelloApp {
         let Some((_, target)) = self.migration_active_target() else {
             return false;
         };
-        let Some(state) = self.current_state.as_ref() else {
+        let Some(state) = self.work.current_state.as_ref() else {
             return false;
         };
         state
@@ -1053,8 +1062,8 @@ impl LabelloApp {
         &self,
         group_id: &ObjectGroupId,
     ) -> Option<labello_client::MigrationTargetExpectation> {
-        let task_id = self.selected_task_id.as_ref()?;
-        let state = self.current_state.as_ref()?;
+        let task_id = self.work.selected_task_id.as_ref()?;
+        let state = self.work.current_state.as_ref()?;
         let target = state
             .migration_target_sets
             .get(task_id)?
@@ -1080,6 +1089,7 @@ impl LabelloApp {
 
     fn request_save_migration_skeleton(&mut self, group_id: ObjectGroupId) {
         let Some((assignment, target, skeleton)) = self
+            .work
             .assignment
             .clone()
             .zip(self.migration_expectation(&group_id))
@@ -1100,6 +1110,7 @@ impl LabelloApp {
 
     pub(crate) fn request_exclude_migration_target(&mut self, group_id: ObjectGroupId) {
         let Some((assignment, target)) = self
+            .work
             .assignment
             .clone()
             .zip(self.migration_expectation(&group_id))
@@ -1120,6 +1131,7 @@ impl LabelloApp {
 
     fn request_reopen_migration_target(&mut self, group_id: ObjectGroupId) {
         let Some((assignment, target)) = self
+            .work
             .assignment
             .clone()
             .zip(self.migration_expectation(&group_id))
@@ -1137,6 +1149,7 @@ impl LabelloApp {
 
     fn request_keep_migration_target(&mut self, group_id: ObjectGroupId) {
         let Some((assignment, pass_id, target)) = self
+            .work
             .assignment
             .clone()
             .zip(self.work.migration.active_pass_id.clone())
@@ -1156,9 +1169,9 @@ impl LabelloApp {
 
     fn request_start_migration_pass(&mut self) {
         let Some((assignment, task_id, target_hash, state_hash)) =
-            self.assignment.clone().and_then(|assignment| {
-                let task_id = self.selected_task_id.clone()?;
-                let state = self.current_state.as_ref()?;
+            self.work.assignment.clone().and_then(|assignment| {
+                let task_id = self.work.selected_task_id.clone()?;
+                let state = self.work.current_state.as_ref()?;
                 Some((
                     assignment,
                     task_id.clone(),
@@ -1185,9 +1198,9 @@ impl LabelloApp {
 
     fn request_confirm_migration(&mut self) {
         let Some((assignment, task_id, target_hash, state_hash)) =
-            self.assignment.clone().and_then(|assignment| {
-                let task_id = self.selected_task_id.clone()?;
-                let state = self.current_state.as_ref()?;
+            self.work.assignment.clone().and_then(|assignment| {
+                let task_id = self.work.selected_task_id.clone()?;
+                let state = self.work.current_state.as_ref()?;
                 Some((
                     assignment,
                     task_id.clone(),
@@ -1224,7 +1237,7 @@ impl LabelloApp {
         target: labello_client::MigrationReviewTarget,
         decision: labello_domain::ReviewDecision,
     ) {
-        let Some(assignment) = self.assignment.clone() else {
+        let Some(assignment) = self.work.assignment.clone() else {
             return;
         };
         self.queue_migration_action(MigrationAction::Review(
@@ -1240,6 +1253,7 @@ impl LabelloApp {
 
     fn queue_migration_action(&mut self, action: MigrationAction) {
         let Some(image_id) = self
+            .work
             .current
             .as_ref()
             .map(|current| current.image.image_id.clone())

@@ -7,7 +7,7 @@ fn target_keypoint_typing_does_not_echo_into_template_controls() {
         .with_size(egui::vec2(1180.0, 1600.0))
         .build_eframe(|ctx| {
             let mut app = inspector_presets::build(InspectorPreset::ImportReady, &ctx.egui_ctx);
-            let category = &mut app.import_flow.categories[0];
+            let category = &mut app.import.categories[0];
             category.target_keypoint_names = "nose".to_string();
             category
                 .geometry_mappings
@@ -70,7 +70,7 @@ fn target_keypoint_typing_does_not_echo_into_template_controls() {
     harness.step();
     assert!(harness.query_by_label("Template point positions").is_some());
     assert_eq!(
-        harness.state().import_flow.categories[0].geometry_mappings[1]
+        harness.state().import.categories[0].geometry_mappings[1]
             .parameters
             .iter()
             .filter_map(|parameter| {
@@ -101,7 +101,7 @@ fn image_load_failure_shows_retry_and_loads_image() {
     });
     harness.step();
 
-    assert!(harness.state().current.is_none());
+    assert!(harness.state().work.current.is_none());
     assert!(
         harness
             .query_by_label("Assignment image unavailable")
@@ -124,7 +124,7 @@ fn image_load_failure_shows_retry_and_loads_image() {
     );
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
     click(&mut harness, "Retry image load");
-    step_until(&mut harness, 12, |app| app.current.is_some());
+    step_until(&mut harness, 12, |app| app.work.current.is_some());
     assert!(api.counts().get_image_preview >= 2);
     assert_eq!(api.counts().assign_next_image, 2);
 }
@@ -140,7 +140,7 @@ fn workers_select_class_specific_workflows() {
     click(&mut harness, "Vehicle boxes");
     release_and_switch(&mut harness);
     step_until(&mut harness, 12, |app| {
-        app.selected_class_id() == Some(&ClassId::from("vehicle")) && app.current.is_some()
+        app.selected_class_id() == Some(&ClassId::from("vehicle")) && app.work.current.is_some()
     });
     assert!(harness.query_all_by_label("Vehicle boxes").next().is_some());
 
@@ -164,7 +164,7 @@ fn workers_select_class_specific_workflows() {
     harness.drop_at(end);
     harness.step();
 
-    let annotation = harness.state().annotations.last().unwrap();
+    let annotation = harness.state().work.annotations.last().unwrap();
     assert_eq!(annotation.task_id, TaskId::from("bounding_box:vehicle"));
     assert_eq!(annotation.class_id, ClassId::from("vehicle"));
 }
@@ -173,7 +173,7 @@ fn workers_select_class_specific_workflows() {
 fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    let mut skeleton = harness.state().tasks[0].clone();
+    let mut skeleton = harness.state().work.tasks[0].clone();
     skeleton.task_id = TaskId::from("skeleton:person");
     skeleton.name = "Person skeleton with a deliberately long workflow name".to_string();
     skeleton.annotation_type = AnnotationType::Skeleton;
@@ -186,7 +186,7 @@ fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
         allow_hidden: true,
         allow_absent: true,
     });
-    harness.state_mut().tasks.push(skeleton);
+    harness.state_mut().work.tasks.push(skeleton);
     harness.step();
 
     let bounding_box = harness
@@ -243,7 +243,7 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
             .query_by_label_contains("No assignments available")
             .is_some()
     );
-    harness.state_mut().availability.loading = true;
+    harness.state_mut().work.availability.loading = true;
     harness.step();
     assert!(
         harness
@@ -251,9 +251,9 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
             .is_none(),
         "background refreshes should keep the resolved workflow state stable"
     );
-    harness.state_mut().availability.loading = false;
+    harness.state_mut().work.availability.loading = false;
 
-    let mut skeleton = harness.state().tasks[0].clone();
+    let mut skeleton = harness.state().work.tasks[0].clone();
     skeleton.task_id = TaskId::from("skeleton:person");
     skeleton.name = "Person skeleton".to_string();
     skeleton.annotation_type = AnnotationType::Skeleton;
@@ -266,26 +266,26 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
         allow_hidden: true,
         allow_absent: true,
     });
-    harness.state_mut().tasks.push(skeleton);
+    harness.state_mut().work.tasks.push(skeleton);
     harness
         .state_mut()
-        .availability
+        .work.availability
         .tasks
         .insert(TaskId::from("skeleton:person"), true);
     harness
         .state_mut()
         .trigger_user_action(labello_domain::UserAction::SelectNextWorkflow);
     assert!(matches!(
-        harness.state().pending_transition,
+        harness.state().work.pending_transition,
         Some(crate::app::PendingTransition::Workflow(ref task_id))
             if task_id == &TaskId::from("skeleton:person")
     ));
 
-    harness.state_mut().pending_transition = None;
+    harness.state_mut().work.pending_transition = None;
     api.fail_next_availability();
-    harness.state_mut().availability.last_attempt = None;
+    harness.state_mut().work.availability.last_attempt = None;
     harness.state_mut().request_assignment_availability();
-    step_until(&mut harness, 8, |app| app.availability.error.is_some());
+    step_until(&mut harness, 8, |app| app.work.availability.error.is_some());
     assert!(
         !harness
             .query_all_by_label_contains("Vehicle boxes")
@@ -297,7 +297,7 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
     );
     click_accesskit_button(&mut harness, "Retry availability");
     step_until(&mut harness, 8, |app| {
-        !app.availability.loading && app.availability.error.is_none()
+        !app.work.availability.loading && app.work.availability.error.is_none()
     });
     assert!(api.counts().assignment_availability >= 3);
 }
@@ -312,8 +312,8 @@ fn assignment_load_waits_for_availability_and_selects_the_next_available_workflo
     app.request_next_image();
 
     assert!(!app.loading.image);
-    assert!(app.active_load_id.is_none());
-    assert!(app.availability.load_after_resolution);
+    assert!(app.work.active_load_id.is_none());
+    assert!(app.work.availability.load_after_resolution);
     let UiCommand::AssignmentAvailability { request, .. } =
         app.runtime.commands.pop_back().unwrap()
     else {
@@ -336,10 +336,10 @@ fn assignment_load_waits_for_availability_and_selects_the_next_available_workflo
         .unwrap();
     app.process_messages(&egui::Context::default());
 
-    assert!(app.availability.resolved);
-    assert!(!app.availability.load_after_resolution);
+    assert!(app.work.availability.resolved);
+    assert!(!app.work.availability.load_after_resolution);
     assert_eq!(
-        app.selected_task_id.as_ref(),
+        app.work.selected_task_id.as_ref(),
         Some(&TaskId::from("bounding_box:vehicle"))
     );
     let UiCommand::ClaimAssignment { task_id, .. } = app.runtime.commands.pop_back().unwrap()
@@ -380,6 +380,7 @@ fn fresh_cached_availability_survives_reload_without_another_check() {
     assert!(reloaded.restore_cached_assignment_availability());
     assert!(
         reloaded
+            .work
             .availability
             .last_attempt
             .is_some_and(|attempt| attempt.elapsed() < Duration::from_secs(1)),
@@ -393,7 +394,7 @@ fn fresh_cached_availability_survives_reload_without_another_check() {
     reloaded.request_next_image();
 
     assert_eq!(
-        reloaded.selected_task_id.as_ref(),
+        reloaded.work.selected_task_id.as_ref(),
         Some(&TaskId::from("bounding_box:vehicle"))
     );
     assert!(
@@ -499,8 +500,8 @@ fn failed_or_empty_availability_never_starts_an_assignment_load() {
         .unwrap();
     app.process_messages(&egui::Context::default());
 
-    assert!(!app.availability.resolved);
-    assert!(app.availability.load_after_resolution);
+    assert!(!app.work.availability.resolved);
+    assert!(app.work.availability.load_after_resolution);
     assert!(app.runtime.commands.is_empty());
     assert!(!app.loading.image);
 
@@ -525,8 +526,8 @@ fn failed_or_empty_availability_never_starts_an_assignment_load() {
         .unwrap();
     app.process_messages(&egui::Context::default());
 
-    assert!(app.availability.resolved);
-    assert!(app.availability.load_after_resolution);
+    assert!(app.work.availability.resolved);
+    assert!(app.work.availability.load_after_resolution);
     assert!(app.runtime.commands.is_empty());
     assert!(!app.loading.image);
     assert!(
@@ -570,10 +571,10 @@ fn no_available_assignment_is_a_normal_empty_state() {
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
     click(&mut harness, "Continue with Demo Dataset");
     step_until(&mut harness, 12, |app| {
-        !app.loading.dataset && !app.loading.image && app.availability.resolved
+        !app.loading.dataset && !app.loading.image && app.work.availability.resolved
     });
 
-    assert!(harness.state().current.is_none());
+    assert!(harness.state().work.current.is_none());
     assert!(harness.state().runtime.error.is_none());
     assert_eq!(
         harness.state().runtime.notice.as_deref(),
@@ -604,37 +605,37 @@ fn right_arrow_submits_and_claims_a_different_image() {
     let mut harness = loaded_work_harness(api.clone());
     let original = harness
         .state()
-        .assignment
+        .work.assignment
         .as_ref()
         .unwrap()
         .image_id
         .clone();
 
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
-    let next = harness.state().queue.prepared_image_ids()[0].clone();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let next = harness.state().work.queue.prepared_image_ids()[0].clone();
     let previews_before = api.counts().get_image_preview;
     harness.key_press(egui::Key::ArrowRight);
     step_until(&mut harness, 16, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id != original)
     });
 
     assert_eq!(api.counts().complete_assignment, 1);
     assert_eq!(api.counts().release_assignment, 0);
-    assert_eq!(harness.state().assignment.as_ref().unwrap().image_id, next);
+    assert_eq!(harness.state().work.assignment.as_ref().unwrap().image_id, next);
     assert_eq!(api.counts().get_image_preview, previews_before);
     assert!(!harness.state().loading.image);
-    assert!(harness.state().current_texture.is_some());
+    assert!(harness.state().work.current_texture.is_some());
 }
 
 #[test]
 fn annotation_prefetch_fills_two_without_blocking_the_current_image() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
 
-    assert_eq!(harness.state().queue.queue_size(), 2);
+    assert_eq!(harness.state().work.queue.queue_size(), 2);
     assert!(!harness.state().loading.image);
     assert!(
         harness
@@ -652,64 +653,64 @@ fn annotation_prefetch_fills_two_without_blocking_the_current_image() {
 fn empty_prepared_queue_falls_back_to_blocking_load() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
-    harness.state_mut().queue.clear();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    harness.state_mut().work.queue.clear();
 
     click(&mut harness, "Submit & next");
     harness.step();
     assert!(harness.state().loading.image);
-    assert!(harness.state().current.is_none());
+    assert!(harness.state().work.current.is_none());
     harness.step();
-    assert!(harness.state().current.is_some());
+    assert!(harness.state().work.current.is_some());
 }
 
 #[test]
 fn submit_failure_preserves_current_and_prepared_queue() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
     let current = harness
         .state()
-        .assignment
+        .work.assignment
         .as_ref()
         .unwrap()
         .image_id
         .clone();
-    let queued = harness.state().queue.prepared_image_ids();
+    let queued = harness.state().work.queue.prepared_image_ids();
     api.fail_next_batch();
 
     click(&mut harness, "Submit & next");
     step_until(&mut harness, 8, |app| !app.loading.saving);
 
     assert_eq!(
-        harness.state().assignment.as_ref().unwrap().image_id,
+        harness.state().work.assignment.as_ref().unwrap().image_id,
         current
     );
-    assert_eq!(harness.state().queue.prepared_image_ids(), queued);
+    assert_eq!(harness.state().work.queue.prepared_image_ids(), queued);
 }
 
 #[test]
 fn save_keeps_the_same_assignment_active() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
     let claims_before = api.counts().assign_next_image;
     click(&mut harness, "Accept");
     let assignment_id = harness
         .state()
-        .assignment
+        .work.assignment
         .as_ref()
         .unwrap()
         .assignment_id
         .clone();
 
     click(&mut harness, "Save");
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
 
     assert_eq!(
         harness
             .state()
-            .assignment
+            .work.assignment
             .as_ref()
             .map(|assignment| &assignment.assignment_id),
         Some(&assignment_id)
@@ -724,7 +725,7 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     let mut harness = loaded_work_harness(api.clone());
 
     click(&mut harness, "Accept");
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
     assert_eq!(api.counts().append_event, 0);
     click(&mut harness, "More actions");
     assert!(harness.query_by_label_contains("Undo").is_some());
@@ -732,14 +733,14 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     harness.step();
 
     harness.state_mut().undo();
-    assert!(harness.state().annotations.is_empty());
+    assert!(harness.state().work.annotations.is_empty());
     harness.state_mut().redo();
-    assert_eq!(harness.state().annotations.len(), 1);
+    assert_eq!(harness.state().work.annotations.len(), 1);
 
-    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().work.last_edit_at = Some(Instant::now() - Duration::from_secs(1));
     harness.state_mut().autosave_if_due();
-    assert_eq!(harness.state().save_status, SaveStatus::Saving);
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Saving);
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
     assert_eq!(api.counts().append_event, 1);
 
     harness.state_mut().autosave();
@@ -752,7 +753,7 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     assert!(
         harness
             .state()
-            .annotations
+            .work.annotations
             .iter()
             .all(|annotation| annotation.deleted)
     );
@@ -760,7 +761,7 @@ fn annotation_edits_debounce_once_and_undo_redo_remain_available() {
     assert_eq!(
         harness
             .state()
-            .annotations
+            .work.annotations
             .iter()
             .filter(|annotation| !annotation.deleted)
             .count(),
@@ -776,12 +777,12 @@ fn autosave_waits_for_an_active_canvas_drag() {
     let start = harness.get_by_label("Annotation canvas").rect().center();
     harness.drag_at(start);
     harness.step();
-    assert!(harness.state().canvas.is_dragging());
+    assert!(harness.state().work.canvas.is_dragging());
 
-    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().work.last_edit_at = Some(Instant::now() - Duration::from_secs(1));
     harness.state_mut().autosave_if_due();
 
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
     assert!(!harness.state().loading.saving);
     assert_eq!(api.counts().annotation_batch, 0);
 }
@@ -800,8 +801,8 @@ fn edits_made_during_save_remain_dirty_when_the_saved_generation_finishes() {
     });
 
     step_until(&mut harness, 10, |app| !app.loading.saving);
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
-    assert_eq!(harness.state().annotations.len(), 2);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.annotations.len(), 2);
     assert_eq!(api.counts().annotation_batch, 1);
 }
 
@@ -823,9 +824,9 @@ fn a_full_command_queue_cannot_strand_save_loading() {
     harness.state_mut().submit_and_advance();
 
     assert!(!harness.state().loading.saving);
-    assert_eq!(harness.state().active_operation_id, None);
-    assert_eq!(harness.state().save_status, SaveStatus::Retry);
-    assert!(harness.state().pending_transition.is_none());
+    assert_eq!(harness.state().work.active_operation_id, None);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Retry);
+    assert!(harness.state().work.pending_transition.is_none());
 }
 
 #[test]
@@ -871,25 +872,25 @@ fn demo_submit_and_skip_advance_images() {
         .with_size(egui::vec2(1500.0, 780.0))
         .build_eframe(|_| LabelloApp::default());
     assert_eq!(
-        harness.state().current.as_ref().unwrap().image.file_name,
+        harness.state().work.current.as_ref().unwrap().image.file_name,
         "demo_1.jpg"
     );
 
     click(&mut harness, "Submit & next");
     assert_eq!(
-        harness.state().current.as_ref().unwrap().image.file_name,
+        harness.state().work.current.as_ref().unwrap().image.file_name,
         "demo_2.jpg"
     );
 
     click(&mut harness, "Skip");
     assert_eq!(
-        harness.state().current.as_ref().unwrap().image.file_name,
+        harness.state().work.current.as_ref().unwrap().image.file_name,
         "demo_3.jpg"
     );
 
     click(&mut harness, "Skip");
     assert_eq!(
-        harness.state().current.as_ref().unwrap().image.file_name,
+        harness.state().work.current.as_ref().unwrap().image.file_name,
         "demo_4.jpg"
     );
 }
@@ -900,13 +901,13 @@ fn skip_releases_then_claims_another_assignment() {
     let mut harness = loaded_work_harness(api.clone());
     let original = harness
         .state()
-        .assignment
+        .work.assignment
         .as_ref()
         .unwrap()
         .image_id
         .clone();
 
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
     let previews_before = api.counts().get_image_preview;
     click(&mut harness, "Skip");
     assert!(
@@ -915,7 +916,7 @@ fn skip_releases_then_claims_another_assignment() {
             .is_none()
     );
     step_until(&mut harness, 16, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id != original)
     });
@@ -932,15 +933,15 @@ fn previous_assignment_reopens_the_exact_skipped_image_from_compact_actions() {
     let mut harness = loaded_work_harness(api.clone());
     harness.set_size(egui::vec2(1500.0, 780.0));
     harness.step();
-    let original = harness.state().assignment.clone().unwrap();
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let original = harness.state().work.assignment.clone().unwrap();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
 
     click(&mut harness, "Skip");
     step_until(&mut harness, 16, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id != original.image_id)
-            && app.previous_annotation_assignment.is_some()
+            && app.work.previous_annotation_assignment.is_some()
     });
     assert!(harness.query_by_label("Previous").is_some());
 
@@ -954,7 +955,7 @@ fn previous_assignment_reopens_the_exact_skipped_image_from_compact_actions() {
     );
     click_accesskit_button(&mut harness, "Previous assignment");
     step_until(&mut harness, 20, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id == original.image_id)
             && !app.loading.image
@@ -962,10 +963,10 @@ fn previous_assignment_reopens_the_exact_skipped_image_from_compact_actions() {
 
     assert_eq!(api.counts().reopen_assignment, 1);
     assert_ne!(
-        harness.state().assignment.as_ref().unwrap().assignment_id,
+        harness.state().work.assignment.as_ref().unwrap().assignment_id,
         original.assignment_id
     );
-    assert!(harness.state().previous_annotation_assignment.is_none());
+    assert!(harness.state().work.previous_annotation_assignment.is_none());
 }
 
 #[test]
@@ -974,19 +975,19 @@ fn previous_assignment_reopens_the_exact_submitted_image() {
     let mut harness = loaded_work_harness(api.clone());
     harness.set_size(egui::vec2(1500.0, 780.0));
     harness.step();
-    let original = harness.state().assignment.clone().unwrap();
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
+    let original = harness.state().work.assignment.clone().unwrap();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
 
     click(&mut harness, "Submit & next");
     step_until(&mut harness, 16, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id != original.image_id)
-            && app.previous_annotation_assignment.is_some()
+            && app.work.previous_annotation_assignment.is_some()
     });
     click(&mut harness, "Previous");
     step_until(&mut harness, 20, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| assignment.image_id == original.image_id)
             && !app.loading.image
@@ -994,7 +995,7 @@ fn previous_assignment_reopens_the_exact_submitted_image() {
 
     assert_eq!(api.counts().reopen_assignment, 1);
     assert_ne!(
-        harness.state().assignment.as_ref().unwrap().assignment_id,
+        harness.state().work.assignment.as_ref().unwrap().assignment_id,
         original.assignment_id
     );
 }
@@ -1003,14 +1004,14 @@ fn previous_assignment_reopens_the_exact_submitted_image() {
 fn expired_locally_retained_previous_assignment_is_not_loaded() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    let mut previous = harness.state().assignment.clone().unwrap();
+    let mut previous = harness.state().work.assignment.clone().unwrap();
     previous.assignment_id = AssignmentId::generate();
     previous.expires_at = Some(now() - chrono::Duration::seconds(1));
-    harness.state_mut().previous_annotation_assignment = Some(previous);
+    harness.state_mut().work.previous_annotation_assignment = Some(previous);
 
     harness.state_mut().return_to_previous_assignment();
 
-    assert!(harness.state().previous_annotation_assignment.is_none());
+    assert!(harness.state().work.previous_annotation_assignment.is_none());
     assert_eq!(api.counts().reopen_assignment, 0);
     assert!(
         harness
@@ -1037,18 +1038,18 @@ fn skip_remains_active_in_review() {
 fn failed_refill_keeps_the_one_shot_image_excluded() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
-    harness.state_mut().queue.pop_prepared();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    harness.state_mut().work.queue.pop_prepared();
     let skipped = ImageId::from("img_skipped");
-    harness.state_mut().one_shot_excluded_image_id = Some(skipped.clone());
+    harness.state_mut().work.one_shot_excluded_image_id = Some(skipped.clone());
     api.fail_next_preview();
 
     harness.state_mut().request_prefetch();
     harness.step();
-    step_until(&mut harness, 16, |app| app.queue.failed());
+    step_until(&mut harness, 16, |app| app.work.queue.failed());
 
     assert_eq!(
-        harness.state().one_shot_excluded_image_id.as_ref(),
+        harness.state().work.one_shot_excluded_image_id.as_ref(),
         Some(&skipped)
     );
     assert!(api.exclusions().last().unwrap().contains(&skipped));
@@ -1059,7 +1060,7 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     click(&mut harness, "Accept");
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
 
     click(&mut harness, "Skip");
     assert_eq!(api.counts().release_assignment, 0);
@@ -1077,17 +1078,17 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
     assert!(!harness.state().loading.saving);
 
     let batches = api.counts().annotation_batch;
-    harness.state_mut().last_edit_at = Some(Instant::now() - Duration::from_secs(1));
+    harness.state_mut().work.last_edit_at = Some(Instant::now() - Duration::from_secs(1));
     harness.state_mut().autosave_if_due();
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
     assert!(!harness.state().loading.saving);
     assert_eq!(api.counts().annotation_batch, batches);
 
     click_accesskit_button(&mut harness, "Cancel");
-    assert!(harness.state().pending_transition.is_none());
+    assert!(harness.state().work.pending_transition.is_none());
     assert_eq!(api.counts().release_assignment, 0);
 
-    harness.state_mut().last_edit_at = Some(Instant::now());
+    harness.state_mut().work.last_edit_at = Some(Instant::now());
     click(&mut harness, "Skip");
     click_accesskit_button(&mut harness, "Discard edits and skip");
     step_until(&mut harness, 16, |_| api.counts().release_assignment == 1);
@@ -1152,7 +1153,7 @@ fn reviewer_only_workspace_does_not_fetch_prelabels() {
         .state_mut()
         .open_dataset(DatasetId::from("demo"), AppView::Review);
     step_until(&mut harness, 12, |app| {
-        app.view == AppView::Review && app.current.is_some()
+        app.view == AppView::Review && app.work.current.is_some()
     });
 
     assert_eq!(api.counts().prelabel_suggestions, 0);
@@ -1176,7 +1177,7 @@ fn review_correction_drawer_and_actions_stay_reachable() {
     harness.state_mut().start_correction();
 
     for (width, height) in viewport_sizes() {
-        harness.state_mut().drawer =
+        harness.state_mut().work.drawer =
             (LayoutMode::for_width(width) != LayoutMode::Wide).then_some(Drawer::Inspector);
         harness.set_size(egui::vec2(width, height));
         harness.step();
@@ -1212,7 +1213,7 @@ fn review_correction_drawer_and_actions_stay_reachable() {
     }
 
     for (width, height) in [(320.0, 320.0), (600.0, 568.0), (600.0, 320.0)] {
-        harness.state_mut().drawer = Some(Drawer::Inspector);
+        harness.state_mut().work.drawer = Some(Drawer::Inspector);
         harness.set_size(egui::vec2(width, height));
         harness.step();
         harness
@@ -1235,8 +1236,8 @@ fn review_correction_drawer_and_actions_stay_reachable() {
 fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    assert!(harness.state().current.is_some());
-    assert_eq!(harness.state().queue.queue_size(), IMAGE_QUEUE_SIZE);
+    assert!(harness.state().work.current.is_some());
+    assert_eq!(harness.state().work.queue.queue_size(), IMAGE_QUEUE_SIZE);
     assert!(harness.query_by_label("Assignment").is_some());
     assert!(harness.query_by_label("Approve object").is_none());
     assert!(harness.query_by_label("Reject object & finish").is_none());
@@ -1252,12 +1253,12 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 
     click(&mut harness, "Accept");
     harness.step();
-    assert_eq!(harness.state().annotations.len(), 1);
+    assert_eq!(harness.state().work.annotations.len(), 1);
     assert_eq!(
-        harness.state().selected_annotation.as_ref(),
-        Some(&harness.state().annotations[0].annotation_id)
+        harness.state().work.selected_annotation.as_ref(),
+        Some(&harness.state().work.annotations[0].annotation_id)
     );
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
 
     let canvas = harness.get_by_label("Annotation canvas");
     let rect = canvas.rect();
@@ -1270,10 +1271,10 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     harness.step();
     harness.drop_at(end);
     harness.step();
-    assert_eq!(harness.state().annotations.len(), 2);
+    assert_eq!(harness.state().work.annotations.len(), 2);
 
     click(&mut harness, "Save");
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
     let counts = api.counts();
     assert!(counts.append_event >= 2);
     assert_eq!(counts.annotation_batch, 1);
@@ -1286,7 +1287,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
             .is_none()
     );
     step_until(&mut harness, 10, |app| {
-        app.current
+        app.work.current
             .as_ref()
             .is_some_and(|current| current.image.image_id == ImageId::from("img_2"))
     });
@@ -1294,7 +1295,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
 
     assert!(api.counts().assign_next_image >= 2);
 
-    harness.state_mut().drawer = Some(Drawer::Inspector);
+    harness.state_mut().work.drawer = Some(Drawer::Inspector);
     click_application_menu_item(&mut harness, "Review");
     assert!(
         harness
@@ -1303,9 +1304,9 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     );
     release_and_switch(&mut harness);
     step_until(&mut harness, 10, |app| {
-        app.view == AppView::Review && app.current.is_some() && !app.loading.image
+        app.view == AppView::Review && app.work.current.is_some() && !app.loading.image
     });
-    assert!(harness.state().drawer.is_none());
+    assert!(harness.state().work.drawer.is_none());
     assert!(harness.query_by_label("Tutorial").is_none());
     assert!(harness.query_by_label("Approve object").is_some());
     assert!(harness.query_by_label("Reject object & finish").is_some());
@@ -1321,7 +1322,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     // correction outcome that closes the review assignment.
     assert_eq!(api.counts().record_review, 3);
     step_until(&mut harness, 10, |app| {
-        app.assignment
+        app.work.assignment
             .as_ref()
             .is_some_and(|assignment| api.has_active_assignment(&assignment.assignment_id))
     });
@@ -1334,7 +1335,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     );
     release_and_switch(&mut harness);
     step_until(&mut harness, 10, |app| {
-        app.view == AppView::Adjudicate && app.current.is_some() && !app.loading.image
+        app.view == AppView::Adjudicate && app.work.current.is_some() && !app.loading.image
     });
     assert!(harness.query_by_label("Accept all annotations").is_some());
     assert!(harness.query_by_label("Send back for correction").is_some());
@@ -1355,7 +1356,7 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
     let mut harness = loaded_work_harness(api.clone());
     let original_image = harness
         .state()
-        .current
+        .work.current
         .as_ref()
         .unwrap()
         .image
@@ -1363,7 +1364,7 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
         .clone();
 
     click(&mut harness, "Accept");
-    assert_eq!(harness.state().save_status, SaveStatus::Dirty);
+    assert_eq!(harness.state().work.save_status, SaveStatus::Dirty);
     click(&mut harness, "Vehicle boxes");
     assert!(
         harness
@@ -1371,21 +1372,21 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
             .is_some()
     );
     assert_eq!(
-        harness.state().selected_task_id.as_ref(),
+        harness.state().work.selected_task_id.as_ref(),
         Some(&TaskId::from("bounding_box:person"))
     );
     harness.state_mut().submit_pending_transition();
     harness.step();
     step_until(&mut harness, 12, |app| {
         app.selected_class_id() == Some(&ClassId::from("vehicle"))
-            && app.current.is_some()
+            && app.work.current.is_some()
             && !app.loading.saving
     });
 
     assert!(api.counts().append_event >= 1);
     assert_eq!(api.counts().complete_assignment, 1);
     assert_ne!(
-        harness.state().current.as_ref().unwrap().image.image_id,
+        harness.state().work.current.as_ref().unwrap().image.image_id,
         original_image
     );
 }
@@ -1423,8 +1424,8 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
         rect.center() + egui::vec2(rect.width() * 0.15, rect.height() * 0.1),
     );
 
-    assert_eq!(harness.state().annotations.len(), 1);
-    let AnnotationGeometry::Skeleton(skeleton) = &harness.state().annotations[0].geometry else {
+    assert_eq!(harness.state().work.annotations.len(), 1);
+    let AnnotationGeometry::Skeleton(skeleton) = &harness.state().work.annotations[0].geometry else {
         panic!("expected skeleton annotation");
     };
     assert_eq!(skeleton.keypoints.len(), 2);
@@ -1434,7 +1435,7 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
             .iter()
             .all(|keypoint| keypoint.point.is_some())
     );
-    assert!(harness.state().active_skeleton.is_none());
+    assert!(harness.state().work.active_skeleton.is_none());
 }
 
 #[test]
@@ -1478,13 +1479,13 @@ fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_dra
     assert!(
         harness
             .state()
-            .correction_draft
+            .work.correction_draft
             .as_ref()
             .unwrap()
             .geometry_changed()
     );
     assert!(matches!(
-        harness.state().annotations[0].geometry,
+        harness.state().work.annotations[0].geometry,
         AnnotationGeometry::BoundingBox(box_geometry) if box_geometry == original
     ));
     assert_eq!(api.counts().annotation_batch, 0);
@@ -1492,14 +1493,14 @@ fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_dra
         .state_mut()
         .request_review(labello_domain::ReviewDecision::Approved);
     assert_eq!(api.counts().record_review, 0);
-    assert!(harness.state().correction_draft.is_some());
+    assert!(harness.state().work.correction_draft.is_some());
 
     api.fail_next_correction();
     click(&mut harness, "Correct & finalize");
     step_until(&mut harness, 8, |app| !app.loading.saving);
     assert_eq!(api.counts().record_correction, 1);
-    assert!(harness.state().correction_draft.is_some());
-    assert!(harness.state().current.is_some());
+    assert!(harness.state().work.correction_draft.is_some());
+    assert!(harness.state().work.current.is_some());
 
     click(&mut harness, "Correct & finalize");
     step_until(&mut harness, 12, |_| api.counts().record_correction == 2);
@@ -1526,17 +1527,17 @@ fn review_target_is_canonical_and_full_image_phase_cannot_correct() {
         true,
     );
     let mut harness = loaded_review_harness(api);
-    let canonical = harness.state().annotations[0].annotation_id.clone();
-    let mut arbitrary = harness.state().annotations[0].clone();
+    let canonical = harness.state().work.annotations[0].annotation_id.clone();
+    let mut arbitrary = harness.state().work.annotations[0].clone();
     arbitrary.annotation_id = labello_domain::AnnotationId::from("arbitrary");
-    harness.state_mut().annotations.push(arbitrary.clone());
-    harness.state_mut().selected_annotation = Some(arbitrary.annotation_id.clone());
+    harness.state_mut().work.annotations.push(arbitrary.clone());
+    harness.state_mut().work.selected_annotation = Some(arbitrary.annotation_id.clone());
 
     harness
         .state_mut()
         .request_review(labello_domain::ReviewDecision::Approved);
     assert_eq!(
-        harness.state().selected_annotation.as_ref(),
+        harness.state().work.selected_annotation.as_ref(),
         Some(&canonical)
     );
     let UiCommand::Review { review, .. } = harness.state().runtime.commands.back().unwrap() else {
@@ -1549,15 +1550,15 @@ fn review_target_is_canonical_and_full_image_phase_cannot_correct() {
 
     harness.state_mut().runtime.commands.clear();
     harness.state_mut().runtime.active_requests.clear();
-    harness.state_mut().active_operation_id = None;
+    harness.state_mut().work.active_operation_id = None;
     harness.state_mut().loading.saving = false;
-    harness.state_mut().review_index = harness.state().annotations.len();
-    harness.state_mut().selected_annotation = Some(arbitrary.annotation_id);
+    harness.state_mut().work.review_index = harness.state().work.annotations.len();
+    harness.state_mut().work.selected_annotation = Some(arbitrary.annotation_id);
     harness.state_mut().sync_review_selection();
-    assert!(harness.state().selected_annotation.is_none());
+    assert!(harness.state().work.selected_annotation.is_none());
     assert!(!harness.state().can_correct_review_object());
     harness.state_mut().start_correction();
-    assert!(harness.state().correction_draft.is_none());
+    assert!(harness.state().work.correction_draft.is_none());
 }
 
 #[test]
@@ -1574,7 +1575,7 @@ fn review_and_save_responses_propagate_renewed_assignments_without_refetching_st
         true,
     );
     let mut review = loaded_review_harness(review_api.clone());
-    let original_review_expiry = review.state().assignment.as_ref().unwrap().expires_at;
+    let original_review_expiry = review.state().work.assignment.as_ref().unwrap().expires_at;
     let state_reads = review_api.counts().get_image_state;
     review
         .state_mut()
@@ -1582,18 +1583,18 @@ fn review_and_save_responses_propagate_renewed_assignments_without_refetching_st
     step_until(&mut review, 8, |app| !app.loading.saving);
     assert_eq!(review_api.counts().get_image_state, state_reads);
     assert!(
-        review.state().assignment.as_ref().unwrap().expires_at > original_review_expiry,
+        review.state().work.assignment.as_ref().unwrap().expires_at > original_review_expiry,
         "review response did not renew the active assignment"
     );
 
     let save_api = Rc::new(SpyApi::new());
     let mut work = loaded_work_harness(save_api);
     click(&mut work, "Accept");
-    let original_save_expiry = work.state().assignment.as_ref().unwrap().expires_at;
+    let original_save_expiry = work.state().work.assignment.as_ref().unwrap().expires_at;
     work.state_mut().request_save(false);
     step_until(&mut work, 8, |app| !app.loading.saving);
     assert!(
-        work.state().assignment.as_ref().unwrap().expires_at > original_save_expiry,
+        work.state().work.assignment.as_ref().unwrap().expires_at > original_save_expiry,
         "save response did not renew the active assignment"
     );
 }
@@ -1644,14 +1645,14 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
             point: NormalizedPoint { x: 0.65, y: 0.4 },
         });
 
-    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let draft = harness.state().work.correction_draft.as_ref().unwrap();
     let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
         panic!("expected skeleton correction draft");
     };
     assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
     assert_eq!(skeleton.keypoints[0].point.unwrap().x, 0.65);
     assert!(matches!(
-        harness.state().annotations[0].geometry,
+        harness.state().work.annotations[0].geometry,
         AnnotationGeometry::Skeleton(ref original)
             if original.keypoints[0].state == KeypointState::Visible
                 && original.keypoints[0].point.unwrap().x == 0.5
@@ -1659,7 +1660,7 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
 
     harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     harness.step();
-    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let draft = harness.state().work.correction_draft.as_ref().unwrap();
     let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
         panic!("expected skeleton correction draft");
     };
@@ -1674,7 +1675,7 @@ fn reviewer_correction_edits_existing_keypoint_and_visibility_with_undo() {
             point: NormalizedPoint { x: 0.65, y: 0.4 },
         });
     click(&mut harness, "Undo correction");
-    let draft = harness.state().correction_draft.as_ref().unwrap();
+    let draft = harness.state().work.correction_draft.as_ref().unwrap();
     let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
         panic!("expected skeleton correction draft");
     };
@@ -1706,8 +1707,8 @@ fn annotation_inspector_exposes_objects_and_visible_deletion() {
             .is_some()
     );
     click(&mut harness, "Delete selected annotation");
-    assert!(harness.state().annotations[0].deleted);
-    assert!(harness.state().selected_annotation.is_none());
+    assert!(harness.state().work.annotations[0].deleted);
+    assert!(harness.state().work.selected_annotation.is_none());
 }
 
 #[test]
@@ -1720,9 +1721,9 @@ fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
         width: 0.2,
         height: 0.2,
     });
-    let annotation_id = harness.state().annotations[0].annotation_id.clone();
+    let annotation_id = harness.state().work.annotations[0].annotation_id.clone();
     assert_eq!(
-        harness.state().selected_annotation.as_ref(),
+        harness.state().work.selected_annotation.as_ref(),
         Some(&annotation_id)
     );
     harness.state_mut().edit_bbox(BoundingBoxEdit {
@@ -1736,16 +1737,16 @@ fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
     });
     harness.state_mut().undo();
     assert!(matches!(
-        harness.state().annotations[0].geometry,
+        harness.state().work.annotations[0].geometry,
         AnnotationGeometry::BoundingBox(BoundingBox { x, .. }) if (x - 0.1).abs() < f32::EPSILON
     ));
 
     harness.key_press(egui::Key::Delete);
     harness.step();
-    assert!(harness.state().annotations[0].deleted);
-    assert!(harness.state().selected_annotation.is_none());
+    assert!(harness.state().work.annotations[0].deleted);
+    assert!(harness.state().work.selected_annotation.is_none());
     harness.state_mut().undo();
-    assert!(!harness.state().annotations[0].deleted);
+    assert!(!harness.state().work.annotations[0].deleted);
 
     let api = Rc::new(SpyApi::new());
     api.state.borrow_mut().metadata.tasks[0].annotation_type = AnnotationType::Skeleton;
@@ -1765,9 +1766,9 @@ fn history_covers_bbox_edits_deletion_and_keypoint_creation() {
     harness
         .state_mut()
         .place_keypoint(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
-    assert_eq!(harness.state().annotations.len(), 1);
+    assert_eq!(harness.state().work.annotations.len(), 1);
     harness.state_mut().undo();
-    assert!(harness.state().annotations.is_empty());
+    assert!(harness.state().work.annotations.is_empty());
     harness.state_mut().redo();
-    assert_eq!(harness.state().annotations.len(), 1);
+    assert_eq!(harness.state().work.annotations.len(), 1);
 }

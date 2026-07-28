@@ -82,11 +82,13 @@ impl LabelloApp {
         }
         let compact = layout == LayoutMode::Compact;
         let task_names = self
+            .work
             .tasks
             .iter()
             .map(|task| (task.task_id.clone(), task.name.clone()))
             .collect::<BTreeMap<_, _>>();
         let class_names = self
+            .work
             .classes
             .iter()
             .map(|class| (class.class_id.clone(), class.name.clone()))

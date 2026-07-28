@@ -8,22 +8,22 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
     app.set_native_task_spawner(move |future| {
         *scheduled_for_spawner.borrow_mut() = Some(future);
     });
-    app.import_flow.profile = labello_client::ImportProfile::UltralyticsYoloDetectV1;
-    app.import_flow.transport = labello_client::ImportTransport::ServerDirectory;
-    app.import_flow.job = Some(test_import_job(
+    app.import.profile = labello_client::ImportProfile::UltralyticsYoloDetectV1;
+    app.import.transport = labello_client::ImportTransport::ServerDirectory;
+    app.import.job = Some(test_import_job(
         DatasetId::from("yolo-inspection"),
         "YOLO inspection".to_string(),
-        app.import_flow.profile,
-        app.import_flow.transport,
+        app.import.profile,
+        app.import.transport,
     ));
-    app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
+    app.import.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
         descriptor_file_id: "dataset.yaml".to_string(),
         kind: labello_client::ImportDescriptorKind::YoloDataset,
         ..Default::default()
     }];
 
     app.request_yolo_descriptor_inspection();
-    assert!(app.import_flow.yolo_inspection_loading);
+    assert!(app.import.yolo_inspection_loading);
     app.start_next_command();
     poll_ready_task(
         scheduled
@@ -35,7 +35,7 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
 
     assert_eq!(api.counts().inspect_yolo_descriptor, 1);
     assert_eq!(
-        app.import_flow
+        app.import
             .yolo_splits
             .iter()
             .map(|split| (split.name.as_str(), split.selected))
@@ -43,15 +43,15 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
         vec![("train", true), ("val", true)]
     );
     assert_eq!(
-        app.import_flow.yolo_inspected_descriptor_file_id.as_deref(),
+        app.import.yolo_inspected_descriptor_file_id.as_deref(),
         Some("dataset.yaml")
     );
 
-    let import_id = app.import_flow.job.as_ref().unwrap().import_id.clone();
+    let import_id = app.import.job.as_ref().unwrap().import_id.clone();
     let stale_request = app.import_request_identity(Some(import_id));
     app.runtime.active_requests.insert(stale_request.request_id);
-    app.import_flow.pending_yolo_inspection_request_id = Some(stale_request.request_id + 1);
-    app.import_flow.yolo_inspection_loading = true;
+    app.import.pending_yolo_inspection_request_id = Some(stale_request.request_id + 1);
+    app.import.yolo_inspection_loading = true;
     app.runtime
         .tx
         .send(UiMessage::YoloDescriptorInspected {
@@ -67,9 +67,9 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
-    assert!(app.import_flow.yolo_inspection_loading);
+    assert!(app.import.yolo_inspection_loading);
     assert_eq!(
-        app.import_flow
+        app.import
             .yolo_splits
             .iter()
             .map(|split| split.name.as_str())
@@ -78,12 +78,12 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
     );
 
     let failed_request = app.import_request_identity(Some(
-        app.import_flow.job.as_ref().unwrap().import_id.clone(),
+        app.import.job.as_ref().unwrap().import_id.clone(),
     ));
     app.runtime
         .active_requests
         .insert(failed_request.request_id);
-    app.import_flow.pending_yolo_inspection_request_id = Some(failed_request.request_id);
+    app.import.pending_yolo_inspection_request_id = Some(failed_request.request_id);
     app.runtime
         .tx
         .send(UiMessage::YoloDescriptorInspected {
@@ -93,16 +93,16 @@ fn yolo_descriptor_inspection_checks_every_usable_split_by_default() {
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
-    assert!(!app.import_flow.yolo_inspection_loading);
-    assert!(app.import_flow.yolo_splits.is_empty());
+    assert!(!app.import.yolo_inspection_loading);
+    assert!(app.import.yolo_splits.is_empty());
     assert_eq!(
-        app.import_flow.yolo_inspection_error.as_deref(),
+        app.import.yolo_inspection_error.as_deref(),
         Some("The YAML is malformed.")
     );
 
     app.request_yolo_descriptor_inspection();
-    assert!(app.import_flow.yolo_inspection_loading);
-    assert!(app.import_flow.yolo_inspection_error.is_none());
+    assert!(app.import.yolo_inspection_loading);
+    assert!(app.import.yolo_inspection_error.is_none());
 }
 
 #[test]
@@ -114,10 +114,10 @@ fn setup_import_blocks_mapping_when_real_category_contract_is_absent() {
 
     select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
-        app.import_flow.capabilities.is_some()
+        app.import.capabilities.is_some()
     });
     {
-        let flow = &mut harness.state_mut().import_flow;
+        let flow = &mut harness.state_mut().import;
         flow.open = true;
         flow.destination_id = "imported".to_string();
         flow.destination_name = "Imported dataset".to_string();
@@ -131,22 +131,22 @@ fn setup_import_blocks_mapping_when_real_category_contract_is_absent() {
     }
     harness.step();
     click(&mut harness, "Register import");
-    step_until(&mut harness, 8, |app| app.import_flow.job.is_some());
+    step_until(&mut harness, 8, |app| app.import.job.is_some());
     assert_eq!(api.counts().create_import, 1);
     assert!(harness.query_by_label("Source configuration").is_some());
 
-    harness.state_mut().import_flow.descriptors[0].descriptor_file_id =
+    harness.state_mut().import.descriptors[0].descriptor_file_id =
         "annotations/descriptor.json".to_string();
-    harness.state_mut().import_flow.descriptors[0].image_root_file_id =
+    harness.state_mut().import.descriptors[0].image_root_file_id =
         "images/example.jpg".to_string();
     harness.step();
     click(&mut harness, "Seal source and run preflight");
     step_until(&mut harness, 12, |app| {
-        app.import_flow
+        app.import
             .job
             .as_ref()
             .is_some_and(|job| job.preflight_report.is_some())
-            && !app.import_flow.busy
+            && !app.import.busy
     });
     assert_eq!(api.counts().seal_import, 1);
     assert_eq!(api.counts().preflight_import, 1);
@@ -182,7 +182,7 @@ fn import_capability_is_bootstrap_admin_gated_and_stale_epochs_are_ignored() {
     step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
     select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
-        app.import_flow.capabilities.is_some()
+        app.import.capabilities.is_some()
     });
     harness.state_mut().auth.can_create_datasets = false;
     harness.step();
@@ -201,7 +201,7 @@ fn import_capability_is_bootstrap_admin_gated_and_stale_epochs_are_ignored() {
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
-    assert!(app.import_flow.capabilities_error.is_none());
+    assert!(app.import.capabilities_error.is_none());
 }
 
 #[test]
@@ -215,17 +215,17 @@ fn terminal_import_result_invalidates_an_inflight_status_poll() {
     );
     job.lifecycle = labello_client::ImportLifecycle::Building;
     let import_id = job.import_id.clone();
-    app.import_flow.job = Some(job.clone());
-    app.import_flow.screen = crate::import_flow::ImportScreen::Running;
+    app.import.job = Some(job.clone());
+    app.import.screen = crate::import_flow::ImportScreen::Running;
 
     let commit = app.import_request_identity(Some(import_id.clone()));
     let poll = app.import_request_identity(Some(import_id.clone()));
     app.runtime.active_requests.insert(commit.request_id);
     app.runtime.active_requests.insert(poll.request_id);
-    app.import_flow
+    app.import
         .active_operations
         .insert(commit.request_id, crate::app::ImportActivity::Commit);
-    app.import_flow
+    app.import
         .active_operations
         .insert(poll.request_id, crate::app::ImportActivity::LoadStatus);
 
@@ -252,27 +252,27 @@ fn terminal_import_result_invalidates_an_inflight_status_poll() {
     app.process_messages(&egui::Context::default());
 
     assert_eq!(
-        app.import_flow.screen,
+        app.import.screen,
         crate::import_flow::ImportScreen::Success
     );
     assert_eq!(
-        app.import_flow.job.as_ref().unwrap().lifecycle,
+        app.import.job.as_ref().unwrap().lifecycle,
         labello_client::ImportLifecycle::Succeeded
     );
-    assert!(app.import_flow.active_operations.is_empty());
+    assert!(app.import.active_operations.is_empty());
 }
 
 #[test]
 fn endpoint_and_session_identity_changes_clear_import_state() {
     let mut endpoint_app = LabelloApp::default();
-    endpoint_app.import_flow.open = true;
-    endpoint_app.import_flow.destination_id = "stale-import".to_string();
+    endpoint_app.import.open = true;
+    endpoint_app.import.destination_id = "stale-import".to_string();
     endpoint_app.config.api_base_url = "http://127.0.0.1:8089".to_string();
 
     endpoint_app.rebuild_http_api();
 
-    assert!(!endpoint_app.import_flow.open);
-    assert!(endpoint_app.import_flow.destination_id.is_empty());
+    assert!(!endpoint_app.import.open);
+    assert!(endpoint_app.import.destination_id.is_empty());
 
     let mut session_app = LabelloApp::default();
     session_app.auth.account = Some(UserAccount {
@@ -283,8 +283,8 @@ fn endpoint_and_session_identity_changes_clear_import_state() {
         created_at: now(),
         updated_at: now(),
     });
-    session_app.import_flow.open = true;
-    session_app.import_flow.destination_id = "stale-import".to_string();
+    session_app.import.open = true;
+    session_app.import.destination_id = "stale-import".to_string();
     let request = test_request(&session_app, 81_001, None);
     session_app.auth.active_session_request_id = Some(request.request_id);
     session_app
@@ -313,8 +313,8 @@ fn endpoint_and_session_identity_changes_clear_import_state() {
 
     session_app.process_messages(&egui::Context::default());
 
-    assert!(!session_app.import_flow.open);
-    assert!(session_app.import_flow.destination_id.is_empty());
+    assert!(!session_app.import.open);
+    assert!(session_app.import.destination_id.is_empty());
 }
 
 #[test]
@@ -377,10 +377,10 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
     select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 8, |app| {
-        app.import_flow.capabilities.is_some()
+        app.import.capabilities.is_some()
     });
     {
-        let flow = &mut harness.state_mut().import_flow;
+        let flow = &mut harness.state_mut().import;
         flow.open = true;
         flow.job = Some(test_import_job(
             DatasetId::from("old"),
@@ -410,18 +410,18 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     }
 
     harness.state_mut().request_import_recovery();
-    assert!(harness.state().import_flow.job.is_none());
-    assert!(harness.state().import_flow.plan.is_none());
-    assert!(harness.state().import_flow.registered_paths.is_empty());
-    assert!(harness.state().import_flow.diagnostics.is_empty());
+    assert!(harness.state().import.job.is_none());
+    assert!(harness.state().import.plan.is_none());
+    assert!(harness.state().import.registered_paths.is_empty());
+    assert!(harness.state().import.diagnostics.is_empty());
     harness.step();
     step_until(&mut harness, 8, |app| {
-        app.import_flow
+        app.import
             .job
             .as_ref()
             .is_some_and(|job| job.import_id == recovered.import_id)
     });
-    let flow = &harness.state().import_flow;
+    let flow = &harness.state().import;
     assert_eq!(flow.plan.as_ref(), Some(&recovered_plan));
     assert!(!flow.recovery_contract_gap);
     assert_eq!(flow.profile, recovered.profile);
@@ -480,12 +480,12 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
     });
     harness
         .state_mut()
-        .import_flow
+        .import
         .hydrate_job_contract(&yolo_recovered);
     assert_eq!(
         harness
             .state()
-            .import_flow
+            .import
             .yolo_splits
             .iter()
             .map(|split| (split.name.as_str(), split.selected))
@@ -511,13 +511,13 @@ fn import_recovery_hydrates_persisted_source_plan_and_job_owned_state() {
         registered_files: Vec::new(),
         accepted_plan: None,
     });
-    harness.state_mut().import_flow.descriptors = vec![Default::default()];
+    harness.state_mut().import.descriptors = vec![Default::default()];
     harness
         .state_mut()
-        .import_flow
+        .import
         .hydrate_job_contract(&uploading_yolo);
     assert_eq!(
-        harness.state().import_flow.descriptors[0].kind,
+        harness.state().import.descriptors[0].kind,
         labello_client::ImportDescriptorKind::YoloDataset
     );
 }
@@ -530,7 +530,7 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
     step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
     select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
-        app.import_flow.capabilities.is_some()
+        app.import.capabilities.is_some()
     });
     let job = test_import_job(
         DatasetId::from("imported"),
@@ -540,7 +540,7 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
     );
     api.set_import_job(job.clone());
     {
-        let flow = &mut harness.state_mut().import_flow;
+        let flow = &mut harness.state_mut().import;
         flow.open = true;
         flow.job = Some(job);
         flow.screen = crate::import_flow::ImportScreen::Preflight;
@@ -550,9 +550,9 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
     }
     harness.step();
     harness.state_mut().request_update_import_plan();
-    harness.state_mut().import_flow.categories[0].class_name = "Changed while saving".to_string();
+    harness.state_mut().import.categories[0].class_name = "Changed while saving".to_string();
     harness.step();
-    step_until(&mut harness, 8, |app| !app.import_flow.busy);
+    step_until(&mut harness, 8, |app| !app.import.busy);
     assert!(
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Commit import")
@@ -567,12 +567,12 @@ fn mapping_edits_and_failed_plan_responses_keep_commit_disabled() {
     api.fail_next_import_plan();
     harness.state_mut().request_update_import_plan();
     harness.step();
-    step_until(&mut harness, 8, |app| !app.import_flow.busy);
-    assert!(harness.state().import_flow.plan.is_none());
+    step_until(&mut harness, 8, |app| !app.import.busy);
+    assert!(harness.state().import.plan.is_none());
     assert!(
         harness
             .state()
-            .import_flow
+            .import
             .error
             .as_deref()
             .is_some_and(|error| error.contains("import plan failed"))
@@ -586,7 +586,7 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
     step_until(&mut harness, 12, |app| !app.datasets.summaries.is_empty());
     select_setup_section(&mut harness, "Import");
     step_until(&mut harness, 12, |app| {
-        app.import_flow.capabilities.is_some()
+        app.import.capabilities.is_some()
     });
     let mut job = test_import_job(
         DatasetId::from("imported"),
@@ -599,7 +599,7 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
     job.preflight_report = Some(report);
     api.set_import_job(job.clone());
     {
-        let flow = &mut harness.state_mut().import_flow;
+        let flow = &mut harness.state_mut().import;
         flow.open = true;
         flow.job = Some(job);
         flow.screen = crate::import_flow::ImportScreen::Preflight;
@@ -643,7 +643,7 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
     harness.state_mut().request_update_import_plan();
     harness.step();
     step_until(&mut harness, 8, |app| {
-        app.import_flow.plan.is_some() && !app.import_flow.busy
+        app.import.plan.is_some() && !app.import.busy
     });
 
     let request = api.last_import_plan_request().unwrap();
@@ -659,7 +659,7 @@ fn mutable_import_spy_accepts_multiple_manual_approval_categories() {
             .iter()
             .all(|mapping| mapping.source_keypoint_names.is_empty())
     );
-    assert!(harness.state().import_flow.error.is_none());
+    assert!(harness.state().import.error.is_none());
 }
 
 #[cfg(feature = "inspector-presets")]
@@ -754,7 +754,7 @@ fn import_mapping_feedback_is_immediate_and_ready_tracks_the_exact_draft() {
     assert!(harness.query_by_label("COCO crowd objects").is_some());
     assert!(harness.query_by_label("YOLO missing labels").is_none());
 
-    harness.state_mut().import_flow.categories[0].class_id = "bad/class".to_string();
+    harness.state_mut().import.categories[0].class_id = "bad/class".to_string();
     harness.step();
 
     assert!(
@@ -790,7 +790,7 @@ fn import_mapping_feedback_is_immediate_and_ready_tracks_the_exact_draft() {
             .is_disabled()
     );
 
-    harness.state_mut().import_flow.categories[0].class_id = "person".to_string();
+    harness.state_mut().import.categories[0].class_id = "person".to_string();
     harness.step();
 
     assert!(
@@ -810,7 +810,7 @@ fn import_mapping_feedback_is_immediate_and_ready_tracks_the_exact_draft() {
             .is_disabled()
     );
 
-    harness.state_mut().import_flow.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
+    harness.state_mut().import.geometry_bounds = labello_client::GeometryBoundsPolicy::Clip;
     harness.step();
 
     assert!(
@@ -857,10 +857,10 @@ fn server_source_pickers_commit_folder_and_opaque_file_selections() {
     click_accesskit_button(&mut folder, "Select folder release-2026");
     folder.step();
     assert_eq!(
-        folder.state().import_flow.server_relative_path,
+        folder.state().import.server_relative_path,
         "release-2026"
     );
-    assert!(folder.state().import_flow.source_picker.target.is_none());
+    assert!(folder.state().import.source_picker.target.is_none());
 
     let mut failed_folder = Harness::builder()
         .with_size(egui::vec2(390.0, 844.0))
@@ -868,7 +868,7 @@ fn server_source_pickers_commit_folder_and_opaque_file_selections() {
             inspector_presets::build(InspectorPreset::ImportServerFolderPicker, &ctx.egui_ctx)
         });
     {
-        let picker = &mut failed_folder.state_mut().import_flow.source_picker;
+        let picker = &mut failed_folder.state_mut().import.source_picker;
         picker.relative_path = "release-2026/nested".to_string();
         picker.page = None;
         picker.error = Some("This folder could not be listed.".to_string());
@@ -877,7 +877,7 @@ fn server_source_pickers_commit_folder_and_opaque_file_selections() {
     click_accesskit_button(&mut failed_folder, "Select this folder");
     failed_folder.step();
     assert_eq!(
-        failed_folder.state().import_flow.server_relative_path,
+        failed_folder.state().import.server_relative_path,
         "release-2026/nested"
     );
 
@@ -890,13 +890,13 @@ fn server_source_pickers_commit_folder_and_opaque_file_selections() {
     click_accesskit_button(&mut descriptor, "Select dataset.yaml");
     descriptor.step();
     assert_eq!(
-        descriptor.state().import_flow.descriptors[0].descriptor_file_id,
+        descriptor.state().import.descriptors[0].descriptor_file_id,
         "file-yaml"
     );
     assert!(
         descriptor
             .state()
-            .import_flow
+            .import
             .registered_paths
             .iter()
             .any(|path| path.file_id == "file-yaml"
@@ -905,7 +905,7 @@ fn server_source_pickers_commit_folder_and_opaque_file_selections() {
     assert!(
         descriptor
             .state()
-            .import_flow
+            .import
             .source_picker
             .target
             .is_none()

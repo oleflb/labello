@@ -1,14 +1,14 @@
 impl LabelloApp {
     pub(crate) fn import_setup_section(&mut self, ui: &mut egui::Ui) {
-        if !self.import_flow.open {
-            self.import_flow.open = true;
-            if self.import_flow.destination_id.is_empty() {
-                self.import_flow.destination_id = "imported-dataset".to_string();
-                self.import_flow.destination_name = "Imported dataset".to_string();
+        if !self.import.open {
+            self.import.open = true;
+            if self.import.destination_id.is_empty() {
+                self.import.destination_id = "imported-dataset".to_string();
+                self.import.destination_name = "Imported dataset".to_string();
             }
         }
-        self.import_flow.normalize_mapping_draft();
-        self.import_flow.sync_seed_workflow_confirmation_scope();
+        self.import.normalize_mapping_draft();
+        self.import.sync_seed_workflow_confirmation_scope();
         self.sync_import_decision_screen();
         ui.heading("Import dataset");
         ui.label(
@@ -21,10 +21,10 @@ impl LabelloApp {
             ui.set_min_width(ui.available_width());
             self.import_progress_overview(ui);
             ui.separator();
-            let Some(capabilities) = self.import_flow.capabilities.clone() else {
-                if self.import_flow.capabilities_loading {
+            let Some(capabilities) = self.import.capabilities.clone() else {
+                if self.import.capabilities_loading {
                     ui.small("Checking dataset import capability...");
-                } else if let Some(error) = self.import_flow.capabilities_error.clone() {
+                } else if let Some(error) = self.import.capabilities_error.clone() {
                     theme::inline_message(ui, theme::Intent::Warning, error);
                 }
                 return;
@@ -41,29 +41,29 @@ impl LabelloApp {
     }
 
     fn sync_import_decision_screen(&mut self) {
-        if self.import_flow.pending_plan_request.is_some()
+        if self.import.pending_plan_request.is_some()
             || !self
-                .import_flow
+                .import
                 .job
                 .as_ref()
                 .is_some_and(|job| job.lifecycle == ImportLifecycle::AwaitingDecision)
-            || self.import_flow.plan.is_none()
+            || self.import.plan.is_none()
             || !matches!(
-                self.import_flow.screen,
+                self.import.screen,
                 ImportScreen::Preflight | ImportScreen::Ready
             )
         {
             return;
         }
         let ready = self
-            .import_flow
+            .import
             .plan
             .as_ref()
             .is_some_and(|plan| plan.commit_ready)
             && self.import_plan_is_current()
             && self.import_mapping_validation().is_valid()
             && self.import_plan_covers_all_categories();
-        self.import_flow.screen = if ready {
+        self.import.screen = if ready {
             ImportScreen::Ready
         } else {
             ImportScreen::Preflight
@@ -71,12 +71,12 @@ impl LabelloApp {
     }
 
     fn import_flow_contents(&mut self, ui: &mut egui::Ui, capabilities: &ImportCapabilities) {
-        if let Some(error) = self.import_flow.error.clone() {
+        if let Some(error) = self.import.error.clone() {
             theme::inline_message(ui, theme::Intent::Error, error);
         }
-        if self.import_flow.recovery_contract_gap
+        if self.import.recovery_contract_gap
             && matches!(
-                self.import_flow.screen,
+                self.import.screen,
                 ImportScreen::Configure
                     | ImportScreen::Preflight
                     | ImportScreen::Ready
@@ -90,7 +90,7 @@ impl LabelloApp {
             );
             if theme::primary_button(
                 ui,
-                !self.import_flow.busy,
+                !self.import.busy,
                 egui::Button::new("Restart import setup"),
             )
             .clicked()
@@ -99,7 +99,7 @@ impl LabelloApp {
             }
             return;
         }
-        match self.import_flow.screen {
+        match self.import.screen {
             ImportScreen::Source => self.import_source_step(ui, capabilities),
             ImportScreen::Configure => self.import_transport_step(ui),
             ImportScreen::Preflight | ImportScreen::Ready => self.import_preflight_step(ui),
@@ -112,13 +112,13 @@ impl LabelloApp {
             theme::labeled_text_field(
                 ui,
                 "Import ID",
-                &mut self.import_flow.recovery_import_id,
+                &mut self.import.recovery_import_id,
                 theme::COMPACT_TEXT_FIELD_HEIGHT,
             );
             if ui
                 .add_enabled(
-                    !self.import_flow.busy
-                        && !self.import_flow.recovery_import_id.trim().is_empty(),
+                    !self.import.busy
+                        && !self.import.recovery_import_id.trim().is_empty(),
                     egui::Button::new("Resume import"),
                 )
                 .clicked()
@@ -151,7 +151,7 @@ impl LabelloApp {
             });
         });
 
-        let active_stage = current_import_stage(&self.import_flow);
+        let active_stage = current_import_stage(&self.import);
         let active_progress = self.active_stage_progress(active_stage, activity);
         let pill_width = 98.0;
         let columns = (((ui.available_width() + theme::SPACE_2) / (pill_width + theme::SPACE_2))
@@ -161,7 +161,7 @@ impl LabelloApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = theme::SPACE_2;
                 for &stage in row {
-                    let status = import_stage_status(&self.import_flow, stage);
+                    let status = import_stage_status(&self.import, stage);
                     let fraction = match status {
                         ImportStageStatus::Complete | ImportStageStatus::Failed => Some(1.0),
                         ImportStageStatus::Pending => Some(0.0),
@@ -173,11 +173,11 @@ impl LabelloApp {
         }
         ui.add_space(theme::SPACE_2);
         ui.label(
-            RichText::new(import_step_label(self.import_flow.screen)).color(theme::TEXT_MUTED),
+            RichText::new(import_step_label(self.import.screen)).color(theme::TEXT_MUTED),
         );
-        let progress_color = if self.import_flow.screen == ImportScreen::Failure {
+        let progress_color = if self.import.screen == ImportScreen::Failure {
             theme::DANGER
-        } else if self.import_flow.screen == ImportScreen::Success {
+        } else if self.import.screen == ImportScreen::Success {
             theme::SUCCESS
         } else {
             theme::ACCENT
@@ -187,7 +187,7 @@ impl LabelloApp {
             let progress = egui::ProgressBar::new(fraction)
                 .desired_height(18.0)
                 .fill(progress_color);
-            let show_value = self.import_flow.screen != ImportScreen::Failure;
+            let show_value = self.import.screen != ImportScreen::Failure;
             let response = ui.add(if show_value {
                 progress.show_percentage()
             } else {
@@ -210,35 +210,35 @@ impl LabelloApp {
     }
 
     fn current_import_activity(&self) -> Option<ImportActivity> {
-        self.import_flow
+        self.import
             .active_operations
             .values()
             .copied()
             .max_by_key(|activity| activity.priority())
             .or_else(|| {
-                self.import_flow
+                self.import
                     .capabilities_loading
                     .then_some(ImportActivity::CheckCapabilities)
             })
             .or_else(|| {
-                self.import_flow
+                self.import
                     .source_picker
                     .loading
                     .then_some(ImportActivity::BrowseSource)
             })
             .or_else(|| {
-                self.import_flow
+                self.import
                     .yolo_inspection_loading
                     .then_some(ImportActivity::InspectDescriptor)
             })
             .or_else(|| {
-                (self.import_flow.screen == ImportScreen::Success && self.loading.datasets)
+                (self.import.screen == ImportScreen::Success && self.loading.datasets)
                     .then_some(ImportActivity::RefreshDatasets)
             })
             .or_else(|| {
-                self.import_flow
+                self.import
                     .busy
-                    .then_some(match self.import_flow.screen {
+                    .then_some(match self.import.screen {
                         ImportScreen::Source => ImportActivity::Create,
                         ImportScreen::Configure => ImportActivity::Seal,
                         ImportScreen::Preflight => ImportActivity::Preflight,
@@ -255,13 +255,13 @@ impl LabelloApp {
         stage: ImportStage,
         activity: Option<ImportActivity>,
     ) -> ActiveStageProgress {
-        if self.import_flow.screen == ImportScreen::Failure {
+        if self.import.screen == ImportScreen::Failure {
             return ActiveStageProgress {
                 label: format!("{} needs attention", stage.label()),
                 fraction: Some(1.0),
             };
         }
-        if self.import_flow.screen == ImportScreen::Success {
+        if self.import.screen == ImportScreen::Success {
             return ActiveStageProgress {
                 label: "Import complete".to_string(),
                 fraction: Some(1.0),
@@ -276,16 +276,16 @@ impl LabelloApp {
                         fraction: None,
                     };
                 }
-                let dataset_id = DatasetId::from(self.import_flow.destination_id.trim());
-                let source_selected = self.import_flow.transport == ImportTransport::BrowserFolder
-                    || (!self.import_flow.server_root_id.is_empty()
-                        && !self.import_flow.server_relative_path.trim().is_empty());
+                let dataset_id = DatasetId::from(self.import.destination_id.trim());
+                let source_selected = self.import.transport == ImportTransport::BrowserFolder
+                    || (!self.import.server_root_id.is_empty()
+                        && !self.import.server_relative_path.trim().is_empty());
                 let complete = [
                     dataset_id.validate_path_segment().is_ok(),
-                    !self.import_flow.destination_name.trim().is_empty(),
+                    !self.import.destination_name.trim().is_empty(),
                     source_selected,
-                    self.import_flow.ground_truth,
-                    !self.import_flow.provenance.trim().is_empty(),
+                    self.import.ground_truth,
+                    !self.import.provenance.trim().is_empty(),
                 ]
                 .into_iter()
                 .filter(|ready| *ready)
@@ -296,7 +296,7 @@ impl LabelloApp {
                 }
             }
             ImportStage::Configure => {
-                if let Some(job) = &self.import_flow.job
+                if let Some(job) = &self.import.job
                     && job.transport == ImportTransport::BrowserFolder
                     && job.progress.total_bytes > 0
                     && job.progress.accepted_bytes < job.progress.total_bytes
@@ -320,15 +320,15 @@ impl LabelloApp {
                         fraction: None,
                     };
                 }
-                let upload_ready = self.import_flow.transport == ImportTransport::ServerDirectory
-                    || self.import_flow.job.as_ref().is_some_and(|job| {
+                let upload_ready = self.import.transport == ImportTransport::ServerDirectory
+                    || self.import.job.as_ref().is_some_and(|job| {
                         job.progress.total_files > 0
                             && job.progress.uploaded_files == job.progress.total_files
                             && job.progress.accepted_bytes == job.progress.total_bytes
                     });
                 let complete = [
                     upload_ready,
-                    !self.import_flow.source_namespace.trim().is_empty(),
+                    !self.import.source_namespace.trim().is_empty(),
                     self.import_descriptor_error().is_none(),
                 ]
                 .into_iter()
@@ -347,12 +347,12 @@ impl LabelloApp {
                     };
                 }
                 let report = self
-                    .import_flow
+                    .import
                     .plan
                     .as_ref()
                     .map(|plan| &plan.report)
                     .or_else(|| {
-                        self.import_flow
+                        self.import
                             .job
                             .as_ref()
                             .and_then(|job| job.preflight_report.as_ref())
@@ -360,7 +360,7 @@ impl LabelloApp {
                 let acknowledgements_complete = report.is_some_and(|report| {
                     report.diagnostics.iter().all(|diagnostic| {
                         !diagnostic.impact.requires_acknowledgement
-                            || self.import_flow.acknowledgements.contains(&diagnostic.code)
+                            || self.import.acknowledgements.contains(&diagnostic.code)
                     })
                 });
                 let complete = [
@@ -381,7 +381,7 @@ impl LabelloApp {
                 fraction: Some(1.0),
             },
             ImportStage::Import => {
-                let counters = self.import_flow.job.as_ref().and_then(|job| {
+                let counters = self.import.job.as_ref().and_then(|job| {
                     let total = job
                         .progress
                         .total_images
@@ -400,7 +400,7 @@ impl LabelloApp {
                     None => ActiveStageProgress {
                         label: activity.map_or_else(
                             || {
-                                self.import_flow.job.as_ref().map_or_else(
+                                self.import.job.as_ref().map_or_else(
                                     || "Building and publishing dataset".to_string(),
                                     |job| lifecycle_label(job.lifecycle).to_string(),
                                 )

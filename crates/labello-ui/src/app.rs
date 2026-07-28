@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    ops::{Deref, DerefMut},
     rc::Rc,
     sync::mpsc,
 };
@@ -435,30 +434,16 @@ pub struct LabelloApp {
     pub(crate) runtime: RuntimeState,
     pub(crate) loading: LoadingState,
     pub(crate) setup: SetupState,
-    pub(crate) import_flow: ImportFlowState,
+    pub(crate) import: ImportFlowState,
     pub(crate) auth: AuthState,
     pub(crate) datasets: DatasetState,
-    pub(crate) admin_tools: AdminToolsState,
+    pub(crate) admin: AdminToolsState,
     pub(crate) work: WorkState,
     pub(crate) view: AppView,
     pub(crate) auth_epoch: u64,
     pub(crate) workspace_epoch: u64,
     pub(crate) import_epoch: u64,
     pub(crate) theme_applied: bool,
-}
-
-impl Deref for LabelloApp {
-    type Target = WorkState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.work
-    }
-}
-
-impl DerefMut for LabelloApp {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.work
-    }
 }
 
 impl Default for LabelloApp {
@@ -552,7 +537,7 @@ impl LabelloApp {
             runtime: RuntimeState::new(),
             loading: LoadingState::default(),
             setup,
-            import_flow: ImportFlowState::default(),
+            import: ImportFlowState::default(),
             auth: AuthState {
                 account: None,
                 can_create_datasets: false,
@@ -567,7 +552,7 @@ impl LabelloApp {
                 local_admin_login_pending: false,
             },
             datasets: DatasetState::new(),
-            admin_tools: AdminToolsState::default(),
+            admin: AdminToolsState::default(),
             work,
             view: AppView::Annotate,
             auth_epoch: 0,
@@ -586,8 +571,8 @@ impl LabelloApp {
         app.setup.create_dataset_name.clear();
         app.auth.options_checked = false;
         app.auth.checked = false;
-        app.current = None;
-        app.queue.clear();
+        app.work.current = None;
+        app.work.queue.clear();
         app.rebuild_http_api();
         app
     }
@@ -608,8 +593,9 @@ impl LabelloApp {
     }
 
     pub(crate) fn selected_task(&self) -> Option<&TaskDefinition> {
-        let selected = self.selected_task_id.as_ref()?;
-        self.tasks
+        let selected = self.work.selected_task_id.as_ref()?;
+        self.work
+            .tasks
             .iter()
             .find(|task| task.task_id == *selected && valid_workflow(task))
     }
@@ -620,11 +606,12 @@ impl LabelloApp {
 
     pub(crate) fn workflow_choices(&self) -> Vec<WorkflowChoice> {
         let mut choices = Vec::new();
-        for (task_order, task) in self.tasks.iter().enumerate() {
+        for (task_order, task) in self.work.tasks.iter().enumerate() {
             if !valid_workflow(task) {
                 continue;
             }
             let class_order = self
+                .work
                 .classes
                 .iter()
                 .position(|class| Some(&class.class_id) == task.class_ids.first())
@@ -654,18 +641,19 @@ impl LabelloApp {
 
     pub(crate) fn select_workflow(&mut self, task_id: &TaskId) -> bool {
         let Some(task) = self
+            .work
             .tasks
             .iter()
             .find(|task| task.task_id == *task_id && valid_workflow(task))
         else {
             return false;
         };
-        if self.selected_task_id.as_ref() == Some(task_id) {
+        if self.work.selected_task_id.as_ref() == Some(task_id) {
             return false;
         }
         let annotation_type = task.annotation_type.clone();
-        self.selected_task_id = Some(task_id.clone());
-        self.tool = tool_for_annotation_type(&annotation_type);
+        self.work.selected_task_id = Some(task_id.clone());
+        self.work.tool = tool_for_annotation_type(&annotation_type);
         true
     }
 
@@ -674,22 +662,23 @@ impl LabelloApp {
             return true;
         }
         let Some((task_id, annotation_type)) = self
+            .work
             .tasks
             .iter()
             .find(|task| valid_workflow(task))
             .map(|task| (task.task_id.clone(), task.annotation_type.clone()))
         else {
-            self.selected_task_id = None;
+            self.work.selected_task_id = None;
             return false;
         };
-        self.selected_task_id = Some(task_id);
-        self.tool = tool_for_annotation_type(&annotation_type);
+        self.work.selected_task_id = Some(task_id);
+        self.work.tool = tool_for_annotation_type(&annotation_type);
         true
     }
 
     pub(crate) fn sync_work_config(&mut self, metadata: DatasetMetadata) {
-        self.classes = metadata.label_classes.clone();
-        self.tasks = metadata.tasks.clone();
+        self.work.classes = metadata.label_classes.clone();
+        self.work.tasks = metadata.tasks.clone();
         self.datasets.metadata = Some(metadata);
         if let Some(task_id) = self
             .runtime
@@ -699,18 +688,19 @@ impl LabelloApp {
             .filter(|preference| preference.dataset_id == self.config.dataset_id)
             .and_then(|preference| preference.task_id.clone())
             && self
+                .work
                 .tasks
                 .iter()
                 .any(|task| task.task_id == task_id && valid_workflow(task))
         {
-            self.selected_task_id = Some(task_id);
+            self.work.selected_task_id = Some(task_id);
         }
         if self.ensure_valid_task_selection()
             && let Some(annotation_type) = self
                 .selected_task()
                 .map(|task| task.annotation_type.clone())
         {
-            self.tool = tool_for_annotation_type(&annotation_type);
+            self.work.tool = tool_for_annotation_type(&annotation_type);
         }
     }
 
@@ -757,17 +747,17 @@ impl LabelloApp {
 
     pub(crate) fn workflow_availability(&self, task_id: &TaskId) -> Option<bool> {
         let kind = self.assignment_kind()?;
-        (self.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
-            && self.availability.kind.as_ref() == Some(&kind)
-            && self.availability.resolved
-            && self.availability.error.is_none())
-        .then(|| self.availability.tasks.get(task_id).copied())
+        (self.work.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+            && self.work.availability.kind.as_ref() == Some(&kind)
+            && self.work.availability.resolved
+            && self.work.availability.error.is_none())
+        .then(|| self.work.availability.tasks.get(task_id).copied())
         .flatten()
     }
 
     pub(crate) fn assignment_availability_cache_age(&self) -> Option<Duration> {
         labello_domain::now()
-            .signed_duration_since(self.availability.checked_at?)
+            .signed_duration_since(self.work.availability.checked_at?)
             .to_std()
             .ok()
     }
@@ -823,7 +813,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn workspace_context_height(&self, layout: LayoutMode, viewport: egui::Vec2) -> f32 {
-        if self.current.is_some()
+        if self.work.current.is_some()
             && !Self::short_viewport(viewport)
             && (layout == LayoutMode::Compact
                 || (layout == LayoutMode::Medium && self.view != AppView::Annotate))
@@ -837,7 +827,7 @@ impl LabelloApp {
     pub(crate) fn workspace_actions_height(&self, layout: LayoutMode, viewport: egui::Vec2) -> f32 {
         if layout == LayoutMode::Compact
             && self.view == AppView::Review
-            && self.correction_draft.is_none()
+            && self.work.correction_draft.is_none()
         {
             112.0
         } else if Self::short_viewport(viewport) || layout == LayoutMode::Compact {
@@ -848,7 +838,8 @@ impl LabelloApp {
     }
 
     pub(crate) fn class_name(&self, class_id: &ClassId) -> String {
-        self.classes
+        self.work
+            .classes
             .iter()
             .find(|class| &class.class_id == class_id)
             .map(|class| class.name.clone())
@@ -859,8 +850,8 @@ impl LabelloApp {
         if self.loading.saving || self.loading.image || self.transition_is_current(&transition) {
             return;
         }
-        if self.assignment.is_some() {
-            self.pending_transition = Some(transition);
+        if self.work.assignment.is_some() {
+            self.work.pending_transition = Some(transition);
             return;
         }
         self.execute_transition(transition);
@@ -877,7 +868,7 @@ impl LabelloApp {
                 }
             }
             PendingTransition::PreviousAssignment(assignment) => {
-                self.previous_annotation_assignment = Some(assignment.clone());
+                self.work.previous_annotation_assignment = Some(assignment.clone());
                 self.clear_current_image();
                 self.request_reopen_assignment(assignment);
             }
@@ -890,8 +881,8 @@ impl LabelloApp {
                 }
             }
             PendingTransition::View(view) => {
-                self.show_tutorial = false;
-                self.drawer = None;
+                self.work.show_tutorial = false;
+                self.work.drawer = None;
                 self.begin_workspace_epoch();
                 self.clear_previous_annotation_assignment();
                 if view == AppView::Admin {
@@ -917,13 +908,15 @@ impl LabelloApp {
         match transition {
             PendingTransition::NextAssignment => false,
             PendingTransition::PreviousAssignment(_) => false,
-            PendingTransition::Workflow(task_id) => self.selected_task_id.as_ref() == Some(task_id),
+            PendingTransition::Workflow(task_id) => {
+                self.work.selected_task_id.as_ref() == Some(task_id)
+            }
             PendingTransition::View(view) => self.view == *view,
         }
     }
 
     pub(crate) fn submit_pending_transition(&mut self) {
-        if self.view != AppView::Annotate || self.pending_transition.is_none() {
+        if self.view != AppView::Annotate || self.work.pending_transition.is_none() {
             return;
         }
         if let Some(issue) = self.submission_issue() {
@@ -934,21 +927,21 @@ impl LabelloApp {
     }
 
     pub(crate) fn release_pending_transition(&mut self) {
-        if self.pending_transition.is_some() {
+        if self.work.pending_transition.is_some() {
             self.request_release();
         }
     }
 
     pub(crate) fn cancel_pending_transition(&mut self) {
         if !self.loading.saving {
-            self.pending_transition = None;
+            self.work.pending_transition = None;
         }
     }
 
     pub(crate) fn submit_and_advance(&mut self) {
         if self.view != AppView::Annotate
             || self.loading.saving
-            || (self.assignment.is_none() && self.runtime.api.is_some())
+            || (self.work.assignment.is_none() && self.runtime.api.is_some())
         {
             return;
         }
@@ -960,26 +953,26 @@ impl LabelloApp {
             self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
-        self.pending_transition = Some(PendingTransition::NextAssignment);
+        self.work.pending_transition = Some(PendingTransition::NextAssignment);
         self.request_save(true);
     }
 
     pub(crate) fn skip_assignment(&mut self) {
-        if self.loading.saving || (self.assignment.is_none() && self.runtime.api.is_some()) {
+        if self.loading.saving || (self.work.assignment.is_none() && self.runtime.api.is_some()) {
             return;
         }
         if self.view == AppView::Annotate
             && self.runtime.api.is_some()
-            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
         {
-            self.pending_transition = Some(PendingTransition::NextAssignment);
+            self.work.pending_transition = Some(PendingTransition::NextAssignment);
             return;
         }
         if self.runtime.api.is_none() {
             self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
-        self.pending_transition = Some(PendingTransition::NextAssignment);
+        self.work.pending_transition = Some(PendingTransition::NextAssignment);
         self.request_release();
     }
 
@@ -987,12 +980,12 @@ impl LabelloApp {
         if self.view != AppView::Annotate
             || self.loading.saving
             || self.loading.image
-            || self.pending_transition.is_some()
+            || self.work.pending_transition.is_some()
             || self.runtime.api.is_none()
         {
             return;
         }
-        let Some(previous) = self.previous_annotation_assignment.clone() else {
+        let Some(previous) = self.work.previous_annotation_assignment.clone() else {
             return;
         };
         if previous.status == labello_domain::AssignmentStatus::Active
@@ -1007,10 +1000,10 @@ impl LabelloApp {
             );
             return;
         }
-        if self.assignment.is_some()
-            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+        if self.work.assignment.is_some()
+            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
         {
-            self.pending_transition = Some(PendingTransition::PreviousAssignment(previous));
+            self.work.pending_transition = Some(PendingTransition::PreviousAssignment(previous));
             return;
         }
         self.request_reopen_assignment(previous);
@@ -1019,13 +1012,13 @@ impl LabelloApp {
     fn submission_issue(&self) -> Option<String> {
         let task = self.selected_task()?;
         let spec = task.skeleton.as_ref()?;
-        if self.active_skeleton.is_some() {
+        if self.work.active_skeleton.is_some() {
             return Some(
                 "Finish the active skeleton or mark its remaining optional keypoints absent before submitting."
                     .to_string(),
             );
         }
-        for annotation in self.annotations.iter().filter(|annotation| {
+        for annotation in self.work.annotations.iter().filter(|annotation| {
             !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
         }) {
             let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
@@ -1047,16 +1040,16 @@ impl LabelloApp {
     }
 
     pub(crate) fn advance_current_image(&mut self) {
-        self.assignment = None;
-        self.current_texture = None;
-        self.current_state = None;
-        self.current = self.queue.pop_next();
-        self.annotations.clear();
-        self.persisted_annotations.clear();
-        self.modified_annotations.clear();
-        self.accepted_prelabels.clear();
-        self.selected_prelabel = None;
-        self.selected_annotation = None;
+        self.work.assignment = None;
+        self.work.current_texture = None;
+        self.work.current_state = None;
+        self.work.current = self.work.queue.pop_next();
+        self.work.annotations.clear();
+        self.work.persisted_annotations.clear();
+        self.work.modified_annotations.clear();
+        self.work.accepted_prelabels.clear();
+        self.work.selected_prelabel = None;
+        self.work.selected_annotation = None;
         if self.runtime.api.is_some() {
             self.request_next_image();
         } else {
@@ -1066,13 +1059,13 @@ impl LabelloApp {
 
     pub(crate) fn autosave(&mut self) {
         if self.view == AppView::Annotate
-            && matches!(self.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
         {
             if self.runtime.api.is_some() {
                 self.request_save(false);
                 return;
             }
-            self.save_status = if self.offline {
+            self.work.save_status = if self.work.offline {
                 SaveStatus::Saving
             } else {
                 SaveStatus::Saved
@@ -1083,6 +1076,7 @@ impl LabelloApp {
     pub(crate) fn can_correct_review_object(&self) -> bool {
         self.view == AppView::Review
             && self
+                .work
                 .assignment
                 .as_ref()
                 .is_some_and(|assignment| assignment.kind == AssignmentKind::Review)
@@ -1091,30 +1085,31 @@ impl LabelloApp {
                     && task.review.allow_reviewer_corrections
             })
             && self.current_review_annotation().is_some_and(|annotation| {
-                self.selected_annotation.as_ref() == Some(&annotation.annotation_id)
+                self.work.selected_annotation.as_ref() == Some(&annotation.annotation_id)
             })
     }
 
     pub(crate) fn current_review_annotation(&self) -> Option<&labello_domain::AnnotationVersion> {
         (self.view == AppView::Review).then_some(()).and_then(|()| {
-            self.annotations
+            self.work
+                .annotations
                 .iter()
                 .filter(|annotation| {
                     !annotation.deleted && self.annotation_matches_selected_workflow(annotation)
                 })
-                .nth(self.review_index)
+                .nth(self.work.review_index)
         })
     }
 
     pub(crate) fn start_correction(&mut self) {
-        if self.correction_draft.is_some() || !self.can_correct_review_object() {
+        if self.work.correction_draft.is_some() || !self.can_correct_review_object() {
             return;
         }
         let Some(annotation) = self.current_review_annotation().cloned() else {
             return;
         };
         let annotation_id = annotation.annotation_id.clone();
-        self.correction_draft = Some(CorrectionDraft {
+        self.work.correction_draft = Some(CorrectionDraft {
             correction_id: labello_domain::CorrectionId::generate(),
             annotation_id,
             expected_version: annotation.version,
@@ -1128,11 +1123,11 @@ impl LabelloApp {
     }
 
     pub(crate) fn discard_correction(&mut self) {
-        self.correction_draft = None;
+        self.work.correction_draft = None;
     }
 
     pub(crate) fn undo_correction(&mut self) {
-        let Some(draft) = self.correction_draft.as_mut() else {
+        let Some(draft) = self.work.correction_draft.as_mut() else {
             return;
         };
         if let Some(geometry) = draft.geometry_history.pop() {
@@ -1141,7 +1136,7 @@ impl LabelloApp {
     }
 
     fn update_correction_geometry(&mut self, geometry: AnnotationGeometry) {
-        let Some(draft) = self.correction_draft.as_mut() else {
+        let Some(draft) = self.work.correction_draft.as_mut() else {
             return;
         };
         if draft.edited_geometry == geometry {
@@ -1153,7 +1148,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn edit_correction_bbox(&mut self, edit: crate::canvas::BoundingBoxEdit) {
-        let Some(draft) = self.correction_draft.as_ref() else {
+        let Some(draft) = self.work.correction_draft.as_ref() else {
             return;
         };
         if draft.annotation_id != edit.annotation_id
@@ -1165,7 +1160,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn select_correction_keypoint(&mut self, index: usize) {
-        let Some(draft) = self.correction_draft.as_mut() else {
+        let Some(draft) = self.work.correction_draft.as_mut() else {
             return;
         };
         let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {
@@ -1177,7 +1172,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn edit_correction_keypoint(&mut self, edit: crate::canvas::KeypointEdit) {
-        let Some(draft) = self.correction_draft.as_ref() else {
+        let Some(draft) = self.work.correction_draft.as_ref() else {
             return;
         };
         if draft.annotation_id != edit.annotation_id {
@@ -1196,7 +1191,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn set_correction_keypoint_state(&mut self, state: KeypointState) {
-        let Some(draft) = self.correction_draft.as_ref() else {
+        let Some(draft) = self.work.correction_draft.as_ref() else {
             return;
         };
         let Some(index) = draft.selected_keypoint else {
@@ -1222,12 +1217,12 @@ impl LabelloApp {
     }
 
     pub(crate) fn replenish_demo_queue(&mut self) {
-        while self.queue.len() < self.queue.queue_size() {
-            let image = demo_image(self.next_demo_image_index);
-            self.queue.push_if_room(image);
-            self.next_demo_image_index += 1;
+        while self.work.queue.len() < self.work.queue.queue_size() {
+            let image = demo_image(self.work.next_demo_image_index);
+            self.work.queue.push_if_room(image);
+            self.work.next_demo_image_index += 1;
         }
-        self.queue.set_loading(false);
+        self.work.queue.set_loading(false);
     }
 
     pub(crate) fn create_bbox(&mut self, bbox: BoundingBox) {
@@ -1243,41 +1238,45 @@ impl LabelloApp {
         let timestamp = labello_domain::now();
         let annotation_id = AnnotationId::generate();
         self.record_edit();
-        self.annotations.push(labello_domain::AnnotationVersion {
-            annotation_id: annotation_id.clone(),
-            version: 1,
-            object_group_id: None,
-            origin: AnnotationOrigin::native(),
-            task_id,
-            class_id,
-            annotation_type: AnnotationType::BoundingBox,
-            revision_source: RevisionSource::Human {
-                action: HumanRevisionKind::Authored,
-            },
-            geometry: AnnotationGeometry::BoundingBox(bbox),
-            author_user_id: user_id,
-            created_at: timestamp,
-            updated_at: timestamp,
-            deleted: false,
-        });
-        self.selected_annotation = Some(annotation_id);
+        self.work
+            .annotations
+            .push(labello_domain::AnnotationVersion {
+                annotation_id: annotation_id.clone(),
+                version: 1,
+                object_group_id: None,
+                origin: AnnotationOrigin::native(),
+                task_id,
+                class_id,
+                annotation_type: AnnotationType::BoundingBox,
+                revision_source: RevisionSource::Human {
+                    action: HumanRevisionKind::Authored,
+                },
+                geometry: AnnotationGeometry::BoundingBox(bbox),
+                author_user_id: user_id,
+                created_at: timestamp,
+                updated_at: timestamp,
+                deleted: false,
+            });
+        self.work.selected_annotation = Some(annotation_id);
         self.mark_edited();
     }
 
     pub(crate) fn edit_bbox(&mut self, edit: crate::canvas::BoundingBoxEdit) {
         let annotation_id = edit.annotation_id;
-        let persisted = self.persisted_annotations.contains(&annotation_id);
+        let persisted = self.work.persisted_annotations.contains(&annotation_id);
         let persisted_version = self
+            .work
             .current_state
             .as_ref()
             .and_then(|state| state.current_annotation(&annotation_id))
             .map(|annotation| annotation.version);
-        let Some(index) = self.annotations.iter().position(|annotation| {
+        let Some(index) = self.work.annotations.iter().position(|annotation| {
             annotation.annotation_id == annotation_id && !annotation.deleted
         }) else {
             return;
         };
-        let AnnotationGeometry::BoundingBox(current) = &self.annotations[index].geometry else {
+        let AnnotationGeometry::BoundingBox(current) = &self.work.annotations[index].geometry
+        else {
             return;
         };
         if *current == edit.bounding_box {
@@ -1285,7 +1284,7 @@ impl LabelloApp {
         }
         let user_id = self.config.user_id.clone();
         self.record_edit();
-        let annotation = &mut self.annotations[index];
+        let annotation = &mut self.work.annotations[index];
         let AnnotationGeometry::BoundingBox(current) = &mut annotation.geometry else {
             return;
         };
@@ -1297,7 +1296,7 @@ impl LabelloApp {
                 action: HumanRevisionKind::Edited,
             };
             annotation.author_user_id = user_id;
-            self.modified_annotations.insert(annotation_id);
+            self.work.modified_annotations.insert(annotation_id);
         }
         self.mark_edited();
     }
@@ -1368,7 +1367,7 @@ impl LabelloApp {
                 Some("Skeleton workflows require at least one keypoint".to_string());
             return;
         };
-        first.state = if self.next_keypoint_hidden {
+        first.state = if self.work.next_keypoint_hidden {
             KeypointState::Hidden
         } else {
             KeypointState::Visible
@@ -1395,12 +1394,12 @@ impl LabelloApp {
                 updated_at: timestamp,
                 deleted: false,
             });
-        self.selected_annotation = Some(annotation_id.clone());
+        self.work.selected_annotation = Some(annotation_id.clone());
         if keypoint_count > 1 {
-            self.active_skeleton = Some(annotation_id);
-            self.skeleton_keypoint_index = 1;
+            self.work.active_skeleton = Some(annotation_id);
+            self.work.skeleton_keypoint_index = 1;
         }
-        self.next_keypoint_hidden = false;
+        self.work.next_keypoint_hidden = false;
         self.mark_edited();
     }
 
@@ -1413,14 +1412,14 @@ impl LabelloApp {
                     spec.allow_absent,
                     spec.keypoints.len(),
                     spec.keypoints
-                        .get(self.skeleton_keypoint_index)
+                        .get(self.work.skeleton_keypoint_index)
                         .is_some_and(|keypoint| keypoint.required),
                 )
             })
         else {
             return;
         };
-        if !allow_absent || self.active_skeleton.is_none() {
+        if !allow_absent || self.work.active_skeleton.is_none() {
             return;
         }
         if required {
@@ -1429,11 +1428,11 @@ impl LabelloApp {
             return;
         }
         self.record_edit();
-        self.skeleton_keypoint_index += 1;
-        self.next_keypoint_hidden = false;
-        if self.skeleton_keypoint_index >= keypoint_count {
-            self.active_skeleton = None;
-            self.skeleton_keypoint_index = 0;
+        self.work.skeleton_keypoint_index += 1;
+        self.work.next_keypoint_hidden = false;
+        if self.work.skeleton_keypoint_index >= keypoint_count {
+            self.work.active_skeleton = None;
+            self.work.skeleton_keypoint_index = 0;
         }
         self.mark_edited();
     }
@@ -1449,6 +1448,7 @@ impl LabelloApp {
             return;
         }
         if self
+            .work
             .accepted_prelabels
             .iter()
             .any(|id| id == &suggestion.suggestion_id)
@@ -1459,109 +1459,117 @@ impl LabelloApp {
         let user_id = self.config.user_id.clone();
         let annotation_id = AnnotationId::generate();
         self.record_edit();
-        self.annotations.push(labello_domain::AnnotationVersion {
-            annotation_id: annotation_id.clone(),
-            version: 1,
-            object_group_id: None,
-            origin: AnnotationOrigin::native(),
-            task_id: suggestion.task_id.clone(),
-            class_id: suggestion.class_id.clone(),
-            annotation_type: match suggestion.geometry {
-                AnnotationGeometry::BoundingBox(_) => AnnotationType::BoundingBox,
-                AnnotationGeometry::Skeleton(_) => AnnotationType::Skeleton,
-            },
-            revision_source: RevisionSource::PrelabelSuggestion {
-                config_id: suggestion.config_id.clone(),
-                model_id: "browser-local-or-server".to_string(),
-                confidence: suggestion.confidence,
-            },
-            geometry: suggestion.geometry.clone(),
-            author_user_id: user_id,
-            created_at: timestamp,
-            updated_at: timestamp,
-            deleted: false,
-        });
-        self.accepted_prelabels
+        self.work
+            .annotations
+            .push(labello_domain::AnnotationVersion {
+                annotation_id: annotation_id.clone(),
+                version: 1,
+                object_group_id: None,
+                origin: AnnotationOrigin::native(),
+                task_id: suggestion.task_id.clone(),
+                class_id: suggestion.class_id.clone(),
+                annotation_type: match suggestion.geometry {
+                    AnnotationGeometry::BoundingBox(_) => AnnotationType::BoundingBox,
+                    AnnotationGeometry::Skeleton(_) => AnnotationType::Skeleton,
+                },
+                revision_source: RevisionSource::PrelabelSuggestion {
+                    config_id: suggestion.config_id.clone(),
+                    model_id: "browser-local-or-server".to_string(),
+                    confidence: suggestion.confidence,
+                },
+                geometry: suggestion.geometry.clone(),
+                author_user_id: user_id,
+                created_at: timestamp,
+                updated_at: timestamp,
+                deleted: false,
+            });
+        self.work
+            .accepted_prelabels
             .push(suggestion.suggestion_id.clone());
-        self.selected_annotation = Some(annotation_id);
+        self.work.selected_annotation = Some(annotation_id);
         self.mark_edited();
     }
 
     pub(crate) fn delete_selected(&mut self) {
-        if let Some(selected) = self.selected_annotation.clone() {
-            let persisted = self.persisted_annotations.contains(&selected);
+        if let Some(selected) = self.work.selected_annotation.clone() {
+            let persisted = self.work.persisted_annotations.contains(&selected);
             let persisted_version = self
+                .work
                 .current_state
                 .as_ref()
                 .and_then(|state| state.current_annotation(&selected))
                 .map(|annotation| annotation.version);
             if let Some(index) = self
+                .work
                 .annotations
                 .iter()
                 .position(|annotation| annotation.annotation_id == selected)
             {
-                if self.annotations[index].deleted {
-                    self.selected_annotation = None;
+                if self.work.annotations[index].deleted {
+                    self.work.selected_annotation = None;
                     return;
                 }
                 self.record_edit();
-                let annotation = &mut self.annotations[index];
+                let annotation = &mut self.work.annotations[index];
                 annotation.deleted = true;
                 annotation.updated_at = labello_domain::now();
                 if persisted {
                     if let Some(version) = persisted_version {
                         annotation.version = version;
                     }
-                    self.modified_annotations.remove(&selected);
+                    self.work.modified_annotations.remove(&selected);
                 }
-                if self.active_skeleton.as_ref() == Some(&selected) {
-                    self.active_skeleton = None;
-                    self.skeleton_keypoint_index = 0;
-                    self.next_keypoint_hidden = false;
+                if self.work.active_skeleton.as_ref() == Some(&selected) {
+                    self.work.active_skeleton = None;
+                    self.work.skeleton_keypoint_index = 0;
+                    self.work.next_keypoint_hidden = false;
                 }
-                self.selected_annotation = None;
+                self.work.selected_annotation = None;
                 self.mark_edited();
             } else {
-                self.selected_annotation = None;
+                self.work.selected_annotation = None;
             }
         }
     }
 
     fn snapshot(&self) -> EditSnapshot {
-        let approx_bytes = serde_json::to_vec(&self.annotations)
+        let approx_bytes = serde_json::to_vec(&self.work.annotations)
             .map(|value| value.len())
             .unwrap_or_else(|_| {
-                self.annotations.len() * std::mem::size_of::<labello_domain::AnnotationVersion>()
+                self.work.annotations.len()
+                    * std::mem::size_of::<labello_domain::AnnotationVersion>()
             })
             + self
+                .work
                 .accepted_prelabels
                 .iter()
                 .map(|value| value.len())
                 .sum::<usize>()
             + 256;
         EditSnapshot {
-            annotations: self.annotations.clone(),
-            accepted_prelabels: self.accepted_prelabels.clone(),
-            selected_annotation: self.selected_annotation.clone(),
-            active_skeleton: self.active_skeleton.clone(),
-            skeleton_keypoint_index: self.skeleton_keypoint_index,
-            next_keypoint_hidden: self.next_keypoint_hidden,
+            annotations: self.work.annotations.clone(),
+            accepted_prelabels: self.work.accepted_prelabels.clone(),
+            selected_annotation: self.work.selected_annotation.clone(),
+            active_skeleton: self.work.active_skeleton.clone(),
+            skeleton_keypoint_index: self.work.skeleton_keypoint_index,
+            next_keypoint_hidden: self.work.next_keypoint_hidden,
             approx_bytes,
         }
     }
 
     fn record_edit(&mut self) {
         let snapshot = self.snapshot();
-        push_history(&mut self.undo_stack, snapshot);
-        self.redo_stack.clear();
+        push_history(&mut self.work.undo_stack, snapshot);
+        self.work.redo_stack.clear();
     }
 
     fn restore_snapshot(&mut self, snapshot: EditSnapshot) {
-        self.annotations = snapshot.annotations;
-        if let Some(state) = self.current_state.as_ref() {
+        self.work.annotations = snapshot.annotations;
+        if let Some(state) = self.work.current_state.as_ref() {
             let persisted_annotations = state.active_annotations().cloned().collect::<Vec<_>>();
             for persisted in persisted_annotations {
                 if self
+                    .work
                     .annotations
                     .iter()
                     .all(|annotation| annotation.annotation_id != persisted.annotation_id)
@@ -1569,39 +1577,40 @@ impl LabelloApp {
                     let mut deleted = persisted;
                     deleted.deleted = true;
                     deleted.updated_at = labello_domain::now();
-                    self.annotations.push(deleted);
+                    self.work.annotations.push(deleted);
                 }
             }
         }
-        self.accepted_prelabels = snapshot.accepted_prelabels;
-        self.selected_annotation = snapshot.selected_annotation;
-        self.active_skeleton = snapshot.active_skeleton;
-        self.skeleton_keypoint_index = snapshot.skeleton_keypoint_index;
-        self.next_keypoint_hidden = snapshot.next_keypoint_hidden;
+        self.work.accepted_prelabels = snapshot.accepted_prelabels;
+        self.work.selected_annotation = snapshot.selected_annotation;
+        self.work.active_skeleton = snapshot.active_skeleton;
+        self.work.skeleton_keypoint_index = snapshot.skeleton_keypoint_index;
+        self.work.next_keypoint_hidden = snapshot.next_keypoint_hidden;
         self.recompute_modified_annotations();
         self.mark_edited();
     }
 
     pub(crate) fn undo(&mut self) {
-        if let Some(snapshot) = self.undo_stack.pop() {
+        if let Some(snapshot) = self.work.undo_stack.pop() {
             let current = self.snapshot();
-            push_history(&mut self.redo_stack, current);
+            push_history(&mut self.work.redo_stack, current);
             self.restore_snapshot(snapshot);
         }
     }
 
     pub(crate) fn redo(&mut self) {
-        if let Some(snapshot) = self.redo_stack.pop() {
+        if let Some(snapshot) = self.work.redo_stack.pop() {
             let current = self.snapshot();
-            push_history(&mut self.undo_stack, current);
+            push_history(&mut self.work.undo_stack, current);
             self.restore_snapshot(snapshot);
         }
     }
 
     pub(crate) fn recompute_modified_annotations(&mut self) {
-        let persisted_annotations = self.persisted_annotations.clone();
-        let current_state = self.current_state.clone();
-        self.modified_annotations = self
+        let persisted_annotations = self.work.persisted_annotations.clone();
+        let current_state = self.work.current_state.clone();
+        self.work.modified_annotations = self
+            .work
             .annotations
             .iter()
             .filter(|annotation| {
@@ -1614,7 +1623,7 @@ impl LabelloApp {
             })
             .map(|annotation| annotation.annotation_id.clone())
             .collect();
-        for annotation in &mut self.annotations {
+        for annotation in &mut self.work.annotations {
             if persisted_annotations.contains(&annotation.annotation_id)
                 && let Some(persisted) = current_state
                     .as_ref()
@@ -1632,17 +1641,18 @@ impl LabelloApp {
     }
 
     fn mark_edited(&mut self) {
-        self.edit_generation = self.edit_generation.wrapping_add(1);
-        self.save_status = SaveStatus::Dirty;
-        self.last_edit_at = Some(Instant::now());
+        self.work.edit_generation = self.work.edit_generation.wrapping_add(1);
+        self.work.save_status = SaveStatus::Dirty;
+        self.work.last_edit_at = Some(Instant::now());
     }
 
     pub(crate) fn autosave_if_due(&mut self) {
-        if self.save_status == SaveStatus::Dirty
+        if self.work.save_status == SaveStatus::Dirty
             && !self.loading.saving
-            && self.pending_transition.is_none()
-            && !self.canvas.is_dragging()
+            && self.work.pending_transition.is_none()
+            && !self.work.canvas.is_dragging()
             && self
+                .work
                 .last_edit_at
                 .is_some_and(|edited| edited.elapsed() >= Duration::from_millis(750))
         {
@@ -1651,19 +1661,19 @@ impl LabelloApp {
     }
 
     pub(crate) fn open_shortcut_settings(&mut self) {
-        if self.show_settings {
+        if self.work.show_settings {
             return;
         }
-        let mut draft = self.keybindings.clone();
+        let mut draft = self.work.keybindings.clone();
         draft.normalize();
-        self.shortcut_settings.baseline = Some(draft.clone());
-        self.shortcut_settings.draft = Some(draft);
-        self.shortcut_settings.error = None;
-        self.shortcut_settings.recording = None;
-        self.shortcut_settings.confirm_discard = false;
-        self.drawer = None;
-        self.show_tutorial = false;
-        self.show_settings = true;
+        self.work.shortcut_settings.baseline = Some(draft.clone());
+        self.work.shortcut_settings.draft = Some(draft);
+        self.work.shortcut_settings.error = None;
+        self.work.shortcut_settings.recording = None;
+        self.work.shortcut_settings.confirm_discard = false;
+        self.work.drawer = None;
+        self.work.show_tutorial = false;
+        self.work.show_settings = true;
     }
 
     pub(crate) fn shortcut_text(
@@ -1671,7 +1681,8 @@ impl LabelloApp {
         ctx: &egui::Context,
         action: labello_domain::UserAction,
     ) -> String {
-        self.keybindings
+        self.work
+            .keybindings
             .bindings
             .get(&action)
             .and_then(keyboard_shortcut)
@@ -1686,7 +1697,7 @@ impl LabelloApp {
         }
         let current = choices
             .iter()
-            .position(|choice| Some(&choice.task_id) == self.selected_task_id.as_ref())
+            .position(|choice| Some(&choice.task_id) == self.work.selected_task_id.as_ref())
             .unwrap_or(0);
         for offset in 1..choices.len() {
             let next = (current as isize + direction * offset as isize)
@@ -1700,6 +1711,7 @@ impl LabelloApp {
 
     fn cycle_object(&mut self, direction: isize) {
         let objects = self
+            .work
             .annotations
             .iter()
             .filter(|annotation| {
@@ -1708,10 +1720,11 @@ impl LabelloApp {
             .map(|annotation| annotation.annotation_id.clone())
             .collect::<Vec<_>>();
         if objects.is_empty() {
-            self.selected_annotation = None;
+            self.work.selected_annotation = None;
             return;
         }
         let current = self
+            .work
             .selected_annotation
             .as_ref()
             .and_then(|selected| objects.iter().position(|id| id == selected));
@@ -1719,16 +1732,16 @@ impl LabelloApp {
             || if direction < 0 { objects.len() - 1 } else { 0 },
             |current| (current as isize + direction).rem_euclid(objects.len() as isize) as usize,
         );
-        self.selected_annotation = Some(objects[next].clone());
+        self.work.selected_annotation = Some(objects[next].clone());
     }
 
     fn cycle_prelabel(&mut self, direction: isize) {
         let prelabels = self.visible_prelabels();
         if prelabels.is_empty() {
-            self.selected_prelabel = None;
+            self.work.selected_prelabel = None;
             return;
         }
-        let current = self.selected_prelabel.as_ref().and_then(|selected| {
+        let current = self.work.selected_prelabel.as_ref().and_then(|selected| {
             prelabels
                 .iter()
                 .position(|suggestion| &suggestion.suggestion_id == selected)
@@ -1743,12 +1756,13 @@ impl LabelloApp {
             },
             |current| (current as isize + direction).rem_euclid(prelabels.len() as isize) as usize,
         );
-        self.selected_prelabel = Some(prelabels[next].suggestion_id.clone());
+        self.work.selected_prelabel = Some(prelabels[next].suggestion_id.clone());
     }
 
     fn active_prelabel(&self) -> Option<labello_domain::PrelabelSuggestion> {
         let prelabels = self.visible_prelabels();
-        self.selected_prelabel
+        self.work
+            .selected_prelabel
             .as_ref()
             .and_then(|selected| {
                 prelabels
@@ -1760,10 +1774,10 @@ impl LabelloApp {
     }
 
     pub(crate) fn discard_prelabel(&mut self, suggestion_id: String) {
-        if !self.accepted_prelabels.contains(&suggestion_id) {
-            self.accepted_prelabels.push(suggestion_id);
+        if !self.work.accepted_prelabels.contains(&suggestion_id) {
+            self.work.accepted_prelabels.push(suggestion_id);
         }
-        self.selected_prelabel = self
+        self.work.selected_prelabel = self
             .visible_prelabels()
             .first()
             .map(|suggestion| suggestion.suggestion_id.clone());
@@ -1798,18 +1812,18 @@ impl LabelloApp {
                 _ => {}
             }
         }
-        let ready = (self.assignment.is_some() || self.runtime.api.is_none())
+        let ready = (self.work.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
-            && self.pending_transition.is_none()
-            && !self.canvas.is_dragging();
+            && self.work.pending_transition.is_none()
+            && !self.work.canvas.is_dragging();
         let previous_ready = self.view == AppView::Annotate
-            && self.previous_annotation_assignment.is_some()
+            && self.work.previous_annotation_assignment.is_some()
             && self.runtime.api.is_some()
             && !self.loading.saving
             && !self.loading.image
-            && self.pending_transition.is_none()
-            && !self.canvas.is_dragging();
+            && self.work.pending_transition.is_none()
+            && !self.work.canvas.is_dragging();
         match action {
             UserAction::NextImage if self.view == AppView::Annotate && ready => {
                 self.submit_and_advance()
@@ -1825,16 +1839,18 @@ impl LabelloApp {
                 self.delete_selected()
             }
             UserAction::OpenTutorial => {
-                self.drawer = None;
-                self.show_tutorial = !self.show_tutorial;
+                self.work.drawer = None;
+                self.work.show_tutorial = !self.work.show_tutorial;
             }
             UserAction::ToggleWorkflowPanel => {
-                self.show_tutorial = false;
-                self.drawer = (self.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow)
+                self.work.show_tutorial = false;
+                self.work.drawer =
+                    (self.work.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow)
             }
             UserAction::ToggleInspectorPanel => {
-                self.show_tutorial = false;
-                self.drawer = (self.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector)
+                self.work.show_tutorial = false;
+                self.work.drawer =
+                    (self.work.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector)
             }
             UserAction::OpenSettings => self.open_shortcut_settings(),
             UserAction::SelectPreviousWorkflow if self.view == AppView::Annotate && ready => {
@@ -1858,7 +1874,7 @@ impl LabelloApp {
             UserAction::AcceptPrelabel if self.view == AppView::Annotate && ready => {
                 if let Some(suggestion) = self.active_prelabel() {
                     self.accept_prelabel(&suggestion);
-                    self.selected_prelabel = self
+                    self.work.selected_prelabel = self
                         .visible_prelabels()
                         .first()
                         .map(|suggestion| suggestion.suggestion_id.clone());
@@ -1875,11 +1891,11 @@ impl LabelloApp {
                     .and_then(|task| task.skeleton.as_ref())
                     .is_some_and(|spec| spec.allow_hidden)
                 {
-                    self.next_keypoint_hidden = !self.next_keypoint_hidden;
+                    self.work.next_keypoint_hidden = !self.work.next_keypoint_hidden;
                 }
             }
             UserAction::MarkKeypointAbsent if self.view == AppView::Annotate && ready => {
-                if self.active_skeleton.is_some()
+                if self.work.active_skeleton.is_some()
                     && self
                         .selected_task()
                         .and_then(|task| task.skeleton.as_ref())
@@ -1890,30 +1906,30 @@ impl LabelloApp {
             }
             UserAction::RetryImageLoad
                 if self.view == AppView::Annotate
-                    && self.current.is_none()
+                    && self.work.current.is_none()
                     && !self.loading.image =>
             {
                 self.retry_assignment_load()
             }
-            UserAction::TogglePanMode if self.work_view() && self.current.is_some() => {
-                self.canvas.toggle_pan_mode()
+            UserAction::TogglePanMode if self.work_view() && self.work.current.is_some() => {
+                self.work.canvas.toggle_pan_mode()
             }
-            UserAction::ZoomIn if self.work_view() && self.current.is_some() => {
-                self.canvas.zoom_in()
+            UserAction::ZoomIn if self.work_view() && self.work.current.is_some() => {
+                self.work.canvas.zoom_in()
             }
-            UserAction::ZoomOut if self.work_view() && self.current.is_some() => {
-                self.canvas.zoom_out()
+            UserAction::ZoomOut if self.work_view() && self.work.current.is_some() => {
+                self.work.canvas.zoom_out()
             }
-            UserAction::FitImage if self.work_view() && self.current.is_some() => {
-                self.canvas.fit_view()
+            UserAction::FitImage if self.work_view() && self.work.current.is_some() => {
+                self.work.canvas.fit_view()
             }
             UserAction::AcceptReviewObject if self.view == AppView::Review => {
-                if self.correction_draft.is_none() {
+                if self.work.correction_draft.is_none() {
                     self.request_review(labello_domain::ReviewDecision::Approved);
                 }
             }
             UserAction::RejectReviewObject if self.view == AppView::Review => {
-                if self.correction_draft.is_none() {
+                if self.work.correction_draft.is_none() {
                     self.request_review(labello_domain::ReviewDecision::Rejected);
                 }
             }
@@ -1929,19 +1945,19 @@ impl LabelloApp {
             || ctx.text_edit_focused()
             || self.loading.saving
             || self.loading.image
-            || self.pending_transition.is_some()
-            || self.show_settings
-            || self.drawer.is_some()
+            || self.work.pending_transition.is_some()
+            || self.work.show_settings
+            || self.work.drawer.is_some()
             || self.runtime.persistence.recovery.is_some()
             || egui::Popup::is_any_open(ctx)
         {
             return;
         }
-        if self.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.canvas.exit_pan_mode();
+        if self.work.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.work.canvas.exit_pan_mode();
         }
         if self.view == AppView::Review
-            && self.correction_draft.is_some()
+            && self.work.correction_draft.is_some()
             && ctx.input_mut(|input| {
                 input.consume_shortcut(&egui::KeyboardShortcut::new(
                     egui::Modifiers::COMMAND,
@@ -1955,20 +1971,21 @@ impl LabelloApp {
             self.undo_correction();
         }
         let mut bindings = self
+            .work
             .keybindings
             .bindings
             .iter()
             .filter(|(action, _)| match action.context() {
                 labello_domain::ActionContext::WorkWorkspace => self.work_view(),
                 labello_domain::ActionContext::WorkImage => {
-                    self.work_view() && self.current.is_some()
+                    self.work_view() && self.work.current.is_some()
                 }
                 labello_domain::ActionContext::AnnotateWorkspace => self.view == AppView::Annotate,
                 labello_domain::ActionContext::AnnotateImage => {
-                    self.view == AppView::Annotate && self.current.is_some()
+                    self.view == AppView::Annotate && self.work.current.is_some()
                 }
                 labello_domain::ActionContext::AnnotateNoImage => {
-                    self.view == AppView::Annotate && self.current.is_none()
+                    self.view == AppView::Annotate && self.work.current.is_none()
                 }
                 labello_domain::ActionContext::Review => self.view == AppView::Review,
                 labello_domain::ActionContext::Legacy => false,
@@ -2056,7 +2073,7 @@ impl eframe::App for LabelloApp {
             .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::APP_BG);
         self.process_messages(ui.ctx());
         self.retry_prefetch_if_due(ui.ctx());
-        if self.queue.remove_expired() {
+        if self.work.queue.remove_expired() {
             self.request_prefetch();
         }
         self.sync_review_selection();
@@ -2159,8 +2176,8 @@ impl eframe::App for LabelloApp {
         self.queue_current_drafts();
         self.persist_workspace_preference();
         self.start_next_command();
-        if self.save_status == SaveStatus::Dirty
-            && let Some(edited) = self.last_edit_at
+        if self.work.save_status == SaveStatus::Dirty
+            && let Some(edited) = self.work.last_edit_at
         {
             ui.ctx().request_repaint_after(
                 std::time::Duration::from_millis(750).saturating_sub(edited.elapsed()),
@@ -2178,13 +2195,14 @@ impl eframe::App for LabelloApp {
                 .unwrap_or(std::time::Duration::from_secs(3));
             ui.ctx().request_repaint_after(until_refresh);
         }
-        if self.work_view() && self.runtime.api.is_some() && !self.availability.loading {
-            let until_refresh = if self.availability.checked_at.is_some() {
+        if self.work_view() && self.runtime.api.is_some() && !self.work.availability.loading {
+            let until_refresh = if self.work.availability.checked_at.is_some() {
                 self.assignment_availability_cache_age()
                     .map(|age| ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(age))
                     .unwrap_or_default()
             } else {
-                self.availability
+                self.work
+                    .availability
                     .last_attempt
                     .map(|attempt| {
                         ASSIGNMENT_AVAILABILITY_CACHE_TTL.saturating_sub(attempt.elapsed())
@@ -2241,20 +2259,21 @@ mod history_tests {
                 height: 0.1,
             });
         }
-        assert!(app.undo_stack.len() <= MAX_HISTORY_OPERATIONS);
+        assert!(app.work.undo_stack.len() <= MAX_HISTORY_OPERATIONS);
 
-        app.undo_stack.clear();
+        app.work.undo_stack.clear();
         for _ in 0..20 {
-            app.accepted_prelabels = vec!["x".repeat(2 * 1024 * 1024)];
+            app.work.accepted_prelabels = vec!["x".repeat(2 * 1024 * 1024)];
             app.record_edit();
         }
         assert!(
-            app.undo_stack
+            app.work
+                .undo_stack
                 .iter()
                 .map(|snapshot| snapshot.approx_bytes)
                 .sum::<usize>()
                 <= MAX_HISTORY_BYTES
         );
-        assert!(app.undo_stack.len() < 20);
+        assert!(app.work.undo_stack.len() < 20);
     }
 }

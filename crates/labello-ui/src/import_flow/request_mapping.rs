@@ -1,26 +1,26 @@
 impl LabelloApp {
     fn import_attestations(&self) -> ImportAttestations {
         ImportAttestations {
-            ground_truth: self.import_flow.ground_truth,
-            exhaustive: self.import_flow.exhaustive,
-            coverage_scope: split_csv(&self.import_flow.coverage_scope),
-            provenance: self.import_flow.provenance.trim().to_string(),
+            ground_truth: self.import.ground_truth,
+            exhaustive: self.import.exhaustive,
+            coverage_scope: split_csv(&self.import.coverage_scope),
+            provenance: self.import.provenance.trim().to_string(),
         }
     }
 
     pub(crate) fn import_plan_request(&self) -> UpdateImportPlanRequest {
         let acknowledgements = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .and_then(|job| job.preflight_report.as_ref())
             .into_iter()
             .flat_map(|report| &report.diagnostics)
-            .filter(|diagnostic| self.import_flow.acknowledgements.contains(&diagnostic.code))
+            .filter(|diagnostic| self.import.acknowledgements.contains(&diagnostic.code))
             .map(|diagnostic| ImportAcknowledgementRequest {
                 diagnostic_code: diagnostic.code.clone(),
                 policy: self
-                    .import_flow
+                    .import
                     .accepted_plan_request
                     .as_ref()
                     .and_then(|request| {
@@ -37,7 +37,7 @@ impl LabelloApp {
         let mut task_mappings = Vec::new();
         let mut skeleton_mappings = Vec::new();
         for category in self
-            .import_flow
+            .import
             .categories
             .iter()
             .filter(|category| category.selected)
@@ -199,7 +199,7 @@ impl LabelloApp {
         }
         UpdateImportPlanRequest {
             category_mappings: self
-                .import_flow
+                .import
                 .categories
                 .iter()
                 .map(|category| ImportCategoryMappingRequest {
@@ -212,7 +212,7 @@ impl LabelloApp {
                 })
                 .collect(),
             geometry_mappings: self
-                .import_flow
+                .import
                 .categories
                 .iter()
                 .filter(|category| category.selected)
@@ -231,13 +231,13 @@ impl LabelloApp {
             task_mappings,
             skeleton_mappings,
             compatibility: labello_client::ImportCompatibilityPolicies {
-                yolo_missing_labels: self.import_flow.yolo_missing_labels,
-                yolo_duplicate_rows: self.import_flow.yolo_duplicate_rows,
-                coco_crowds: self.import_flow.coco_crowds,
-                coco_structure: self.import_flow.coco_structure,
-                geometry_bounds: self.import_flow.geometry_bounds,
-                cross_split_duplicates: self.import_flow.cross_split_duplicates,
-                missing_keypoint_names: self.import_flow.missing_keypoint_names,
+                yolo_missing_labels: self.import.yolo_missing_labels,
+                yolo_duplicate_rows: self.import.yolo_duplicate_rows,
+                coco_crowds: self.import.coco_crowds,
+                coco_structure: self.import.coco_structure,
+                geometry_bounds: self.import.geometry_bounds,
+                cross_split_duplicates: self.import.cross_split_duplicates,
+                missing_keypoint_names: self.import.missing_keypoint_names,
             },
             acknowledgements,
         }

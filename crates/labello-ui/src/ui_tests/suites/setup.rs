@@ -15,14 +15,14 @@ fn session_is_restored_before_datasets_load_and_logout_clears_it() {
             .map(|account| account.user_id.clone()),
         Some(UserId::from("admin"))
     );
-    harness.state_mut().drawer = Some(Drawer::Workflow);
-    harness.state_mut().show_tutorial = true;
+    harness.state_mut().work.drawer = Some(Drawer::Workflow);
+    harness.state_mut().work.show_tutorial = true;
     click(&mut harness, "Sign out");
     step_until(&mut harness, 8, |app| app.auth.account.is_none());
     assert_eq!(api.counts().logout, 1);
     assert!(harness.state().datasets.summaries.is_empty());
-    assert!(harness.state().drawer.is_none());
-    assert!(!harness.state().show_tutorial);
+    assert!(harness.state().work.drawer.is_none());
+    assert!(!harness.state().work.show_tutorial);
     assert_eq!(harness.state().setup.section, SetupSection::Connection);
     assert!(harness.query_by_label("Sign in with GitHub").is_some());
 }
@@ -93,7 +93,7 @@ fn auth_options_failure_clears_state_from_the_previous_endpoint() {
     assert!(app.datasets.last_stats_completion.is_none());
     assert!(app.datasets.stats_error.is_none());
     assert!(app.runtime.notice.is_none());
-    assert!(app.current.is_none());
+    assert!(app.work.current.is_none());
     assert_eq!(app.view, AppView::Setup);
 }
 
@@ -220,7 +220,7 @@ fn setup_recommends_a_single_continue_work_action() {
         1
     );
     click(&mut harness, "Continue with Demo Dataset");
-    step_until(&mut harness, 12, |app| app.current.is_some());
+    step_until(&mut harness, 12, |app| app.work.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
 }
 

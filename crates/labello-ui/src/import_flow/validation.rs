@@ -5,8 +5,8 @@ impl LabelloApp {
     }
 
     fn import_descriptor_error(&self) -> Option<String> {
-        let coco = is_coco_profile(self.import_flow.profile);
-        if !valid_identity_component(&self.import_flow.source_namespace) {
+        let coco = is_coco_profile(self.import.profile);
+        if !valid_identity_component(&self.import.source_namespace) {
             return Some(
                 "Source namespace must use only letters, numbers, '.', '_', or '-'.".to_string(),
             );
@@ -14,16 +14,16 @@ impl LabelloApp {
         let reference_valid =
             |reference: &str| {
                 !reference.trim().is_empty()
-                    && (self.import_flow.transport == ImportTransport::ServerDirectory
-                        || self.import_flow.registered_paths.iter().any(|path| {
+                    && (self.import.transport == ImportTransport::ServerDirectory
+                        || self.import.registered_paths.iter().any(|path| {
                             path.file_id == reference || path.client_file_id == reference
                         }))
             };
         if !coco {
-            let Some(descriptor) = self.import_flow.descriptors.first() else {
+            let Some(descriptor) = self.import.descriptors.first() else {
                 return Some("Select one Dataset YAML.".to_string());
             };
-            if self.import_flow.descriptors.len() != 1
+            if self.import.descriptors.len() != 1
                 || descriptor.kind != ImportDescriptorKind::YoloDataset
             {
                 return Some("YOLO imports require exactly one Dataset YAML.".to_string());
@@ -36,14 +36,14 @@ impl LabelloApp {
                     "Release must use only letters, numbers, '.', '_', or '-'.".to_string(),
                 );
             }
-            if self.import_flow.yolo_inspection_loading {
+            if self.import.yolo_inspection_loading {
                 return Some("Wait for YAML split inspection to finish.".to_string());
             }
-            if let Some(error) = &self.import_flow.yolo_inspection_error {
+            if let Some(error) = &self.import.yolo_inspection_error {
                 return Some(error.clone());
             }
             if self
-                .import_flow
+                .import
                 .yolo_inspected_descriptor_file_id
                 .as_deref()
                 .map(str::trim)
@@ -52,7 +52,7 @@ impl LabelloApp {
                 return Some("Inspect the selected YAML before sealing the source.".to_string());
             }
             if !self
-                .import_flow
+                .import
                 .yolo_splits
                 .iter()
                 .any(|split| split.usable && split.selected)
@@ -63,9 +63,9 @@ impl LabelloApp {
         }
         let mut descriptor_references = std::collections::BTreeSet::new();
         let mut descriptor_identities = std::collections::BTreeSet::new();
-        let valid = !self.import_flow.descriptors.is_empty()
-            && self.import_flow.descriptors.iter().all(|descriptor| {
-                descriptor_kind_allowed(self.import_flow.profile, descriptor.kind)
+        let valid = !self.import.descriptors.is_empty()
+            && self.import.descriptors.iter().all(|descriptor| {
+                descriptor_kind_allowed(self.import.profile, descriptor.kind)
                     && reference_valid(&descriptor.descriptor_file_id)
                     && descriptor_references.insert(descriptor.descriptor_file_id.trim())
                     && valid_identity_component(&descriptor.release)
@@ -80,7 +80,7 @@ impl LabelloApp {
                     ))
                     && (!coco || reference_valid(&descriptor.image_root_file_id))
             })
-            && valid_identity_component(&self.import_flow.source_namespace);
+            && valid_identity_component(&self.import.source_namespace);
         (!valid).then(|| {
             "Every COCO descriptor needs a unique registered JSON file, valid release and split, and an exact registered image root."
                 .to_string()
@@ -90,13 +90,13 @@ impl LabelloApp {
     fn import_mapping_validation(&self) -> ImportMappingValidation {
         let mut validation = ImportMappingValidation::default();
         let discovered = self
-            .import_flow
+            .import
             .job
             .as_ref()
             .and_then(|job| job.preflight_report.as_ref())
             .map(|report| report.source.categories as usize)
             .or_else(|| {
-                self.import_flow
+                self.import
                     .plan
                     .as_ref()
                     .map(|plan| plan.report.source.categories as usize)
@@ -110,7 +110,7 @@ impl LabelloApp {
                 ImportMappingField::Form,
                 "Preflight has not reported any source categories to map.",
             );
-        } else if self.import_flow.categories.len() != discovered {
+        } else if self.import.categories.len() != discovered {
             push_mapping_issue(
                 &mut validation,
                 ImportMappingIssueSeverity::Error,
@@ -118,13 +118,13 @@ impl LabelloApp {
                 ImportMappingField::Form,
                 format!(
                     "Expected {discovered} source categories, but the mapping contract contains {}.",
-                    self.import_flow.categories.len()
+                    self.import.categories.len()
                 ),
             );
         }
 
         let selected_indices = self
-            .import_flow
+            .import
             .categories
             .iter()
             .enumerate()
@@ -146,18 +146,18 @@ impl LabelloApp {
             std::collections::BTreeMap::<String, Vec<(usize, ImportMappingField)>>::new();
         let mut generated_tasks = 0_usize;
         let manual_available = self
-            .import_flow
+            .import
             .capabilities
             .as_ref()
             .is_some_and(|capabilities| capabilities.manual_box_guide_migration);
         let max_keypoints = self
-            .import_flow
+            .import
             .capabilities
             .as_ref()
             .map(|capabilities| capabilities.limits.max_keypoints_per_skeleton as usize)
             .unwrap_or(usize::MAX);
 
-        for (index, category) in self.import_flow.categories.iter().enumerate() {
+        for (index, category) in self.import.categories.iter().enumerate() {
             source_key_owners
                 .entry(category.source_category_key.trim().to_string())
                 .or_default()
@@ -329,7 +329,7 @@ impl LabelloApp {
                                 "Manual box-guide migration is not available on this server.",
                             );
                         }
-                        if !self.import_flow.exhaustive {
+                        if !self.import.exhaustive {
                             push_mapping_issue(
                                 &mut validation,
                                 ImportMappingIssueSeverity::Error,
@@ -474,7 +474,7 @@ impl LabelloApp {
             }
 
             if category.workflow_intent == ImportWorkflowIntent::AuthoritativeGroundTruth
-                && !self.import_flow.exhaustive
+                && !self.import.exhaustive
             {
                 push_mapping_issue(
                     &mut validation,
@@ -537,7 +537,7 @@ impl LabelloApp {
             }
         }
         if let Some(limit) = self
-            .import_flow
+            .import
             .capabilities
             .as_ref()
             .map(|capabilities| capabilities.limits.max_generated_tasks as usize)
@@ -554,11 +554,11 @@ impl LabelloApp {
             );
         }
 
-        let has_seed_workflow = self.import_flow.categories.iter().any(|category| {
+        let has_seed_workflow = self.import.categories.iter().any(|category| {
             category.selected
                 && category.workflow_intent == ImportWorkflowIntent::SeedFutureAnnotation
         });
-        if has_seed_workflow && !self.import_flow.seed_workflow_confirmed {
+        if has_seed_workflow && !self.import.seed_workflow_confirmed {
             push_mapping_issue(
                 &mut validation,
                 ImportMappingIssueSeverity::Error,
@@ -573,12 +573,12 @@ impl LabelloApp {
     }
 
     fn add_compatibility_policy_issues(&self, validation: &mut ImportMappingValidation) {
-        let profile = self.import_flow.profile;
+        let profile = self.import.profile;
         if matches!(
             profile,
             ImportProfile::UltralyticsYoloDetectV1 | ImportProfile::UltralyticsYoloPoseV1
         ) {
-            match self.import_flow.yolo_missing_labels {
+            match self.import.yolo_missing_labels {
                 labello_client::YoloMissingLabelPolicy::Incomplete => push_mapping_issue(
                     validation,
                     ImportMappingIssueSeverity::Warning,
@@ -595,7 +595,7 @@ impl LabelloApp {
                 ),
                 labello_client::YoloMissingLabelPolicy::Block => {}
             }
-            if self.import_flow.yolo_duplicate_rows
+            if self.import.yolo_duplicate_rows
                 == labello_client::YoloDuplicateRowPolicy::Deduplicate
             {
                 push_mapping_issue(
@@ -607,7 +607,7 @@ impl LabelloApp {
                 );
             }
             if profile == ImportProfile::UltralyticsYoloPoseV1
-                && self.import_flow.missing_keypoint_names
+                && self.import.missing_keypoint_names
                     == labello_client::MissingKeypointNamesPolicy::GenerateIndexed
             {
                 push_mapping_issue(
@@ -625,7 +625,7 @@ impl LabelloApp {
             profile,
             ImportProfile::CocoInstancesGtV1 | ImportProfile::CocoKeypointsGtV1
         ) {
-            match self.import_flow.coco_crowds {
+            match self.import.coco_crowds {
                 labello_client::CocoCrowdPolicy::Incomplete => push_mapping_issue(
                     validation,
                     ImportMappingIssueSeverity::Warning,
@@ -642,7 +642,7 @@ impl LabelloApp {
                 ),
                 labello_client::CocoCrowdPolicy::Block => {}
             }
-            if self.import_flow.coco_structure
+            if self.import.coco_structure
                 == labello_client::CocoStructurePolicy::BboxCompatibility
             {
                 push_mapping_issue(
@@ -654,7 +654,7 @@ impl LabelloApp {
                 );
             }
         }
-        if self.import_flow.geometry_bounds == labello_client::GeometryBoundsPolicy::Clip {
+        if self.import.geometry_bounds == labello_client::GeometryBoundsPolicy::Clip {
             push_mapping_issue(
                 validation,
                 ImportMappingIssueSeverity::Warning,
@@ -663,7 +663,7 @@ impl LabelloApp {
                 "Out-of-bounds geometry will be clipped as derived pending data and requires acknowledgement.",
             );
         }
-        if self.import_flow.cross_split_duplicates
+        if self.import.cross_split_duplicates
             == labello_client::CrossSplitDuplicatePolicy::MergeMemberships
         {
             push_mapping_issue(
@@ -681,10 +681,10 @@ impl LabelloApp {
     }
 
     fn import_plan_is_current(&self) -> bool {
-        let Some(plan) = self.import_flow.plan.as_ref() else {
+        let Some(plan) = self.import.plan.as_ref() else {
             return false;
         };
-        self.import_flow
+        self.import
             .accepted_plan_request
             .as_ref()
             .or(plan.accepted_request.as_ref())
@@ -692,7 +692,7 @@ impl LabelloApp {
     }
 
     fn import_plan_covers_all_categories(&self) -> bool {
-        let Some(plan) = self.import_flow.plan.as_ref() else {
+        let Some(plan) = self.import.plan.as_ref() else {
             return false;
         };
         let (selected, required_tasks) = self.import_required_output_counts();
@@ -703,13 +703,13 @@ impl LabelloApp {
 
     fn import_required_output_counts(&self) -> (u64, u64) {
         let selected = self
-            .import_flow
+            .import
             .categories
             .iter()
             .filter(|category| category.selected)
             .count() as u64;
         let required_tasks = self
-            .import_flow
+            .import
             .categories
             .iter()
             .filter(|category| category.selected)

@@ -12,15 +12,16 @@ impl LabelloApp {
             self.migration_workspace_canvas(ui);
             return;
         }
-        if let Some(current) = self.current.clone() {
-            let texture = self.current_texture.clone();
+        if let Some(current) = self.work.current.clone() {
+            let texture = self.work.current_texture.clone();
             let mut annotations = self
+                .work
                 .annotations
                 .iter()
                 .filter(|annotation| self.annotation_matches_selected_workflow(annotation))
                 .cloned()
                 .collect::<Vec<_>>();
-            if let Some(draft) = self.correction_draft.as_ref()
+            if let Some(draft) = self.work.correction_draft.as_ref()
                 && let Some(annotation) = annotations
                     .iter_mut()
                     .find(|annotation| annotation.annotation_id == draft.annotation_id)
@@ -40,30 +41,31 @@ impl LabelloApp {
                 .unwrap_or_default();
             let prelabels = self.visible_prelabels();
             let annotator_editable =
-                self.view == AppView::Annotate && self.pending_transition.is_none();
-            let correction_interaction = self.correction_draft.as_ref().map(|draft| {
+                self.view == AppView::Annotate && self.work.pending_transition.is_none();
+            let correction_interaction = self.work.correction_draft.as_ref().map(|draft| {
                 let mut interaction = CanvasInteraction::correction(draft.selected_keypoint);
                 interaction.editable = !self.loading.saving;
                 interaction
             });
             let interaction = correction_interaction
                 .unwrap_or_else(|| CanvasInteraction::annotations(annotator_editable));
-            let bounding_box_tool = self.tool == Tool::BoundingBox;
-            let selected_annotation = self.selected_annotation.clone();
+            let bounding_box_tool = self.work.tool == Tool::BoundingBox;
+            let selected_annotation = self.work.selected_annotation.clone();
             if self.view == AppView::Review {
                 let review_annotation = selected_annotation.as_ref().and_then(|id| {
                     annotations
                         .iter()
                         .find(|annotation| !annotation.deleted && &annotation.annotation_id == id)
                 });
-                self.canvas.set_review_focus(review_annotation);
+                self.work.canvas.set_review_focus(review_annotation);
             } else {
-                self.canvas.clear_review_focus();
+                self.work.canvas.clear_review_focus();
             }
             let annotation_color = self
                 .selected_class_id()
                 .and_then(|class_id| {
-                    self.classes
+                    self.work
+                        .classes
                         .iter()
                         .find(|class| &class.class_id == class_id)
                 })
@@ -71,7 +73,7 @@ impl LabelloApp {
                 .unwrap_or(theme::ANNOTATION);
             let action = show_canvas_styled(
                 ui,
-                &mut self.canvas,
+                &mut self.work.canvas,
                 texture.as_ref(),
                 &annotations,
                 [current.image.width, current.image.height],
@@ -86,17 +88,18 @@ impl LabelloApp {
                 match action {
                     Some(CanvasAction::CreateBoundingBox(bbox)) => self.create_bbox(bbox),
                     Some(CanvasAction::PlaceKeypoint(point)) => self.place_keypoint(point),
-                    Some(CanvasAction::Select(id)) => self.selected_annotation = Some(id),
+                    Some(CanvasAction::Select(id)) => self.work.selected_annotation = Some(id),
                     Some(CanvasAction::EditBoundingBox(edit)) => self.edit_bbox(edit),
                     Some(CanvasAction::SelectKeypoint(_)) | Some(CanvasAction::EditKeypoint(_)) => {
                     }
                     None => {}
                 }
-            } else if self.correction_draft.is_some() {
+            } else if self.work.correction_draft.is_some() {
                 match action {
                     Some(CanvasAction::EditBoundingBox(edit)) => self.edit_correction_bbox(edit),
                     Some(CanvasAction::SelectKeypoint(selection)) => {
                         if self
+                            .work
                             .correction_draft
                             .as_ref()
                             .is_some_and(|draft| draft.annotation_id == selection.annotation_id)
@@ -144,7 +147,7 @@ impl LabelloApp {
                             );
                         });
                     } else if let Some(error) = self.runtime.error.clone() {
-                        let claimed = self.assignment.is_some();
+                        let claimed = self.work.assignment.is_some();
                         let (title, retry) = if claimed {
                             ("Assignment image unavailable", "Retry image load")
                         } else {

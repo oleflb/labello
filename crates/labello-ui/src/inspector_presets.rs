@@ -146,9 +146,9 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
         InspectorPreset::Review => work_preset(AssignmentKind::Review, ctx),
         InspectorPreset::ReviewCorrection => {
             let mut app = work_preset(AssignmentKind::Review, ctx);
-            app.tasks[0].review.allow_reviewer_corrections = true;
-            let annotation = app.annotations[0].clone();
-            app.correction_draft = Some(CorrectionDraft {
+            app.work.tasks[0].review.allow_reviewer_corrections = true;
+            let annotation = app.work.annotations[0].clone();
+            app.work.correction_draft = Some(CorrectionDraft {
                 correction_id: CorrectionId::from("cor_inspector"),
                 annotation_id: annotation.annotation_id,
                 expected_version: annotation.version,
@@ -175,13 +175,13 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
         }
         InspectorPreset::DialogTransition => {
             let mut app = work_preset(AssignmentKind::Annotation, ctx);
-            app.pending_transition = Some(PendingTransition::View(AppView::Review));
+            app.work.pending_transition = Some(PendingTransition::View(AppView::Review));
             app
         }
         InspectorPreset::DialogAdminDiscard => {
             let mut app = admin_preset();
             app.datasets.admin_config.as_mut().unwrap().name = "Staged dataset name".to_string();
-            app.admin_tools.confirm_discard = true;
+            app.admin.confirm_discard = true;
             app
         }
         InspectorPreset::SetupFailure => {
@@ -194,7 +194,7 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
             let mut app = admin_preset();
             app.datasets.admin_config = None;
             app.datasets.admin_baseline = None;
-            app.admin_tools.load_error = Some("Admin configuration is unavailable".to_string());
+            app.admin.load_error = Some("Admin configuration is unavailable".to_string());
             app
         }
         InspectorPreset::StatisticsFailure => {
@@ -205,7 +205,7 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
         }
         InspectorPreset::AssignmentFailure => {
             let mut app = work_preset(AssignmentKind::Annotation, ctx);
-            app.assignment = None;
+            app.work.assignment = None;
             app.loading.saving = true;
             clear_image(&mut app);
             app.runtime.error = Some("Could not claim an assignment".to_string());
@@ -243,8 +243,8 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
 
 fn import_multiple_descriptors_preset() -> LabelloApp {
     let mut app = import_preset(crate::import_flow::ImportScreen::Configure);
-    app.import_flow.profile = ImportProfile::CocoKeypointsGtV1;
-    app.import_flow.registered_paths = vec![
+    app.import.profile = ImportProfile::CocoKeypointsGtV1;
+    app.import.registered_paths = vec![
         crate::import_flow::RegisteredImportPath {
             client_file_id: "browser-instances".to_string(),
             file_id: "file-instances".to_string(),
@@ -261,7 +261,7 @@ fn import_multiple_descriptors_preset() -> LabelloApp {
             relative_path: "release/train/frame-001.jpg".to_string(),
         },
     ];
-    app.import_flow.descriptors = vec![
+    app.import.descriptors = vec![
         crate::import_flow::ImportDescriptorDraft {
             descriptor_file_id: "file-instances".to_string(),
             kind: labello_client::ImportDescriptorKind::CocoInstances,
@@ -282,20 +282,20 @@ fn import_multiple_descriptors_preset() -> LabelloApp {
 
 fn import_yolo_splits_preset() -> LabelloApp {
     let mut app = import_preset(crate::import_flow::ImportScreen::Configure);
-    app.import_flow.profile = ImportProfile::UltralyticsYoloDetectV1;
-    app.import_flow.registered_paths = vec![crate::import_flow::RegisteredImportPath {
+    app.import.profile = ImportProfile::UltralyticsYoloDetectV1;
+    app.import.registered_paths = vec![crate::import_flow::RegisteredImportPath {
         client_file_id: "browser-yaml".to_string(),
         file_id: "file-yaml".to_string(),
         relative_path: "release/dataset.yaml".to_string(),
     }];
-    app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
+    app.import.descriptors = vec![crate::import_flow::ImportDescriptorDraft {
         descriptor_file_id: "file-yaml".to_string(),
         kind: labello_client::ImportDescriptorKind::YoloDataset,
         release: "v1".to_string(),
         ..Default::default()
     }];
-    app.import_flow.yolo_inspected_descriptor_file_id = Some("file-yaml".to_string());
-    app.import_flow.yolo_splits = ["train", "val", "test"]
+    app.import.yolo_inspected_descriptor_file_id = Some("file-yaml".to_string());
+    app.import.yolo_splits = ["train", "val", "test"]
         .into_iter()
         .map(|name| crate::import_flow::ImportYoloSplitDraft {
             name: name.to_string(),
@@ -309,9 +309,9 @@ fn import_yolo_splits_preset() -> LabelloApp {
 
 fn import_server_folder_picker_preset() -> LabelloApp {
     let mut app = import_preset(crate::import_flow::ImportScreen::Source);
-    app.import_flow.transport = ImportTransport::ServerDirectory;
-    app.import_flow.server_root_id = "staging".to_string();
-    app.import_flow.source_picker = crate::import_flow::ImportSourcePickerState {
+    app.import.transport = ImportTransport::ServerDirectory;
+    app.import.server_root_id = "staging".to_string();
+    app.import.source_picker = crate::import_flow::ImportSourcePickerState {
         target: Some(crate::import_flow::ImportSourcePickerTarget::DatasetFolder),
         page: Some(labello_client::ImportBrowsePage {
             relative_path: String::new(),
@@ -333,10 +333,10 @@ fn import_server_folder_picker_preset() -> LabelloApp {
 
 fn import_server_descriptor_picker_preset() -> LabelloApp {
     let mut app = import_yolo_splits_preset();
-    app.import_flow.transport = ImportTransport::ServerDirectory;
-    app.import_flow.server_root_id = "staging".to_string();
-    app.import_flow.server_relative_path = "release-2026".to_string();
-    app.import_flow.source_picker = crate::import_flow::ImportSourcePickerState {
+    app.import.transport = ImportTransport::ServerDirectory;
+    app.import.server_root_id = "staging".to_string();
+    app.import.server_relative_path = "release-2026".to_string();
+    app.import.source_picker = crate::import_flow::ImportSourcePickerState {
         target: Some(crate::import_flow::ImportSourcePickerTarget::Descriptor(0)),
         page: Some(labello_client::ImportBrowsePage {
             relative_path: "release-2026".to_string(),
@@ -355,16 +355,16 @@ fn import_server_descriptor_picker_preset() -> LabelloApp {
 
 fn import_recovery_blocked_preset() -> LabelloApp {
     let mut app = import_preset(crate::import_flow::ImportScreen::Preflight);
-    app.import_flow.recovery_contract_gap = true;
-    app.import_flow.recovery_import_id = "imp_inspector".to_string();
-    app.import_flow.categories.clear();
-    app.import_flow.plan = None;
+    app.import.recovery_contract_gap = true;
+    app.import.recovery_import_id = "imp_inspector".to_string();
+    app.import.categories.clear();
+    app.import.plan = None;
     app
 }
 
 fn import_partial_categories_preset() -> LabelloApp {
     let mut app = import_preset(crate::import_flow::ImportScreen::Preflight);
-    app.import_flow
+    app.import
         .job
         .as_mut()
         .unwrap()
@@ -373,7 +373,7 @@ fn import_partial_categories_preset() -> LabelloApp {
         .unwrap()
         .source
         .categories = 3;
-    app.import_flow.pending_plan_request = Some(labello_client::UpdateImportPlanRequest {
+    app.import.pending_plan_request = Some(labello_client::UpdateImportPlanRequest {
         category_mappings: Vec::new(),
         geometry_mappings: Vec::new(),
         task_mappings: Vec::new(),
@@ -386,7 +386,7 @@ fn import_partial_categories_preset() -> LabelloApp {
 
 fn migration_deleted_guide_preset(ctx: &egui::Context) -> LabelloApp {
     let mut app = migration_preset(ctx, MigrationPreset::Object);
-    let state = app.current_state.as_mut().unwrap();
+    let state = app.work.current_state.as_mut().unwrap();
     state
         .annotations
         .get_mut(&AnnotationId::from("guide-left"))
@@ -394,36 +394,36 @@ fn migration_deleted_guide_preset(ctx: &egui::Context) -> LabelloApp {
         .last_mut()
         .unwrap()
         .deleted = true;
-    app.annotations = state.active_annotations().cloned().collect();
+    app.work.annotations = state.active_annotations().cloned().collect();
     app
 }
 
 fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
     let mut app = setup_preset();
     app.setup.section = SetupSection::Import;
-    app.import_flow.capabilities = Some(import_capabilities());
-    app.import_flow.open = true;
-    app.import_flow.screen = screen;
-    app.import_flow.destination_id = "wildlife-2026".to_string();
-    app.import_flow.destination_name = "Wildlife 2026".to_string();
-    app.import_flow.ground_truth = true;
-    app.import_flow.exhaustive = true;
-    app.import_flow.coverage_scope = "person".to_string();
-    app.import_flow.provenance = "Curated benchmark release".to_string();
+    app.import.capabilities = Some(import_capabilities());
+    app.import.open = true;
+    app.import.screen = screen;
+    app.import.destination_id = "wildlife-2026".to_string();
+    app.import.destination_name = "Wildlife 2026".to_string();
+    app.import.ground_truth = true;
+    app.import.exhaustive = true;
+    app.import.coverage_scope = "person".to_string();
+    app.import.provenance = "Curated benchmark release".to_string();
     if screen != crate::import_flow::ImportScreen::Source {
-        app.import_flow.profile = ImportProfile::CocoInstancesGtV1;
-        app.import_flow.descriptors = vec![crate::import_flow::ImportDescriptorDraft::default()];
+        app.import.profile = ImportProfile::CocoInstancesGtV1;
+        app.import.descriptors = vec![crate::import_flow::ImportDescriptorDraft::default()];
     }
-    app.import_flow.descriptors[0].descriptor_file_id = "file-annotations".to_string();
-    app.import_flow.descriptors[0].image_root_file_id = "file-image-root".to_string();
+    app.import.descriptors[0].descriptor_file_id = "file-annotations".to_string();
+    app.import.descriptors[0].image_root_file_id = "file-image-root".to_string();
     if screen != crate::import_flow::ImportScreen::Source {
-        app.import_flow.job = Some(import_job(screen));
+        app.import.job = Some(import_job(screen));
     }
     if screen == crate::import_flow::ImportScreen::Running {
-        app.import_flow.busy = true;
-        app.import_flow.poll_after =
+        app.import.busy = true;
+        app.import.poll_after =
             Some(web_time::Instant::now() + web_time::Duration::from_secs(3600));
-        app.import_flow
+        app.import
             .active_operations
             .insert(u64::MAX, crate::app::ImportActivity::Commit);
     }
@@ -435,7 +435,7 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
             | crate::import_flow::ImportScreen::Failure
             | crate::import_flow::ImportScreen::Success
     ) {
-        app.import_flow.categories = vec![crate::import_flow::ImportCategoryDraft {
+        app.import.categories = vec![crate::import_flow::ImportCategoryDraft {
             selected: true,
             source_category_key: "wildlife:v1:17".to_string(),
             source_category_id: "17".to_string(),
@@ -460,10 +460,10 @@ fn import_preset(screen: crate::import_flow::ImportScreen) -> LabelloApp {
         screen,
         crate::import_flow::ImportScreen::Ready | crate::import_flow::ImportScreen::Success
     ) {
-        app.import_flow.normalize_mapping_draft();
+        app.import.normalize_mapping_draft();
         let accepted_request = app.import_plan_request();
-        app.import_flow.accepted_plan_request = Some(accepted_request.clone());
-        app.import_flow.plan = Some(ImportPlan {
+        app.import.accepted_plan_request = Some(accepted_request.clone());
+        app.import.plan = Some(ImportPlan {
             import_id: labello_domain::ImportId::from("imp_inspector"),
             source_fingerprint: "source-inspector".to_string(),
             plan_hash: "plan-inspector".to_string(),
@@ -634,7 +634,7 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
     );
     let guide_task_id = TaskId::from("bounding_box:person");
     let target_task_id = TaskId::from("skeleton:person");
-    app.tasks.push(labello_domain::TaskDefinition {
+    app.work.tasks.push(labello_domain::TaskDefinition {
         task_id: target_task_id.clone(),
         name: "Person skeleton migration".to_string(),
         annotation_type: AnnotationType::Skeleton,
@@ -666,10 +666,10 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
         }),
         enabled: true,
     });
-    app.selected_task_id = Some(target_task_id.clone());
-    app.tool = crate::app::Tool::Keypoints;
-    app.assignment.as_mut().unwrap().task_id = target_task_id.clone();
-    let image_id = app.current.as_ref().unwrap().image.image_id.clone();
+    app.work.selected_task_id = Some(target_task_id.clone());
+    app.work.tool = crate::app::Tool::Keypoints;
+    app.work.assignment.as_mut().unwrap().task_id = target_task_id.clone();
+    let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
     let targets = vec![
         MigrationTarget {
             object_group_id: ObjectGroupId::from("group-left"),
@@ -760,7 +760,7 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
             pass_id.clone(),
             MigrationPass {
                 pass_id: pass_id.clone(),
-                assignment_id: app.assignment.as_ref().unwrap().assignment_id.clone(),
+                assignment_id: app.work.assignment.as_ref().unwrap().assignment_id.clone(),
                 task_id: target_task_id.clone(),
                 expected_target_set_hash: target_hash,
                 starting_state_hash: state_hash,
@@ -769,20 +769,20 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
                 items: Vec::new(),
             },
         );
-        app.migration.active_pass_id = Some(pass_id);
+        app.work.migration.active_pass_id = Some(pass_id);
     }
-    app.current_state = Some(state.clone());
-    app.annotations = state.active_annotations().cloned().collect();
-    app.migration.cursor = state
-        .migration_cursor(&target_task_id, app.migration.active_pass_id.as_ref())
+    app.work.current_state = Some(state.clone());
+    app.work.annotations = state.active_annotations().cloned().collect();
+    app.work.migration.cursor = state
+        .migration_cursor(&target_task_id, app.work.migration.active_pass_id.as_ref())
         .ok();
     if matches!(preset, MigrationPreset::Exclusion) {
-        app.migration.exclusion_reason =
+        app.work.migration.exclusion_reason =
             labello_domain::MigrationExclusionReason::InsufficientVisibleFeatures;
-        app.migration.exclusion_note = "Only a small occluded region is visible.".to_string();
+        app.work.migration.exclusion_note = "Only a small occluded region is visible.".to_string();
     }
     if matches!(preset, MigrationPreset::Review) {
-        app.migration.review_index = 1;
+        app.work.migration.review_index = 1;
     }
     app
 }
@@ -849,14 +849,14 @@ fn work_preset(kind: AssignmentKind, ctx: &egui::Context) -> LabelloApp {
         ..Default::default()
     };
     seed_dataset(&mut app);
-    let image_id = app.current.as_ref().unwrap().image.image_id.clone();
-    app.current_state = Some(ImageState::new(image_id.clone()));
-    app.current_texture = Some(ctx.load_texture(
+    let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
+    app.work.current_state = Some(ImageState::new(image_id.clone()));
+    app.work.current_texture = Some(ctx.load_texture(
         "inspector-preview",
         preview_image(),
         egui::TextureOptions::LINEAR,
     ));
-    app.assignment = Some(Assignment {
+    app.work.assignment = Some(Assignment {
         assignment_id: AssignmentId::from("asg_inspector"),
         image_id,
         task_id: TaskId::from("bounding_box:person"),
@@ -868,10 +868,11 @@ fn work_preset(kind: AssignmentKind, ctx: &egui::Context) -> LabelloApp {
         updated_at: timestamp(),
     });
     let annotation = sample_annotation();
-    app.persisted_annotations
+    app.work
+        .persisted_annotations
         .insert(annotation.annotation_id.clone());
-    app.selected_annotation = Some(annotation.annotation_id.clone());
-    app.annotations = vec![annotation];
+    app.work.selected_annotation = Some(annotation.annotation_id.clone());
+    app.work.annotations = vec![annotation];
     app
 }
 
@@ -962,9 +963,9 @@ fn seed_dataset(app: &mut LabelloApp) {
     let account = sample_account(app.config.user_id.clone());
     let mut metadata =
         DatasetMetadata::new(app.config.dataset_id.clone(), "Demo Dataset", timestamp());
-    metadata.label_classes = app.classes.clone();
-    metadata.tasks = app.tasks.clone();
-    let image = app.current.as_ref().unwrap().image.clone();
+    metadata.label_classes = app.work.classes.clone();
+    metadata.tasks = app.work.tasks.clone();
+    let image = app.work.current.as_ref().unwrap().image.clone();
     metadata.images.insert(image.image_id.clone(), image);
     metadata.role_assignments = vec![DatasetRoleAssignment {
         dataset_id: app.config.dataset_id.clone(),
@@ -1046,9 +1047,9 @@ fn preview_image() -> egui::ColorImage {
 }
 
 fn clear_image(app: &mut LabelloApp) {
-    app.current = None;
-    app.current_state = None;
-    app.current_texture = None;
+    app.work.current = None;
+    app.work.current_state = None;
+    app.work.current_texture = None;
 }
 
 fn timestamp() -> labello_domain::Timestamp {

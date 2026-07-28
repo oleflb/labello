@@ -42,21 +42,21 @@ fn assignment_reload_discards_stale_manual_cursor_pass_and_local_draft() {
     let mut app =
         inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
     let loaded = LoadedImage {
-        assignment: app.assignment.clone().unwrap(),
-        queued: app.current.clone().unwrap(),
-        annotations: app.annotations.clone(),
-        state: app.current_state.clone().unwrap(),
+        assignment: app.work.assignment.clone().unwrap(),
+        queued: app.work.current.clone().unwrap(),
+        annotations: app.work.annotations.clone(),
+        state: app.work.current_state.clone().unwrap(),
         color_image: None,
     };
-    app.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
-    app.migration.active_pass_id = Some(labello_domain::MigrationPassId::from("stale-pass"));
-    app.migration.draft =
+    app.work.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
+    app.work.migration.active_pass_id = Some(labello_domain::MigrationPassId::from("stale-pass"));
+    app.work.migration.draft =
         Some(crate::manual_migration::ManualMigrationState::empty_skeleton(["stale".to_string()]));
-    app.migration.draft_group = Some(labello_domain::ObjectGroupId::from("stale-group"));
-    app.migration.error = Some("stale failure".to_string());
+    app.work.migration.draft_group = Some(labello_domain::ObjectGroupId::from("stale-group"));
+    app.work.migration.error = Some("stale failure".to_string());
     let operation_id = 77_001;
     let request = test_request(&app, operation_id, Some("demo"));
-    app.active_load_id = Some(operation_id);
+    app.work.active_load_id = Some(operation_id);
     app.runtime.active_requests.insert(operation_id);
     app.runtime
         .tx
@@ -70,14 +70,14 @@ fn assignment_reload_discards_stale_manual_cursor_pass_and_local_draft() {
 
     app.process_messages(&egui::Context::default());
 
-    assert!(app.migration.cursor.is_none());
-    assert!(app.migration.active_pass_id.is_none());
-    assert!(app.migration.draft.is_none());
-    assert!(app.migration.draft_group.is_none());
-    assert!(app.migration.error.is_none());
+    assert!(app.work.migration.cursor.is_none());
+    assert!(app.work.migration.active_pass_id.is_none());
+    assert!(app.work.migration.draft.is_none());
+    assert!(app.work.migration.draft_group.is_none());
+    assert!(app.work.migration.error.is_none());
     app.sync_manual_migration();
     assert!(matches!(
-        app.migration.cursor,
+        app.work.migration.cursor,
         Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
             if object_group_id == &labello_domain::ObjectGroupId::from("group-left")
     ));
@@ -148,13 +148,13 @@ fn snapshot_load_history_advances_only_after_a_successful_catalog_request() {
             .unwrap();
         app.process_messages(&egui::Context::default());
         if request_id == 1 {
-            assert!(!app.admin_tools.snapshots_loaded);
+            assert!(!app.admin.snapshots_loaded);
         } else {
-            assert!(app.admin_tools.snapshots_loaded);
+            assert!(app.admin.snapshots_loaded);
         }
     }
     assert_eq!(
-        app.admin_tools.snapshots_error.as_deref(),
+        app.admin.snapshots_error.as_deref(),
         Some("refresh failure")
     );
 }
@@ -164,17 +164,17 @@ fn assignment_availability_poll_waits_for_the_in_flight_request() {
     let api = Rc::new(SpyApi::new());
     let mut app = base_live_app(api);
     app.view = AppView::Annotate;
-    app.availability.dataset_id = Some(app.config.dataset_id.clone());
-    app.availability.kind = Some(AssignmentKind::Annotation);
-    app.availability.loading = true;
-    app.availability.last_attempt = Some(Instant::now() - Duration::from_secs(11));
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Annotation);
+    app.work.availability.loading = true;
+    app.work.availability.last_attempt = Some(Instant::now() - Duration::from_secs(11));
     let queued_before = app.runtime.commands.len();
 
     app.refresh_assignment_availability_if_due();
 
     assert_eq!(app.runtime.commands.len(), queued_before);
-    assert!(!app.availability.refresh_after_load);
-    assert!(app.availability.loading);
+    assert!(!app.work.availability.refresh_after_load);
+    assert!(app.work.availability.loading);
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn assignment_availability_poll_is_scheduled_from_completion() {
     else {
         panic!("expected availability request");
     };
-    app.availability.last_attempt = Some(Instant::now() - Duration::from_secs(30));
+    app.work.availability.last_attempt = Some(Instant::now() - Duration::from_secs(30));
     app.runtime
         .tx
         .send(UiMessage::AssignmentAvailabilityLoaded {
@@ -204,10 +204,10 @@ fn assignment_availability_poll_is_scheduled_from_completion() {
     let queued_before = app.runtime.commands.len();
     app.refresh_assignment_availability_if_due();
 
-    assert!(!app.availability.loading);
+    assert!(!app.work.availability.loading);
     assert_eq!(app.runtime.commands.len(), queued_before);
     assert!(
-        app.availability
+        app.work.availability
             .last_attempt
             .is_some_and(|completed| completed.elapsed() < Duration::from_secs(1))
     );
@@ -219,15 +219,15 @@ fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
     let mut app = base_live_app(api.clone());
     app.sync_work_config(api.metadata());
     app.view = AppView::Annotate;
-    app.availability.dataset_id = Some(app.config.dataset_id.clone());
-    app.availability.kind = Some(AssignmentKind::Annotation);
-    app.availability.tasks = app
-        .tasks
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Annotation);
+    app.work.availability.tasks = app
+        .work.tasks
         .iter()
         .map(|task| (task.task_id.clone(), true))
         .collect();
-    app.availability.resolved = true;
-    app.availability.checked_at = Some(labello_domain::now());
+    app.work.availability.resolved = true;
+    app.work.availability.checked_at = Some(labello_domain::now());
     let request = test_request(&app, 42, Some("demo"));
 
     app.queue_command(UiCommand::Ingest {
@@ -235,7 +235,7 @@ fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
         dataset_id: app.config.dataset_id.clone(),
     });
 
-    assert!(app.availability.checked_at.is_none());
+    assert!(app.work.availability.checked_at.is_none());
 }
 
 #[test]
@@ -286,8 +286,8 @@ fn stale_availability_is_discarded_after_refresh_and_dataset_switch() {
         })
         .unwrap();
     app.process_messages(&egui::Context::default());
-    assert!(app.availability.tasks.is_empty());
-    assert_eq!(app.availability.dataset_id, None);
+    assert!(app.work.availability.tasks.is_empty());
+    assert_eq!(app.work.availability.dataset_id, None);
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn stale_save_responses_cannot_replace_the_current_image_state() {
     let mut harness = loaded_work_harness(api);
     let current_id = harness
         .state()
-        .current
+        .work.current
         .as_ref()
         .unwrap()
         .image
@@ -318,11 +318,11 @@ fn stale_save_responses_cannot_replace_the_current_image_state() {
     harness.step();
 
     assert_eq!(
-        harness.state().current.as_ref().unwrap().image.image_id,
+        harness.state().work.current.as_ref().unwrap().image.image_id,
         current_id
     );
     assert_eq!(
-        harness.state().current_state.as_ref().unwrap().image_id,
+        harness.state().work.current_state.as_ref().unwrap().image_id,
         current_id
     );
 }
@@ -336,16 +336,16 @@ fn keybindings_are_editable_and_persisted() {
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
     click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     assert_eq!(
-        harness.state().shortcut_settings.recording,
+        harness.state().work.shortcut_settings.recording,
         Some(labello_domain::UserAction::NextImage),
     );
     harness.key_press(egui::Key::Enter);
     harness.step();
-    assert_eq!(harness.state().shortcut_settings.recording, None);
+    assert_eq!(harness.state().work.shortcut_settings.recording, None);
     assert_eq!(
         harness
             .state()
-            .shortcut_settings
+            .work.shortcut_settings
             .draft
             .as_ref()
             .unwrap()
@@ -363,7 +363,7 @@ fn keybindings_are_editable_and_persisted() {
 
     assert_eq!(api.counts().save_keybindings, 1);
     assert_eq!(
-        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
+        harness.state().work.keybindings.bindings[&labello_domain::UserAction::NextImage].key,
         "Enter"
     );
     assert_eq!(
@@ -382,7 +382,7 @@ fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
     let mut app = LabelloApp::default();
     app.runtime.api = Some(api);
     app.open_shortcut_settings();
-    app.shortcut_settings
+    app.work.shortcut_settings
         .draft
         .as_mut()
         .unwrap()
@@ -390,7 +390,7 @@ fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
         .get_mut(&labello_domain::UserAction::NextImage)
         .unwrap()
         .key = "Enter".to_string();
-    let draft = app.shortcut_settings.draft.clone();
+    let draft = app.work.shortcut_settings.draft.clone();
 
     app.request_keybindings_save();
     let UiCommand::SaveKeybindings { request, .. } =
@@ -407,9 +407,9 @@ fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
         .unwrap();
     app.process_messages(&egui::Context::default());
 
-    assert_eq!(app.shortcut_settings.draft, draft);
+    assert_eq!(app.work.shortcut_settings.draft, draft);
     assert_eq!(
-        app.shortcut_settings.error.as_deref(),
+        app.work.shortcut_settings.error.as_deref(),
         Some("settings unavailable")
     );
     let harness = Harness::builder()
@@ -430,9 +430,9 @@ fn shortcut_settings_cancel_discards_the_draft() {
     click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Escape);
     harness.step();
-    assert!(harness.state().show_settings);
-    assert_eq!(harness.state().shortcut_settings.recording, None);
-    assert!(!harness.state().shortcut_settings.confirm_discard);
+    assert!(harness.state().work.show_settings);
+    assert_eq!(harness.state().work.shortcut_settings.recording, None);
+    assert!(!harness.state().work.shortcut_settings.confirm_discard);
     click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Enter);
     harness.step();
@@ -445,9 +445,9 @@ fn shortcut_settings_cancel_discards_the_draft() {
     );
     click_accesskit_button(&mut harness, "Discard changes");
 
-    assert!(!harness.state().show_settings);
+    assert!(!harness.state().work.show_settings);
     assert_eq!(
-        harness.state().keybindings.bindings[&labello_domain::UserAction::NextImage].key,
+        harness.state().work.keybindings.bindings[&labello_domain::UserAction::NextImage].key,
         "ArrowRight"
     );
 }
@@ -509,7 +509,7 @@ fn draft_recovery_modal_blocks_background_controls() {
 
     click_at(&mut harness, menu);
 
-    assert!(!harness.state().show_settings);
+    assert!(!harness.state().work.show_settings);
     assert!(harness.state().runtime.persistence.recovery.is_some());
 }
 
@@ -519,12 +519,12 @@ fn overlays_and_menus_block_background_shortcuts() {
     let mut harness = loaded_work_harness(api.clone());
     let image_id = harness
         .state()
-        .assignment
+        .work.assignment
         .as_ref()
         .unwrap()
         .image_id
         .clone();
-    harness.state_mut().drawer = Some(Drawer::Inspector);
+    harness.state_mut().work.drawer = Some(Drawer::Inspector);
     harness.step();
 
     harness.key_press(egui::Key::ArrowRight);
@@ -532,16 +532,16 @@ fn overlays_and_menus_block_background_shortcuts() {
 
     assert_eq!(api.counts().complete_assignment, 0);
     assert_eq!(
-        harness.state().assignment.as_ref().unwrap().image_id,
+        harness.state().work.assignment.as_ref().unwrap().image_id,
         image_id
     );
 
-    harness.state_mut().canvas.zoom_in();
-    harness.state_mut().canvas.toggle_pan_mode();
+    harness.state_mut().work.canvas.zoom_in();
+    harness.state_mut().work.canvas.toggle_pan_mode();
     harness.key_press(egui::Key::Escape);
     harness.step();
-    assert!(harness.state().canvas.pan_mode());
-    harness.state_mut().drawer = None;
+    assert!(harness.state().work.canvas.pan_mode());
+    harness.state_mut().work.drawer = None;
     harness.step();
 
     harness.set_size(egui::vec2(320.0, 568.0));
@@ -551,7 +551,7 @@ fn overlays_and_menus_block_background_shortcuts() {
     harness.step();
     assert_eq!(api.counts().complete_assignment, 0);
     assert_eq!(
-        harness.state().assignment.as_ref().unwrap().image_id,
+        harness.state().work.assignment.as_ref().unwrap().image_id,
         image_id
     );
 }
@@ -560,28 +560,28 @@ fn overlays_and_menus_block_background_shortcuts() {
 fn pan_mode_shortcut_requires_zoom_and_escape_returns_to_annotation_mode() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    let zoom = harness.state().keybindings.bindings[&labello_domain::UserAction::ZoomIn].clone();
+    let zoom = harness.state().work.keybindings.bindings[&labello_domain::UserAction::ZoomIn].clone();
     harness
         .state_mut()
-        .keybindings
+        .work.keybindings
         .bindings
         .insert(labello_domain::UserAction::RetryImageLoad, zoom);
-    assert!(harness.state().keybindings.validate().is_ok());
+    assert!(harness.state().work.keybindings.validate().is_ok());
 
     harness.key_press(egui::Key::P);
     harness.step();
-    assert!(!harness.state().canvas.pan_mode());
+    assert!(!harness.state().work.canvas.pan_mode());
     harness.key_press(egui::Key::Plus);
     harness.step();
-    assert!(harness.state().canvas.current_zoom() > 1.0);
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
     harness.key_press(egui::Key::P);
     harness.step();
-    assert!(harness.state().canvas.pan_mode());
+    assert!(harness.state().work.canvas.pan_mode());
     assert!(harness.query_by_label("Pan").is_some());
 
     harness.key_press(egui::Key::Escape);
     harness.step();
-    assert!(!harness.state().canvas.pan_mode());
+    assert!(!harness.state().work.canvas.pan_mode());
 }
 
 #[test]
@@ -601,19 +601,19 @@ fn logical_primary_and_shifted_punctuation_shortcuts_dispatch() {
 
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Questionmark);
     harness.step();
-    assert!(harness.state().show_tutorial);
+    assert!(harness.state().work.show_tutorial);
 }
 
 #[test]
 fn stale_prefetch_response_cannot_enter_the_queue() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
-    let loaded = harness.state_mut().queue.pop_prepared().unwrap();
-    harness.state_mut().queue.clear();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let loaded = harness.state_mut().work.queue.pop_prepared().unwrap();
+    harness.state_mut().work.queue.clear();
     let operation_id = 90_001;
     let request = test_request(harness.state(), operation_id, Some("demo"));
-    harness.state_mut().active_prefetch_id = Some(operation_id);
+    harness.state_mut().work.active_prefetch_id = Some(operation_id);
     harness
         .state_mut()
         .runtime
@@ -634,7 +634,7 @@ fn stale_prefetch_response_cannot_enter_the_queue() {
     harness
         .state_mut()
         .process_messages(&egui::Context::default());
-    assert!(harness.state().queue.is_empty());
+    assert!(harness.state().work.queue.is_empty());
     step_until(&mut harness, 8, |_| api.counts().release_assignment > 0);
 }
 
@@ -642,12 +642,12 @@ fn stale_prefetch_response_cannot_enter_the_queue() {
 fn stale_blocking_claim_releases_its_assignment() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
-    step_until(&mut harness, 12, |app| app.queue.len() == 2);
-    let assignment = harness.state_mut().queue.pop_prepared().unwrap().assignment;
-    harness.state_mut().queue.clear();
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let assignment = harness.state_mut().work.queue.pop_prepared().unwrap().assignment;
+    harness.state_mut().work.queue.clear();
     let operation_id = 90_002;
     let request = test_request(harness.state(), operation_id, Some("demo"));
-    harness.state_mut().active_load_id = Some(operation_id);
+    harness.state_mut().work.active_load_id = Some(operation_id);
     harness
         .state_mut()
         .runtime
@@ -699,7 +699,7 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_admin_dataset();
     assert!(!app.loading.admin);
-    assert!(app.admin_tools.load_error.is_some());
+    assert!(app.admin.load_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_admin_save();
@@ -715,27 +715,27 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_admin_changes_save();
     assert!(app.loading.roles_user.is_none());
-    assert!(app.admin_tools.pending_role_saves.is_empty());
+    assert!(app.admin.pending_role_saves.is_empty());
 
     saturate_command_queue(&mut app);
     app.request_images();
     assert!(!app.loading.images);
-    assert!(app.admin_tools.images_error.is_some());
+    assert!(app.admin.images_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshots();
     assert!(!app.loading.snapshots);
-    assert!(app.admin_tools.snapshots_error.is_some());
+    assert!(app.admin.snapshots_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshot_create();
     assert!(!app.loading.creating_snapshot);
-    assert!(app.admin_tools.snapshot_action_error.is_some());
+    assert!(app.admin.snapshot_action_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_snapshot_download("snapshot".to_string(), "manifest.json".to_string());
     assert!(app.loading.snapshot_file.is_none());
-    assert!(app.admin_tools.snapshot_action_error.is_some());
+    assert!(app.admin.snapshot_action_error.is_some());
 
     saturate_command_queue(&mut app);
     app.request_ingest();
@@ -753,7 +753,7 @@ fn queue_saturation_rolls_back_dataset_admin_and_session_owners() {
     saturate_command_queue(&mut app);
     app.request_keybindings_save();
     assert!(!app.loading.keybindings);
-    assert!(app.shortcut_settings.error.is_some());
+    assert!(app.work.shortcut_settings.error.is_some());
 
     app.view = AppView::Stats;
     saturate_command_queue(&mut app);
@@ -791,15 +791,15 @@ fn queue_saturation_rolls_back_claim_release_review_and_adjudication() {
     saturate_command_queue(harness.state_mut());
     harness.state_mut().skip_assignment();
     assert!(!harness.state().loading.saving);
-    assert!(harness.state().active_operation_id.is_none());
-    assert!(harness.state().pending_transition.is_none());
+    assert!(harness.state().work.active_operation_id.is_none());
+    assert!(harness.state().work.pending_transition.is_none());
 
     harness.state_mut().clear_current_image();
     saturate_command_queue(harness.state_mut());
     harness.state_mut().request_next_image();
     assert!(!harness.state().loading.image);
-    assert!(harness.state().active_load_id.is_none());
-    assert!(!harness.state().queue.is_loading());
+    assert!(harness.state().work.active_load_id.is_none());
+    assert!(!harness.state().work.queue.is_loading());
 
     let api = Rc::new(SpyApi::new());
     seed_review_annotation(
@@ -818,9 +818,9 @@ fn queue_saturation_rolls_back_claim_release_review_and_adjudication() {
         .state_mut()
         .request_review(labello_domain::ReviewDecision::Approved);
     assert!(!review.state().loading.saving);
-    assert!(review.state().active_operation_id.is_none());
+    assert!(review.state().work.active_operation_id.is_none());
 
-    let annotation_id = review.state().selected_annotation.clone().unwrap();
+    let annotation_id = review.state().work.selected_annotation.clone().unwrap();
     review.state_mut().start_correction();
     review.state_mut().edit_correction_bbox(BoundingBoxEdit {
         annotation_id,
@@ -834,17 +834,17 @@ fn queue_saturation_rolls_back_claim_release_review_and_adjudication() {
     saturate_command_queue(review.state_mut());
     review.state_mut().request_correction();
     assert!(!review.state().loading.saving);
-    assert!(review.state().active_operation_id.is_none());
-    assert!(review.state().correction_draft.is_some());
+    assert!(review.state().work.active_operation_id.is_none());
+    assert!(review.state().work.correction_draft.is_some());
 
     review.state_mut().view = AppView::Adjudicate;
-    review.state_mut().assignment.as_mut().unwrap().kind = AssignmentKind::Adjudication;
+    review.state_mut().work.assignment.as_mut().unwrap().kind = AssignmentKind::Adjudication;
     saturate_command_queue(review.state_mut());
     review
         .state_mut()
         .request_adjudication(labello_domain::AdjudicationDecision::AcceptAnnotation);
     assert!(!review.state().loading.saving);
-    assert!(review.state().active_operation_id.is_none());
+    assert!(review.state().work.active_operation_id.is_none());
 }
 
 #[test]
@@ -1031,9 +1031,9 @@ fn dataset_states_distinguish_loading_and_stale_refresh_failure() {
 fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
-    let assignment = harness.state().assignment.clone().unwrap();
-    let state = harness.state().current_state.clone().unwrap();
-    harness.state_mut().active_operation_id = Some(77);
+    let assignment = harness.state().work.assignment.clone().unwrap();
+    let state = harness.state().work.current_state.clone().unwrap();
+    harness.state_mut().work.active_operation_id = Some(77);
     harness.state_mut().loading.saving = true;
     harness.state_mut().runtime.active_requests.insert(77);
     harness
@@ -1051,7 +1051,7 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
         .unwrap();
     harness.step();
     assert!(harness.state().loading.saving);
-    assert_eq!(harness.state().active_operation_id, Some(77));
+    assert_eq!(harness.state().work.active_operation_id, Some(77));
 
     harness
         .state()
@@ -1068,7 +1068,7 @@ fn stale_assignment_operations_do_not_clear_the_active_loading_owner() {
         .unwrap();
     harness.step();
     assert!(!harness.state().loading.saving);
-    assert_eq!(harness.state().active_operation_id, None);
+    assert_eq!(harness.state().work.active_operation_id, None);
 }
 
 #[test]
@@ -1077,11 +1077,11 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
     let mut harness = loaded_work_harness(api.clone());
     click(&mut harness, "Accept");
     click(&mut harness, "Save");
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
 
-    let annotation_id = harness.state().annotations[0].annotation_id.clone();
-    let origin = harness.state().annotations[0].origin.clone();
-    let object_group_id = harness.state().annotations[0].object_group_id.clone();
+    let annotation_id = harness.state().work.annotations[0].annotation_id.clone();
+    let origin = harness.state().work.annotations[0].origin.clone();
+    let object_group_id = harness.state().work.annotations[0].object_group_id.clone();
     harness.state_mut().edit_bbox(BoundingBoxEdit {
         annotation_id: annotation_id.clone(),
         bounding_box: BoundingBox {
@@ -1091,20 +1091,20 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
             height: 0.35,
         },
     });
-    assert_eq!(harness.state().annotations[0].version, 2);
-    assert_eq!(harness.state().annotations[0].origin, origin);
+    assert_eq!(harness.state().work.annotations[0].version, 2);
+    assert_eq!(harness.state().work.annotations[0].origin, origin);
     assert_eq!(
-        harness.state().annotations[0].object_group_id,
+        harness.state().work.annotations[0].object_group_id,
         object_group_id
     );
     assert!(matches!(
-        harness.state().annotations[0].revision_source,
+        harness.state().work.annotations[0].revision_source,
         RevisionSource::Human {
             action: HumanRevisionKind::Edited
         }
     ));
     assert_eq!(
-        harness.state().annotations[0].author_user_id,
+        harness.state().work.annotations[0].author_user_id,
         UserId::from("admin")
     );
     assert!(matches!(
@@ -1112,7 +1112,7 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
         AnnotationOrigin::Native { legacy_v2: false }
     ));
     harness.state_mut().autosave();
-    step_until(&mut harness, 10, |app| app.save_status == SaveStatus::Saved);
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
 
     assert!(api.events().iter().any(|payload| matches!(
         payload,
@@ -1139,20 +1139,20 @@ fn correction_mode_blocks_review_shortcuts_and_saturation_never_discards_the_dra
     );
     let mut harness = loaded_review_harness(api.clone());
     harness.state_mut().start_correction();
-    assert!(harness.state().correction_draft.is_some());
+    assert!(harness.state().work.correction_draft.is_some());
 
     harness.key_press(egui::Key::Y);
     harness.step();
     harness.key_press(egui::Key::N);
     harness.step();
     assert_eq!(api.counts().record_review, 0);
-    assert!(harness.state().correction_draft.is_some());
+    assert!(harness.state().work.correction_draft.is_some());
 
     saturate_command_queue(harness.state_mut());
     harness
         .state_mut()
         .request_review(labello_domain::ReviewDecision::Rejected);
-    assert!(harness.state().correction_draft.is_some());
+    assert!(harness.state().work.correction_draft.is_some());
     assert!(!harness.state().loading.saving);
 
     harness.state_mut().runtime.commands.clear();
@@ -1160,7 +1160,7 @@ fn correction_mode_blocks_review_shortcuts_and_saturation_never_discards_the_dra
     harness
         .state_mut()
         .request_review(labello_domain::ReviewDecision::Rejected);
-    assert!(harness.state().correction_draft.is_none());
+    assert!(harness.state().work.correction_draft.is_none());
     assert!(harness.state().loading.saving);
 }
 

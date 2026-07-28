@@ -4,7 +4,7 @@ impl LabelloApp {
         let permissions_dirty = self.datasets.users != self.datasets.users_baseline;
         let changes_dirty = config_dirty || permissions_dirty;
         let admin_busy = self.loading.admin || self.loading.roles_user.is_some();
-        let load_error = self.admin_tools.load_error.clone();
+        let load_error = self.admin.load_error.clone();
         let issues = self
             .staged_admin_config()
             .as_ref()
@@ -149,7 +149,7 @@ impl LabelloApp {
             self.request_admin_changes_save();
         }
         if discard {
-            self.admin_tools.confirm_discard = true;
+            self.admin.confirm_discard = true;
         }
         ui.add_space(theme::SPACE_2);
         if let Some(error) = load_error {
@@ -181,7 +181,7 @@ impl LabelloApp {
                     ui.spinner();
                     ui.label("Loading admin configuration...");
                 });
-            } else if self.admin_tools.load_error.is_none()
+            } else if self.admin.load_error.is_none()
                 && theme::empty_state(
                     ui,
                     "Admin config is not loaded",
@@ -224,11 +224,11 @@ impl LabelloApp {
                 let label = ui.label("Admin section");
                 egui::ComboBox::from_id_salt("admin-section")
                     .width(ui.available_width())
-                    .selected_text(self.admin_tools.section.label())
+                    .selected_text(self.admin.section.label())
                     .show_ui(ui, |ui| {
                         for section in AdminSection::ALL {
                             ui.selectable_value(
-                                &mut self.admin_tools.section,
+                                &mut self.admin.section,
                                 section,
                                 section.label(),
                             );
@@ -249,13 +249,13 @@ impl LabelloApp {
                         .add_sized(
                             [ui.available_width(), 44.0],
                             egui::Button::selectable(
-                                self.admin_tools.section == section,
+                                self.admin.section == section,
                                 section.label(),
                             ),
                         )
                         .clicked()
                     {
-                        self.admin_tools.section = section;
+                        self.admin.section = section;
                     }
                 }
             }
@@ -266,7 +266,7 @@ impl LabelloApp {
     }
 
     fn admin_section(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
-        match self.admin_tools.section {
+        match self.admin.section {
             AdminSection::Overview => self.admin_overview(ui),
             AdminSection::People => self.people_section(ui, layout),
             AdminSection::Images => self.admin_images(ui, layout),

@@ -60,7 +60,7 @@ impl LabelloApp {
                             ui.small(format!("Batch {}", progress.current_batch));
                         }
                     }
-                    if let Some(error) = &self.admin_tools.upload_error {
+                    if let Some(error) = &self.admin.upload_error {
                         theme::inline_message(
                             ui,
                             theme::Intent::Error,
@@ -106,12 +106,12 @@ impl LabelloApp {
             let search = ui
                 .add_sized(
                     [ui.available_width(), theme::COMPACT_TEXT_FIELD_HEIGHT],
-                    theme::singleline_text_edit(&mut self.admin_tools.image_search)
+                    theme::singleline_text_edit(&mut self.admin.image_search)
                         .hint_text("File name or path"),
                 )
                 .labelled_by(search_label.id);
             if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                self.admin_tools.image_query.page = 1;
+                self.admin.image_query.page = 1;
                 self.request_images();
             }
             let control_width = if compact_filters {
@@ -125,7 +125,7 @@ impl LabelloApp {
                     egui::ComboBox::from_id_salt("image-explorer-status")
                         .width(control_width)
                         .selected_text(
-                            self.admin_tools
+                            self.admin
                                 .image_status
                                 .as_ref()
                                 .map(task_status_label)
@@ -133,14 +133,14 @@ impl LabelloApp {
                         )
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut self.admin_tools.image_status,
+                                &mut self.admin.image_status,
                                 None,
                                 "Any status",
                             );
                             for status in task_statuses() {
                                 let label = task_status_label(&status);
                                 ui.selectable_value(
-                                    &mut self.admin_tools.image_status,
+                                    &mut self.admin.image_status,
                                     Some(status),
                                     label,
                                 );
@@ -161,7 +161,7 @@ impl LabelloApp {
                     egui::ComboBox::from_id_salt("image-explorer-task")
                         .width(control_width)
                         .selected_text(
-                            self.admin_tools
+                            self.admin
                                 .image_task
                                 .as_ref()
                                 .and_then(|task_id| {
@@ -173,10 +173,10 @@ impl LabelloApp {
                                 .unwrap_or("Any task"),
                         )
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.admin_tools.image_task, None, "Any task");
+                            ui.selectable_value(&mut self.admin.image_task, None, "Any task");
                             for task in &tasks {
                                 ui.selectable_value(
-                                    &mut self.admin_tools.image_task,
+                                    &mut self.admin.image_task,
                                     Some(task.task_id.clone()),
                                     &task.name,
                                 );
@@ -197,7 +197,7 @@ impl LabelloApp {
                     egui::ComboBox::from_id_salt("image-explorer-class")
                         .width(control_width)
                         .selected_text(
-                            self.admin_tools
+                            self.admin
                                 .image_class
                                 .as_ref()
                                 .and_then(|class_id| {
@@ -210,13 +210,13 @@ impl LabelloApp {
                         )
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut self.admin_tools.image_class,
+                                &mut self.admin.image_class,
                                 None,
                                 "Any class",
                             );
                             for class in &classes {
                                 ui.selectable_value(
-                                    &mut self.admin_tools.image_class,
+                                    &mut self.admin.image_class,
                                     Some(class.class_id.clone()),
                                     &class.name,
                                 );
@@ -228,15 +228,15 @@ impl LabelloApp {
                 if theme::primary_button(ui, controls_enabled, egui::Button::new("Apply filters"))
                     .clicked()
                 {
-                    self.admin_tools.image_query.page = 1;
+                    self.admin.image_query.page = 1;
                     self.request_images();
                 }
                 if theme::quiet_button(
                     ui,
                     controls_enabled,
                     egui::Button::new(
-                        if self.admin_tools.images_error.is_some()
-                            && self.admin_tools.images.is_none()
+                        if self.admin.images_error.is_some()
+                            && self.admin.images.is_none()
                         {
                             "Retry image load"
                         } else {
@@ -250,7 +250,7 @@ impl LabelloApp {
                 }
                 if self.loading.images {
                     ui.spinner();
-                    ui.small(if self.admin_tools.images.is_some() {
+                    ui.small(if self.admin.images.is_some() {
                         "Refreshing images..."
                     } else {
                         "Loading images..."
@@ -262,22 +262,22 @@ impl LabelloApp {
             } else {
                 ui.horizontal_wrapped(show_filters);
             }
-            if let Some(error) = &self.admin_tools.images_error {
+            if let Some(error) = &self.admin.images_error {
                 theme::inline_message(
                     ui,
-                    if self.admin_tools.images.is_some() {
+                    if self.admin.images.is_some() {
                         theme::Intent::Warning
                     } else {
                         theme::Intent::Error
                     },
-                    if self.admin_tools.images.is_some() {
+                    if self.admin.images.is_some() {
                         format!("Showing saved image results. Refresh failed: {error}")
                     } else {
                         format!("Could not load images: {error}")
                     },
                 );
             }
-            if let Some(page) = self.admin_tools.images.clone() {
+            if let Some(page) = self.admin.images.clone() {
                 let previous = page.page > 1;
                 let next = page.page < page.total_pages;
                 let current_page = page.page;
@@ -298,14 +298,14 @@ impl LabelloApp {
                         )
                         .clicked()
                     {
-                        self.admin_tools.image_query.page = current_page.saturating_sub(1);
+                        self.admin.image_query.page = current_page.saturating_sub(1);
                         self.request_images();
                     }
                     if ui
                         .add_enabled(next && controls_enabled, egui::Button::new("Next images"))
                         .clicked()
                     {
-                        self.admin_tools.image_query.page = current_page + 1;
+                        self.admin.image_query.page = current_page + 1;
                         self.request_images();
                     }
                 });
@@ -326,7 +326,7 @@ impl LabelloApp {
                         admin_image_card(ui, item);
                     }
                 }
-            } else if !self.loading.images && self.admin_tools.images_error.is_none() {
+            } else if !self.loading.images && self.admin.images_error.is_none() {
                 theme::empty_state(
                     ui,
                     "No image results",

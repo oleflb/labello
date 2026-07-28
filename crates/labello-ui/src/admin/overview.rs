@@ -50,7 +50,7 @@ impl LabelloApp {
         )
         .clicked()
         {
-            self.admin_tools.section = action_section;
+            self.admin.section = action_section;
         }
 
         if self.loading.uploading {
@@ -64,7 +64,7 @@ impl LabelloApp {
         }) {
             theme::inline_message(ui, theme::Intent::Success, notice);
         }
-        if let Some(error) = &self.admin_tools.upload_error {
+        if let Some(error) = &self.admin.upload_error {
             theme::inline_message(
                 ui,
                 theme::Intent::Error,

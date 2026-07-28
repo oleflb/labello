@@ -69,7 +69,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     assert!(
         harness
             .state()
-            .admin_tools
+            .admin
             .upload_error
             .as_deref()
             .is_some_and(|error| error.contains("browser build"))
@@ -129,7 +129,7 @@ fn admin_workflow_saves_ingests_and_handles_browser_only_folder_upload() {
     );
 
     click_application_menu_item(&mut harness, "Annotate");
-    step_until(&mut harness, 12, |app| app.current.is_some());
+    step_until(&mut harness, 12, |app| app.work.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
 }
 
@@ -140,7 +140,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     harness.set_size(egui::vec2(1300.0, 2400.0));
     harness.step();
     step_until(&mut harness, 12, |app| {
-        app.admin_tools.images.is_some() && app.admin_tools.snapshots_loaded
+        app.admin.images.is_some() && app.admin.snapshots_loaded
     });
     assert_eq!(api.counts().list_images, 1);
     assert_eq!(api.counts().list_snapshots, 1);
@@ -166,14 +166,14 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     assert!(harness.query_all_by_label("Pending 1").next().is_some());
     assert!(harness.query_all_by_label("person").next().is_some());
 
-    harness.state_mut().admin_tools.image_query.page_size = 1;
-    harness.state_mut().admin_tools.image_search = "png".to_string();
-    harness.state_mut().admin_tools.image_status = Some(TaskStatus::Pending);
-    harness.state_mut().admin_tools.image_task = Some(TaskId::from("bounding_box:person"));
-    harness.state_mut().admin_tools.image_class = Some(ClassId::from("person"));
+    harness.state_mut().admin.image_query.page_size = 1;
+    harness.state_mut().admin.image_search = "png".to_string();
+    harness.state_mut().admin.image_status = Some(TaskStatus::Pending);
+    harness.state_mut().admin.image_task = Some(TaskId::from("bounding_box:person"));
+    harness.state_mut().admin.image_class = Some(ClassId::from("person"));
     harness.state_mut().request_images();
     step_until(&mut harness, 8, |app| {
-        app.admin_tools
+        app.admin
             .images
             .as_ref()
             .is_some_and(|page| page.page_size == 1)
@@ -188,7 +188,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     click(&mut harness, "Next images");
     assert_eq!(api.counts().list_images, 3);
     step_until(&mut harness, 8, |app| {
-        app.admin_tools
+        app.admin
             .images
             .as_ref()
             .is_some_and(|page| page.page == 2)
@@ -217,7 +217,7 @@ fn admin_image_explorer_pages_and_snapshots_use_async_api_commands() {
     assert!(
         harness
             .state()
-            .admin_tools
+            .admin
             .snapshot_action_error
             .as_deref()
             .is_some_and(|error| error.contains("browser build"))
@@ -417,7 +417,7 @@ fn admin_people_directory_saves_roles_and_protects_the_last_admin() {
     step_until(&mut harness, 8, |app| {
         !app.loading.admin
             && app.loading.roles_user.is_none()
-            && app.admin_tools.pending_role_saves.is_empty()
+            && app.admin.pending_role_saves.is_empty()
     });
     assert!(
         harness
@@ -506,7 +506,7 @@ fn failed_global_admin_save_preserves_config_and_permission_edits() {
 
     assert_eq!(api.counts().update_dataset_config, 1);
     assert!(harness.state().loading.roles_user.is_none());
-    assert!(harness.state().admin_tools.pending_role_saves.is_empty());
+    assert!(harness.state().admin.pending_role_saves.is_empty());
     assert!(harness.state().admin_changes_dirty());
     assert_eq!(
         harness.state().datasets.admin_config.as_ref().unwrap().name,
@@ -559,7 +559,7 @@ fn global_admin_save_sequences_configuration_and_permissions() {
     step_until(&mut harness, 12, |app| {
         !app.loading.admin
             && app.loading.roles_user.is_none()
-            && app.admin_tools.pending_role_saves.is_empty()
+            && app.admin.pending_role_saves.is_empty()
     });
 
     assert_eq!(api.counts().update_dataset_config, 1);
@@ -603,7 +603,7 @@ fn failed_permission_sequence_keeps_remaining_edits_staged() {
 
     click_accesskit_button(&mut harness, "Save Admin changes");
     step_until(&mut harness, 12, |app| {
-        app.loading.roles_user.is_none() && app.admin_tools.pending_role_saves.is_empty()
+        app.loading.roles_user.is_none() && app.admin.pending_role_saves.is_empty()
     });
 
     assert_eq!(api.counts().set_dataset_roles, 2);
@@ -662,7 +662,7 @@ fn admin_staged_changes_can_be_discarded_without_a_server_reload() {
     harness.step();
 
     select_admin_section(&mut harness, "Schema");
-    assert_eq!(harness.state().admin_tools.section, AdminSection::Schema);
+    assert_eq!(harness.state().admin.section, AdminSection::Schema);
     select_admin_section(&mut harness, "Overview");
     assert_eq!(
         harness.state().datasets.admin_config.as_ref().unwrap().name,
@@ -839,7 +839,7 @@ fn failed_admin_navigation_stays_in_admin_with_page_retry() {
     app.process_messages(&egui::Context::default());
     assert_eq!(app.view, AppView::Admin);
     assert_eq!(
-        app.admin_tools.load_error.as_deref(),
+        app.admin.load_error.as_deref(),
         Some("admin service unavailable")
     );
 
@@ -864,7 +864,7 @@ fn entering_admin_clears_the_released_assignment() {
     release_and_switch(&mut harness);
     step_until(&mut harness, 12, |app| app.view == AppView::Admin);
 
-    assert!(harness.state().assignment.is_none());
+    assert!(harness.state().work.assignment.is_none());
     click(&mut harness, "Annotate");
     assert!(
         harness

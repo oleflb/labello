@@ -29,8 +29,8 @@ impl LabelloApp {
                     ui,
                     !self.loading.snapshots && !self.loading.creating_snapshot,
                     egui::Button::new(
-                        if self.admin_tools.snapshots_error.is_some()
-                            && !self.admin_tools.snapshots_loaded
+                        if self.admin.snapshots_error.is_some()
+                            && !self.admin.snapshots_loaded
                         {
                             "Retry backup load"
                         } else {
@@ -45,8 +45,8 @@ impl LabelloApp {
                 if self.loading.snapshots {
                     ui.spinner();
                     ui.small(
-                        if self.admin_tools.snapshots_loaded
-                            || !self.admin_tools.snapshots.is_empty()
+                        if self.admin.snapshots_loaded
+                            || !self.admin.snapshots.is_empty()
                         {
                             "Refreshing backups..."
                         } else {
@@ -56,24 +56,24 @@ impl LabelloApp {
                 }
             });
 
-            if let Some(error) = &self.admin_tools.snapshots_error {
+            if let Some(error) = &self.admin.snapshots_error {
                 theme::inline_message(
                     ui,
-                    if self.admin_tools.snapshots_loaded || !self.admin_tools.snapshots.is_empty() {
+                    if self.admin.snapshots_loaded || !self.admin.snapshots.is_empty() {
                         theme::Intent::Warning
                     } else {
                         theme::Intent::Error
                     },
-                    if self.admin_tools.snapshots_loaded {
+                    if self.admin.snapshots_loaded {
                         format!("Showing the last loaded backups. Refresh failed: {error}")
-                    } else if !self.admin_tools.snapshots.is_empty() {
+                    } else if !self.admin.snapshots.is_empty() {
                         format!("Showing newly created backups. Catalog refresh failed: {error}")
                     } else {
                         format!("Could not load backups: {error}")
                     },
                 );
             }
-            if let Some(error) = &self.admin_tools.snapshot_action_error {
+            if let Some(error) = &self.admin.snapshot_action_error {
                 theme::inline_message(
                     ui,
                     theme::Intent::Error,
@@ -81,9 +81,9 @@ impl LabelloApp {
                 );
             }
 
-            if !self.admin_tools.snapshots_loaded
+            if !self.admin.snapshots_loaded
                 && !self.loading.snapshots
-                && self.admin_tools.snapshots_error.is_none()
+                && self.admin.snapshots_error.is_none()
             {
                 theme::empty_state(
                     ui,
@@ -91,10 +91,10 @@ impl LabelloApp {
                     "Refresh to load the available dataset snapshots.",
                     None,
                 );
-            } else if self.admin_tools.snapshots.is_empty()
-                && self.admin_tools.snapshots_loaded
+            } else if self.admin.snapshots.is_empty()
+                && self.admin.snapshots_loaded
                 && !self.loading.snapshots
-                && self.admin_tools.snapshots_error.is_none()
+                && self.admin.snapshots_error.is_none()
             {
                 theme::empty_state(
                     ui,
@@ -104,7 +104,7 @@ impl LabelloApp {
                 );
             }
 
-            let snapshots = self.admin_tools.snapshots.clone();
+            let snapshots = self.admin.snapshots.clone();
             let download = if snapshots.is_empty() {
                 None
             } else if layout == LayoutMode::Wide {

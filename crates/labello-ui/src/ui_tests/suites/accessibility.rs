@@ -25,7 +25,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
                 let mut app =
                     inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx);
                 if width < 600.0 {
-                    app.drawer = Some(Drawer::Inspector);
+                    app.work.drawer = Some(Drawer::Inspector);
                 }
                 app
             });
@@ -142,7 +142,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     );
     no_guides.state_mut().runtime.api = Some(no_guides_api.clone());
     click_accesskit_button(&mut no_guides, "Confirm no guides & finish");
-    step_until(&mut no_guides, 8, |app| !app.migration.busy);
+    step_until(&mut no_guides, 8, |app| !app.work.migration.busy);
     assert_eq!(no_guides_api.counts().migration_commands, 1);
 
     let mut deleted = Harness::builder()
@@ -150,7 +150,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         .build_eframe(|ctx| {
             let mut app =
                 inspector_presets::build(InspectorPreset::MigrationGuideDeleted, &ctx.egui_ctx);
-            app.drawer = Some(Drawer::Inspector);
+            app.work.drawer = Some(Drawer::Inspector);
             app
         });
     deleted.step();
@@ -325,7 +325,7 @@ fn long_status_messages_keep_their_complete_accessible_text() {
 
     harness.key_press(egui::Key::Escape);
     harness.state_mut().runtime.error = None;
-    harness.state_mut().save_status = SaveStatus::Dirty;
+    harness.state_mut().work.save_status = SaveStatus::Dirty;
     let notice = "Dataset catalog refreshed";
     harness.state_mut().runtime.notice = Some(notice.to_string());
     harness.step();

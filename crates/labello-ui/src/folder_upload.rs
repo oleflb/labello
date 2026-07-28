@@ -38,7 +38,7 @@ impl LabelloApp {
         }
         self.loading.uploading = true;
         self.loading.upload_progress = None;
-        self.admin_tools.upload_error = None;
+        self.admin.upload_error = None;
         let root = upload_root();
         let operation_id = self.next_operation();
         let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
@@ -47,7 +47,7 @@ impl LabelloApp {
             Err(error) => {
                 self.loading.uploading = false;
                 self.loading.upload_progress = None;
-                self.admin_tools.upload_error = Some(error.clone());
+                self.admin.upload_error = Some(error.clone());
                 self.runtime.error = Some(error);
             }
         }
