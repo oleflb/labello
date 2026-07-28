@@ -194,6 +194,24 @@ mod tests {
     }
 
     #[test]
+    fn commit_rejects_a_stale_plan_while_a_mapping_update_is_pending() {
+        let mut control = control(client::ImportProfile::CocoInstancesGtV1);
+        control.pending_plan_request =
+            Some(serde_json::from_value(valid_mapping_json()).unwrap());
+
+        let error = ensure_plan_update_settled(&control).unwrap_err();
+        assert!(matches!(
+            error,
+            ApiError::Conflict(message)
+                if message
+                    == "an import plan update is still pending; retry the mapping update before committing"
+        ));
+
+        control.pending_plan_request = None;
+        assert!(ensure_plan_update_settled(&control).is_ok());
+    }
+
+    #[test]
     fn coco_selection_preserves_identity_and_rejects_unsupported_inputs() {
         let job = job(storage::ImportProfile::CocoKeypointsGtV1);
         let control = control(client::ImportProfile::CocoKeypointsGtV1);
@@ -483,7 +501,7 @@ mod tests {
                         "keypoints": [{"name": "center", "required": false}],
                         "edges": [], "allowHidden": false, "allowAbsent": true
                     },
-                    "review": {"requiredReviews": 0, "workflow": "none", "allowReviewerCorrections": false, "agreementThreshold": null},
+                    "review": {"requiredReviews": 1, "workflow": "approval", "allowReviewerCorrections": false, "agreementThreshold": null},
                     "prelabelConfigIds": [],
                     "manualBoxGuideMigration": {
                         "guideTaskId": "person-box", "cardinality": "exactly_one",

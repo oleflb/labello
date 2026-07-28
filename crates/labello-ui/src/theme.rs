@@ -453,17 +453,40 @@ fn metric_inner(ui: &mut Ui, label: &str, value: String, compact: bool) {
     let response = inset_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         if compact {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(TEXT_MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(value)
-                            .size(SECTION_HEADING_SIZE)
-                            .strong()
-                            .color(TEXT),
-                    );
+            let label_text = RichText::new(label).color(TEXT_MUTED);
+            let value_text = RichText::new(value)
+                .size(SECTION_HEADING_SIZE)
+                .strong()
+                .color(TEXT);
+            let label_width = egui::WidgetText::from(label_text.clone())
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    TextStyle::Body,
+                )
+                .size()
+                .x;
+            let value_width = egui::WidgetText::from(value_text.clone())
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    TextStyle::Body,
+                )
+                .size()
+                .x;
+            if label_width + ui.spacing().item_spacing.x + value_width <= ui.available_width() {
+                ui.horizontal(|ui| {
+                    ui.label(label_text);
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(value_text);
+                    });
                 });
-            });
+            } else {
+                ui.label(label_text);
+                ui.add(egui::Label::new(value_text).wrap().halign(Align::RIGHT));
+            }
         } else {
             ui.set_min_height(72.0);
             ui.label(RichText::new(label).color(TEXT_MUTED));
@@ -676,6 +699,22 @@ mod tests {
         assert!(adjudicator.top() >= annotator.bottom());
         assert!(annotator.height() <= 32.0);
         assert!(adjudicator.height() <= 32.0);
+    }
+
+    #[test]
+    fn compact_metrics_wrap_long_values_without_overlapping_labels() {
+        let harness = Harness::builder()
+            .with_size(Vec2::new(289.0, 120.0))
+            .build_ui(|ui| {
+                compact_metric(ui, "Review target", "1 of 2 | Skeleton annotated");
+            });
+
+        let label = harness.get_by_label("Review target").rect();
+        let value = harness.get_by_label("1 of 2 | Skeleton annotated").rect();
+        assert!(
+            !label.intersects(value),
+            "compact metric label and value overlap: label={label:?} value={value:?}"
+        );
     }
 
     #[test]

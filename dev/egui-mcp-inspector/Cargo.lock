@@ -1927,6 +1927,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "url",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

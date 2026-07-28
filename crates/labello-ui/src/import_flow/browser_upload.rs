@@ -1,5 +1,8 @@
 pub(crate) fn import_key(action: &str, request_id: u64) -> String {
-    format!("ui-{action}-{request_id}")
+    format!(
+        "ui-{action}-{}-{request_id}",
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 #[cfg(target_arch = "wasm32")]

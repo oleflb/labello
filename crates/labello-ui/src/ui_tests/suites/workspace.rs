@@ -410,6 +410,12 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
             .is_none(),
         "background refreshes should keep the resolved workflow state stable"
     );
+    assert!(
+        harness
+            .query_by_label("Checking assignment availability")
+            .is_none(),
+        "a background refresh should not replace the resolved canvas state"
+    );
     harness.state_mut().work.availability.loading = false;
 
     let mut skeleton = harness.state().work.tasks[0].clone();
@@ -459,6 +465,61 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
         !app.work.availability.loading && app.work.availability.error.is_none()
     });
     assert!(api.counts().assignment_availability >= 3);
+}
+
+#[test]
+fn empty_review_workspace_distinguishes_availability_loading_and_failure() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().clear_current_image();
+    harness.state_mut().view = AppView::Review;
+    harness.state_mut().runtime.error = None;
+    harness.state_mut().runtime.notice = None;
+    let dataset_id = harness.state().config.dataset_id.clone();
+    harness.state_mut().work.availability.dataset_id = Some(dataset_id);
+    harness.state_mut().work.availability.kind = Some(AssignmentKind::Review);
+    harness.state_mut().work.availability.tasks.clear();
+    harness.state_mut().work.availability.resolved = false;
+    harness.state_mut().work.availability.loading = true;
+    harness.state_mut().work.availability.error = None;
+    harness.step();
+
+    assert!(
+        harness
+            .query_by_label("Checking assignment availability")
+            .is_some()
+    );
+    assert!(harness.query_by_label("No review assignments").is_none());
+
+    harness.state_mut().work.availability.loading = false;
+    harness.state_mut().work.availability.error = Some("availability failed".to_string());
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Assignment availability unavailable")
+            .is_some()
+    );
+    assert!(harness.query_by_label("No review assignments").is_none());
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Retry availability")
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn changing_work_views_clears_the_previous_workflow_notice() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    app.runtime.notice = Some("No annotation work is currently available.".to_string());
+
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Review));
+
+    assert_eq!(app.view, AppView::Review);
+    assert!(app.runtime.notice.is_none());
 }
 
 #[test]
@@ -1422,7 +1483,7 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
 }
 
 #[test]
-fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
+fn dataset_summary_roles_survive_sanitized_metadata_and_show_supported_tabs() {
     let api = Rc::new(SpyApi::new());
     api.sanitize_metadata_roles();
     let mut harness = loaded_work_harness(api);
@@ -1440,12 +1501,86 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_all_tabs() {
     harness.set_size(egui::vec2(600.0, 800.0));
     harness.step();
     click(&mut harness, "More application actions");
-    for label in ["Annotate", "Review", "Adjudicate", "Admin", "Statistics"] {
+    for label in ["Annotate", "Review", "Admin", "Statistics"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
             "missing authorized {label} destination"
         );
     }
+    assert!(harness.query_all_by_label("Adjudicate").next().is_none());
+}
+
+#[test]
+fn adjudication_is_absent_from_navigation_and_rejected_programmatically() {
+    let api = Rc::new(SpyApi::new());
+    let mut setup = live_harness(api.clone());
+    step_until(&mut setup, 8, |app| app.datasets.summaries.len() == 1);
+    assert!(
+        setup
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Adjudicate Demo Dataset"
+            )
+            .is_none()
+    );
+
+    let mut harness = loaded_work_harness(api);
+    assert!(
+        harness
+            .state()
+            .primary_navigation_destinations()
+            .iter()
+            .all(|(view, _)| *view != AppView::Adjudicate)
+    );
+    let original_view = harness.state().view;
+    harness.state_mut().open_view(AppView::Adjudicate);
+    assert_eq!(harness.state().view, original_view);
+    assert_eq!(
+        harness.state().runtime.error.as_deref(),
+        Some(crate::app::ADJUDICATION_UNAVAILABLE_MESSAGE)
+    );
+}
+
+#[test]
+fn restored_adjudication_workspace_is_rejected_with_the_operational_message() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api);
+    app.datasets.summaries = vec![DatasetSummary {
+        dataset_id: DatasetId::from("demo"),
+        name: "Demo Dataset".to_string(),
+        roles: vec![DatasetRole::Adjudicator],
+        total_images: 1,
+    }];
+    app.runtime.persistence.preference = Some(WorkspacePreference {
+        version: 2,
+        dataset_id: DatasetId::from("demo"),
+        view: StoredView::Adjudicate,
+        task_id: None,
+        assignment_id: None,
+        assignment_image_id: None,
+        assignment_kind: None,
+        drawer: None,
+        workflow_panel_collapsed: false,
+        inspector_panel_collapsed: false,
+        show_settings: false,
+        show_tutorial: false,
+        selected_annotation: None,
+        canvas: StoredCanvasTransform {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        },
+        availability: None,
+    });
+
+    app.reopen_previous_workspace();
+
+    assert_eq!(
+        app.runtime.notice.as_deref(),
+        Some(crate::app::ADJUDICATION_UNAVAILABLE_MESSAGE)
+    );
+    assert!(app.datasets.requested_view.is_none());
+    assert_eq!(app.view, AppView::Setup);
 }
 
 #[test]
@@ -1560,7 +1695,7 @@ fn review_correction_drawer_and_actions_stay_reachable() {
 }
 
 #[test]
-fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
+fn work_workflow_draws_saves_submits_and_reviews() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     assert!(harness.state().work.current.is_some());
@@ -1653,23 +1788,6 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
             .as_ref()
             .is_some_and(|assignment| api.has_active_assignment(&assignment.assignment_id))
     });
-
-    click_application_menu_item(&mut harness, "Adjudicate");
-    assert!(
-        harness
-            .query_by_label("Switch active assignment?")
-            .is_some()
-    );
-    release_and_switch(&mut harness);
-    step_until(&mut harness, 10, |app| {
-        app.view == AppView::Adjudicate && app.work.current.is_some() && !app.loading.image
-    });
-    assert!(harness.query_by_label("Accept all annotations").is_some());
-    assert!(harness.query_by_label("Send back for correction").is_some());
-    assert!(harness.query_by_label("Approve object").is_none());
-    click(&mut harness, "Accept all annotations");
-    step_until(&mut harness, 10, |app| !app.loading.saving);
-    assert_eq!(api.counts().record_adjudication, 1);
 
     let claims_before_arrow = api.counts().assign_next_image;
     harness.key_press(egui::Key::ArrowRight);

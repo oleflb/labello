@@ -115,6 +115,16 @@ impl LabelloApp {
                 }
             }
         } else {
+            let availability_matches = self.assignment_kind().is_some_and(|kind| {
+                self.work.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+                    && self.work.availability.kind.as_ref() == Some(&kind)
+            });
+            let checking_availability = availability_matches
+                && self.work.availability.loading
+                && !self.work.availability.resolved;
+            let availability_error = availability_matches
+                .then(|| self.work.availability.error.clone())
+                .flatten();
             ui.add_space(((ui.available_height() - 160.0) * 0.5).max(0.0));
             let width = ui.available_width().min(520.0);
             let inset = ((ui.available_width() - width) * 0.5).max(0.0);
@@ -162,6 +172,29 @@ impl LabelloApp {
                             Some(egui::Button::new(retry).shortcut_text(shortcut)),
                         ) {
                             self.retry_assignment_load();
+                        }
+                    } else if checking_availability {
+                        theme::inset_frame().show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    RichText::new("Checking assignment availability").strong(),
+                                );
+                            });
+                            ui.label(
+                                RichText::new("Looking for work in the selected workflows.")
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        });
+                    } else if let Some(error) = availability_error {
+                        if theme::empty_state(
+                            ui,
+                            "Assignment availability unavailable",
+                            &error,
+                            Some(egui::Button::new("Retry availability")),
+                        ) {
+                            self.request_assignment_availability();
                         }
                     } else {
                         let title = match self.view {

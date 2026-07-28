@@ -192,7 +192,7 @@ fn dataset_list_success_only_clears_its_own_error() {
 }
 
 #[test]
-fn setup_recommends_a_single_continue_work_action() {
+fn setup_recommendation_keeps_explicit_dataset_actions() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
@@ -204,11 +204,14 @@ fn setup_recommends_a_single_continue_work_action() {
     let dataset = harness.get_by_label("Dataset card Demo Dataset").rect();
     assert!(recommended.bottom() < all_datasets.top());
     assert!(all_datasets.bottom() < dataset.top());
-    assert!(
+    assert_eq!(
         harness
-            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate Demo Dataset",)
-            .next()
-            .is_none()
+            .query_all_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Annotate Demo Dataset",
+            )
+            .count(),
+        1
     );
     assert_eq!(
         harness
@@ -219,7 +222,7 @@ fn setup_recommends_a_single_continue_work_action() {
             .count(),
         1
     );
-    click(&mut harness, "Continue with Demo Dataset");
+    click(&mut harness, "Annotate Demo Dataset");
     step_until(&mut harness, 12, |app| app.work.current.is_some());
     assert_eq!(harness.state().view, AppView::Annotate);
 }
@@ -242,6 +245,27 @@ fn setup_does_not_recommend_a_dataset_without_an_available_destination() {
             .query_by_label("Dataset card Demo Dataset")
             .is_some()
     );
+}
+
+#[test]
+fn adjudicator_only_dataset_recommends_statistics() {
+    let api = Rc::new(SpyApi::new());
+    api.set_summary_roles(vec![DatasetRole::Adjudicator]);
+    let mut harness = live_harness(api);
+    step_until(&mut harness, 8, |app| !app.datasets.summaries.is_empty());
+
+    assert!(
+        harness
+            .query_by_label("View statistics for this dataset.")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Adjudicate Demo Dataset")
+            .is_none()
+    );
+    click(&mut harness, "Continue with Demo Dataset");
+    step_until(&mut harness, 12, |app| app.view == AppView::Stats);
 }
 
 #[test]

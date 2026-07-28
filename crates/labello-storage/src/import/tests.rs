@@ -943,6 +943,22 @@ async fn manual_box_guide_builds_spatial_targets_without_fabricated_skeletons() 
         .await
         .unwrap();
     let repository = DatasetRepository::new(result.dataset_path);
+    let metadata = repository.load_dataset_config().await.unwrap();
+    let guide_task = metadata
+        .tasks
+        .iter()
+        .find(|task| task.annotation_type == AnnotationType::BoundingBox)
+        .unwrap();
+    let migration_task = metadata
+        .tasks
+        .iter()
+        .find(|task| task.manual_box_guide_migration.is_some())
+        .unwrap();
+    assert_eq!(guide_task.review.workflow, ReviewWorkflow::None);
+    assert_eq!(guide_task.review.required_reviews, 0);
+    assert_eq!(migration_task.review.workflow, ReviewWorkflow::Approval);
+    assert_eq!(migration_task.review.required_reviews, 1);
+    assert!(!migration_task.review.allow_reviewer_corrections);
     let image = repository
         .load_images_index()
         .await
@@ -952,6 +968,10 @@ async fn manual_box_guide_builds_spatial_targets_without_fabricated_skeletons() 
         .next()
         .unwrap();
     let state = repository.load_image_state(&image.image_id).await.unwrap();
+    assert_eq!(
+        state.task_states[&migration_task.task_id].status,
+        labello_domain::TaskStatus::Pending
+    );
     let target_set = state.migration_target_sets.values().next().unwrap();
     assert_eq!(target_set.targets.len(), 2);
     assert_eq!(target_set.targets[0].sequence_index, 0);
@@ -1518,6 +1538,18 @@ async fn multiple_manual_categories_persist_independent_target_sets_and_stats() 
         .await
         .unwrap();
     let repository = DatasetRepository::new(result.dataset_path);
+    let metadata = repository.load_dataset_config().await.unwrap();
+    for task_id in ["person-box", "car-box"] {
+        let task = metadata.task(&TaskId::from(task_id)).unwrap();
+        assert_eq!(task.review.workflow, ReviewWorkflow::None);
+        assert_eq!(task.review.required_reviews, 0);
+    }
+    for task_id in ["person-skeleton", "car-skeleton"] {
+        let task = metadata.task(&TaskId::from(task_id)).unwrap();
+        assert_eq!(task.review.workflow, ReviewWorkflow::Approval);
+        assert_eq!(task.review.required_reviews, 1);
+        assert!(!task.review.allow_reviewer_corrections);
+    }
     let image = repository
         .load_images_index()
         .await

@@ -1096,6 +1096,17 @@ async fn assignment_availability_is_batched_authenticated_and_advisory() {
         BTreeSet::from(["review", "adjudication"]),
         "one scan should return the other authorized work-view caches"
     );
+    let adjudication = get_assignment_availability(&app, "admin", "adjudication").await;
+    assert_eq!(adjudication["kind"], "adjudication");
+    assert_eq!(
+        adjudication["tasks"]["bounding_box:pixel"],
+        serde_json::Value::Bool(false)
+    );
+    assert!(
+        claim_assignment(&app, "admin", "adjudication")
+            .await
+            .is_null()
+    );
 
     let competing = claim_assignment(&app, "other_annotator", "annotation").await;
     assert!(!competing.is_null());

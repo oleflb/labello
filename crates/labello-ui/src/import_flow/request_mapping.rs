@@ -59,11 +59,12 @@ impl LabelloApp {
                 mapping.source_category_key = category.source_category_key.trim().to_string();
                 mapping.workflow_intent = category.workflow_intent;
                 mapping.task.class_ids = vec![class_id.clone()];
-                mapping.task.review = review_config(category.workflow_intent);
                 match mapping.task.annotation_type {
                     AnnotationType::BoundingBox => {
                         mapping.task.task_id = TaskId::from(category.bounding_box_task_id.trim());
                         mapping.task.name = category.bounding_box_task_name.trim().to_string();
+                        mapping.task.review =
+                            review_config_for_task(category.workflow_intent, false);
                     }
                     AnnotationType::Skeleton => {
                         mapping.task.task_id = TaskId::from(category.skeleton_task_id.trim());
@@ -79,6 +80,8 @@ impl LabelloApp {
                                 allow_exclusion: true,
                                 sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
                             });
+                        mapping.task.review =
+                            review_config_for_task(category.workflow_intent, manual);
                     }
                 }
                 task_mappings.push(mapping);

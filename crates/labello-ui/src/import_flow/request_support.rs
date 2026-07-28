@@ -7,6 +7,10 @@ fn mapped_task(
     manual_box_guide_migration: Option<labello_domain::ManualBoxGuideMigration>,
     workflow_intent: ImportWorkflowIntent,
 ) -> TaskDefinition {
+    let review = review_config_for_task(
+        workflow_intent,
+        manual_box_guide_migration.is_some(),
+    );
     TaskDefinition {
         task_id,
         name: name.to_string(),
@@ -19,11 +23,26 @@ fn mapped_task(
             example_images: Vec::new(),
         },
         skeleton,
-        review: review_config(workflow_intent),
+        review,
         prelabel_config_ids: Vec::new(),
         manual_box_guide_migration,
         enabled: true,
     }
+}
+
+fn review_config_for_task(
+    intent: ImportWorkflowIntent,
+    manual_box_guide_migration: bool,
+) -> ReviewConfig {
+    if manual_box_guide_migration {
+        return ReviewConfig {
+            required_reviews: 1,
+            workflow: labello_domain::ReviewWorkflow::Approval,
+            allow_reviewer_corrections: false,
+            agreement_threshold: None,
+        };
+    }
+    review_config(intent)
 }
 
 fn review_config(intent: ImportWorkflowIntent) -> ReviewConfig {

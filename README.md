@@ -316,7 +316,7 @@ See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
 - Browser offline bundle and synchronization APIs are not wired into the UI.
 - Independent multi-annotator agreement and automatic disagreement routing are
-  not operational.
+  not operational, so the Adjudicate UI is disabled.
 - Prelabel configuration exists, but model execution currently returns
   placeholder suggestions.
 - There is no supported native desktop client or browser end-to-end test suite;

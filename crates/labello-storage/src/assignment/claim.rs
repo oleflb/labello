@@ -1,6 +1,8 @@
 use super::migration::{has_migration_final_review_by_user, migration_final_approval_count};
 use super::*;
 
+const MAX_AVAILABILITY_SCAN_WORKERS: usize = 32;
+
 fn assignment_kind_cache_key(kind: &AssignmentKind) -> &'static str {
     match kind {
         AssignmentKind::Annotation => "annotation",
@@ -107,7 +109,7 @@ impl DatasetRepository {
         user_id: &UserId,
         kinds: &[AssignmentKind],
     ) -> StorageResult<Vec<(AssignmentKind, std::collections::BTreeMap<TaskId, bool>)>> {
-        let metadata = self.load_dataset().await?;
+        let metadata = std::sync::Arc::new(self.load_dataset().await?);
 
         let mut work = Vec::with_capacity(kinds.len());
         for kind in kinds {
@@ -122,43 +124,101 @@ impl DatasetRepository {
             work.push((kind.clone(), availability, unresolved));
         }
 
-        for image_id in metadata.images.keys() {
-            if work.iter().all(|(_, _, unresolved)| unresolved.is_empty()) {
-                break;
-            }
-            let lock = self.image_lock(image_id);
-            let _guard = lock.lock().await;
-            let state = self.load_image_state(image_id).await?;
-            let now = labello_domain::now();
-            for (kind, availability, unresolved) in &mut work {
-                let kind = kind.clone();
-                let pending = unresolved.clone();
-                let mut available = Vec::new();
-                for task in metadata
-                    .tasks
-                    .iter()
-                    .filter(|task| pending.contains(&task.task_id))
-                {
-                    let status = effective_assignment_status(&state, &task.task_id, &kind, now);
-                    if self
-                        .image_accepts_assignment(
-                            image_id, &state, task, user_id, &kind, &status, now,
-                        )
-                        .await?
-                    {
-                        available.push(task.task_id.clone());
-                    }
-                }
-                for task_id in available {
+        if work.iter().all(|(_, _, unresolved)| unresolved.is_empty()) {
+            return Ok(work
+                .into_iter()
+                .map(|(kind, availability, _)| (kind, availability))
+                .collect());
+        }
+
+        let eligible = std::sync::Arc::new(
+            work.iter()
+                .filter(|(_, _, unresolved)| !unresolved.is_empty())
+                .map(|(kind, _, unresolved)| (kind.clone(), unresolved.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let mut image_ids = metadata.images.keys().cloned();
+        let mut workers = tokio::task::JoinSet::new();
+        for image_id in image_ids.by_ref().take(MAX_AVAILABILITY_SCAN_WORKERS) {
+            workers.spawn(self.availability_scan_worker(
+                image_id,
+                metadata.clone(),
+                eligible.clone(),
+                user_id.clone(),
+            ));
+        }
+
+        while let Some(result) = workers.join_next().await {
+            let available = result.map_err(|error| {
+                StorageError::BackgroundTask(format!(
+                    "assignment availability worker failed: {error}"
+                ))
+            })??;
+            for (kind, task_ids) in available {
+                let (_, availability, unresolved) = work
+                    .iter_mut()
+                    .find(|(candidate, _, _)| *candidate == kind)
+                    .expect("availability worker must return a requested kind");
+                for task_id in task_ids {
                     unresolved.remove(&task_id);
                     availability.insert(task_id, true);
                 }
+            }
+            if work.iter().all(|(_, _, unresolved)| unresolved.is_empty()) {
+                workers.abort_all();
+                break;
+            }
+            if let Some(image_id) = image_ids.next() {
+                workers.spawn(self.availability_scan_worker(
+                    image_id,
+                    metadata.clone(),
+                    eligible.clone(),
+                    user_id.clone(),
+                ));
             }
         }
         Ok(work
             .into_iter()
             .map(|(kind, availability, _)| (kind, availability))
             .collect())
+    }
+
+    fn availability_scan_worker(
+        &self,
+        image_id: ImageId,
+        metadata: std::sync::Arc<DatasetMetadata>,
+        eligible: std::sync::Arc<Vec<(AssignmentKind, std::collections::BTreeSet<TaskId>)>>,
+        user_id: UserId,
+    ) -> impl Future<Output = StorageResult<Vec<(AssignmentKind, Vec<TaskId>)>>> + Send + 'static
+    {
+        let repository = self.clone();
+        async move {
+            let lock = repository.image_lock(&image_id);
+            let _guard = lock.lock().await;
+            let state = repository.load_image_state(&image_id).await?;
+            let now = labello_domain::now();
+            let mut available_by_kind = Vec::with_capacity(eligible.len());
+            for (kind, task_ids) in eligible.iter() {
+                let mut available = Vec::new();
+                for task in metadata
+                    .tasks
+                    .iter()
+                    .filter(|task| task_ids.contains(&task.task_id))
+                {
+                    let status = effective_assignment_status(&state, &task.task_id, kind, now);
+                    if repository
+                        .image_accepts_assignment(
+                            &image_id, &state, task, &user_id, kind, &status, now,
+                        )
+                        .await?
+                    {
+                        available.push(task.task_id.clone());
+                    }
+                }
+                available_by_kind.push((kind.clone(), available));
+            }
+            Ok(available_by_kind)
+        }
     }
 
     /// Return an exact still-active assignment without renewing it. Browser
@@ -355,6 +415,9 @@ impl DatasetRepository {
         if !task.enabled {
             return Ok(false);
         }
+        if *kind == AssignmentKind::Adjudication {
+            return Ok(false);
+        }
         if task.review.workflow == ReviewWorkflow::IndependentAgreement {
             return Err(StorageError::InvalidAssignment(format!(
                 "independent agreement workflow is not implemented for task {}",
@@ -399,6 +462,15 @@ impl DatasetRepository {
         if *kind == AssignmentKind::Annotation && !state.assignment_eligible(task_id) {
             return Ok(false);
         }
+        if active_assignment_for_user(&state.assignments, task_id, user_id, kind, now).is_some() {
+            return Ok(true);
+        }
+        if has_conflicting_assignment(&state.assignments, task_id, user_id, kind, now) {
+            return Ok(false);
+        }
+        if !status_matches_kind(status, kind) {
+            return Ok(false);
+        }
         if *kind == AssignmentKind::Review {
             let already_final = if task.manual_box_guide_migration.is_some() {
                 let events = self.load_events(image_id).await?;
@@ -414,13 +486,7 @@ impl DatasetRepository {
                 return Ok(false);
             }
         }
-        if active_assignment_for_user(&state.assignments, task_id, user_id, kind, now).is_some() {
-            return Ok(true);
-        }
-        if has_conflicting_assignment(&state.assignments, task_id, user_id, kind, now) {
-            return Ok(false);
-        }
-        Ok(status_matches_kind(status, kind))
+        Ok(true)
     }
 
     async fn task_is_overrepresented(&self, selected_task_id: &TaskId) -> StorageResult<bool> {

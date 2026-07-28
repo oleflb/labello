@@ -33,6 +33,8 @@ pub(crate) use crate::live_protocol::{
 
 pub const IMAGE_QUEUE_SIZE: usize = 2;
 pub(crate) const ASSIGNMENT_AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
+pub(crate) const ADJUDICATION_UNAVAILABLE_MESSAGE: &str =
+    "Adjudication is unavailable until independent-agreement routing is implemented.";
 const MAX_HISTORY_OPERATIONS: usize = 256;
 const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 

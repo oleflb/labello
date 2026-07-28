@@ -856,15 +856,19 @@ fn validate_workflow(
                     })
         }
     };
-    let intent_valid = match intent {
-        client::ImportWorkflowIntent::AuthoritativeGroundTruth => {
-            review.workflow == ReviewWorkflow::None
-        }
-        client::ImportWorkflowIntent::RequireApproval => {
-            review.workflow == ReviewWorkflow::Approval
-        }
-        client::ImportWorkflowIntent::SeedFutureAnnotation => {
-            review.workflow != ReviewWorkflow::None
+    let intent_valid = if task.manual_box_guide_migration.is_some() {
+        review.workflow == ReviewWorkflow::Approval
+    } else {
+        match intent {
+            client::ImportWorkflowIntent::AuthoritativeGroundTruth => {
+                review.workflow == ReviewWorkflow::None
+            }
+            client::ImportWorkflowIntent::RequireApproval => {
+                review.workflow == ReviewWorkflow::Approval
+            }
+            client::ImportWorkflowIntent::SeedFutureAnnotation => {
+                review.workflow != ReviewWorkflow::None
+            }
         }
     };
     if !structurally_valid || !intent_valid {

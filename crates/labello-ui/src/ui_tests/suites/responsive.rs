@@ -503,7 +503,6 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
         "Setup",
         "Annotate",
         "Review",
-        "Adjudicate",
         "Statistics",
         "Admin",
         "Tutorial",
@@ -792,7 +791,10 @@ fn adjudication_primary_decisions_stay_visible_at_supported_viewports() {
         }),
         false,
     );
-    let mut harness = loaded_adjudication_harness(api);
+    let mut harness = loaded_review_harness(api);
+    harness.state_mut().view = AppView::Adjudicate;
+    harness.state_mut().work.assignment.as_mut().unwrap().kind = AssignmentKind::Adjudication;
+    harness.step();
 
     click(&mut harness, "Zoom in");
     assert!(harness.state().work.canvas.current_zoom() > 1.0);

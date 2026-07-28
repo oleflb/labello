@@ -7,16 +7,20 @@ impl LabelloApp {
         self.work.keybindings.normalize();
         self.work.shortcut_settings = Default::default();
         let requested = self.datasets.requested_view.take().unwrap_or_else(|| {
-            [AppView::Annotate, AppView::Review, AppView::Adjudicate]
+            [AppView::Annotate, AppView::Review]
                 .into_iter()
                 .find(|view| self.can_open_view(*view))
                 .unwrap_or(AppView::Stats)
         });
         if !self.can_open_view(requested) {
-            self.runtime.error = Some(format!(
-                "The current user is not authorized for {}.",
-                view_label(requested)
-            ));
+            self.runtime.error = Some(if requested == AppView::Adjudicate {
+                crate::app::ADJUDICATION_UNAVAILABLE_MESSAGE.to_string()
+            } else {
+                format!(
+                    "The current user is not authorized for {}.",
+                    view_label(requested)
+                )
+            });
             self.view = AppView::Setup;
             return;
         }

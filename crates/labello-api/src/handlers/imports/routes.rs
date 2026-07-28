@@ -722,7 +722,10 @@ async fn commit_import(
     {
         return Ok(Json(response));
     }
-    require_owned_job(&state, &import_id, &actor.user_id).await?;
+    let job = require_owned_job(&state, &import_id, &actor.user_id).await?;
+    let control =
+        reconcile_job_control(&state, job, load_job_control(&state, &import_id).await?).await?;
+    ensure_plan_update_settled(&control)?;
     let _mutation = state.lock_datasets_root_mutation().await;
     let result = require_service(&state)?
         .commit(&import_id, &actor.user_id, &request.plan_hash)
@@ -744,6 +747,16 @@ async fn commit_import(
         "import dataset published"
     );
     Ok(Json(response))
+}
+
+fn ensure_plan_update_settled(control: &JobControl) -> ApiResult<()> {
+    if control.pending_plan_request.is_some() {
+        return Err(ApiError::Conflict(
+            "an import plan update is still pending; retry the mapping update before committing"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn cancel_import(

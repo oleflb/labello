@@ -60,6 +60,8 @@ pub struct DatasetRepository {
     #[cfg(test)]
     image_state_loads: Arc<AtomicU64>,
     #[cfg(test)]
+    event_loads: Arc<AtomicU64>,
+    #[cfg(test)]
     images_index_loads: Arc<AtomicU64>,
 }
 
@@ -77,6 +79,8 @@ impl DatasetRepository {
             migration_failure: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             image_state_loads: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            event_loads: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             images_index_loads: Arc::new(AtomicU64::new(0)),
         }

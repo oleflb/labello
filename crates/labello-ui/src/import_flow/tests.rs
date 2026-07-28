@@ -3,6 +3,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn import_idempotency_keys_remain_unique_when_request_counters_restart() {
+        let first = import_key("plan", 1);
+        let second = import_key("plan", 1);
+
+        assert_ne!(first, second);
+        for key in [first, second] {
+            assert!(key.starts_with("ui-plan-"));
+            assert!(key.ends_with("-1"));
+            assert!(!key.is_empty() && key.len() <= 200);
+            assert!(key.bytes().all(|byte| byte.is_ascii_graphic()));
+        }
+    }
+
+    #[test]
     fn import_flow_defaults_to_yolo_detect_with_a_matching_descriptor() {
         let flow = ImportFlowState::default();
 
@@ -473,20 +487,33 @@ mod tests {
         let request = app.import_plan_request();
 
         assert_eq!(request.task_mappings.len(), 4);
-        assert!(request.task_mappings.iter().any(|mapping| {
-            mapping.task.task_id == TaskId::from("bounding_box:person")
-                && mapping.task.manual_box_guide_migration.is_none()
-        }));
-        assert!(request.task_mappings.iter().any(|mapping| {
-            mapping.task.task_id == TaskId::from("skeleton:person")
-                && mapping
-                    .task
-                    .manual_box_guide_migration
-                    .as_ref()
-                    .is_some_and(|migration| {
-                        migration.guide_task_id == TaskId::from("bounding_box:person")
-                    })
-        }));
+        let guide = request
+            .task_mappings
+            .iter()
+            .find(|mapping| mapping.task.task_id == TaskId::from("bounding_box:person"))
+            .unwrap();
+        assert!(guide.task.manual_box_guide_migration.is_none());
+        assert_eq!(
+            guide.task.review.workflow,
+            labello_domain::ReviewWorkflow::None
+        );
+        let target = request
+            .task_mappings
+            .iter()
+            .find(|mapping| mapping.task.task_id == TaskId::from("skeleton:person"))
+            .unwrap();
+        assert!(target
+            .task
+            .manual_box_guide_migration
+            .as_ref()
+            .is_some_and(|migration| {
+                migration.guide_task_id == TaskId::from("bounding_box:person")
+            }));
+        assert_eq!(
+            target.task.review.workflow,
+            labello_domain::ReviewWorkflow::Approval
+        );
+        assert_eq!(target.task.review.required_reviews, 1);
         assert!(request.task_mappings.iter().any(|mapping| {
             mapping.task.task_id == TaskId::from("skeleton:vehicle")
                 && mapping
@@ -759,6 +786,32 @@ mod tests {
             assert!(!task.review.allow_reviewer_corrections);
             assert!(task.review.agreement_threshold.is_none());
         }
+
+        let manual = mapped_task(
+            TaskId::from("skeleton:person"),
+            "Person skeletons",
+            AnnotationType::Skeleton,
+            ClassId::from("person"),
+            Some(labello_domain::SkeletonSpec {
+                keypoints: Vec::new(),
+                edges: Vec::new(),
+                allow_hidden: true,
+                allow_absent: true,
+            }),
+            Some(labello_domain::ManualBoxGuideMigration {
+                guide_task_id: TaskId::from("bounding_box:person"),
+                cardinality: labello_domain::MigrationCardinality::ExactlyOne,
+                allow_exclusion: true,
+                sequence: labello_domain::MigrationSequence::ImportedSpatialOrderV1,
+            }),
+            ImportWorkflowIntent::AuthoritativeGroundTruth,
+        );
+        assert_eq!(
+            manual.review.workflow,
+            labello_domain::ReviewWorkflow::Approval
+        );
+        assert_eq!(manual.review.required_reviews, 1);
+        assert!(!manual.review.allow_reviewer_corrections);
     }
 
     #[test]

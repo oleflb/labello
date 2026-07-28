@@ -266,6 +266,85 @@ async fn assignment_availability_caches_single_pass_scans_and_invalidates_on_wri
 }
 
 #[tokio::test]
+async fn disabled_adjudication_returns_no_work_without_loading_images() {
+    let (_temp, repo, task_id, users) = annotation_repo(4, &["adjudicator"]).await;
+    let user_id = &users[0];
+    let mut metadata = repo.load_dataset_config().await.unwrap();
+    metadata.role_assignments[0].roles = BTreeSet::from([DatasetRole::Adjudicator]);
+    repo.save_dataset(&metadata).await.unwrap();
+
+    repo.reset_image_state_load_count();
+    let availability = repo
+        .assignment_availability(user_id, AssignmentKind::Adjudication)
+        .await
+        .unwrap();
+
+    assert!(availability.values().all(|available| !available));
+    assert_eq!(repo.image_state_load_count(), 0);
+    assert!(
+        repo.assign_next_image(user_id, &task_id, AssignmentKind::Adjudication)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(repo.image_state_load_count(), 0);
+}
+
+#[tokio::test]
+async fn review_disabled_tasks_return_no_work_without_loading_images() {
+    let (_temp, repo, _task_id, users) = annotation_repo(4, &["reviewer"]).await;
+    let user_id = &users[0];
+    let mut metadata = repo.load_dataset_config().await.unwrap();
+    metadata.role_assignments[0].roles = BTreeSet::from([DatasetRole::Reviewer]);
+    metadata.tasks[0].review = ReviewConfig {
+        required_reviews: 0,
+        workflow: ReviewWorkflow::None,
+        allow_reviewer_corrections: false,
+        agreement_threshold: None,
+    };
+    repo.save_dataset(&metadata).await.unwrap();
+
+    repo.reset_image_state_load_count();
+    let availability = repo
+        .assignment_availability(user_id, AssignmentKind::Review)
+        .await
+        .unwrap();
+
+    assert!(availability.values().all(|available| !available));
+    assert_eq!(repo.image_state_load_count(), 0);
+}
+
+#[tokio::test]
+async fn pending_review_tasks_do_not_reload_review_history() {
+    let (_temp, repo, _task_id, users) = annotation_repo(4, &["reviewer"]).await;
+    let user_id = &users[0];
+    let mut metadata = repo.load_dataset_config().await.unwrap();
+    metadata.role_assignments[0].roles = BTreeSet::from([DatasetRole::Reviewer]);
+    metadata.tasks[0].review = ReviewConfig {
+        required_reviews: 1,
+        workflow: ReviewWorkflow::Approval,
+        allow_reviewer_corrections: false,
+        agreement_threshold: None,
+    };
+    repo.save_dataset(&metadata).await.unwrap();
+
+    repo.reset_image_state_load_count();
+    repo.reset_event_load_count();
+    let availability = repo
+        .assignment_availability(user_id, AssignmentKind::Review)
+        .await
+        .unwrap();
+
+    assert!(availability.values().all(|available| !available));
+    assert_eq!(repo.image_state_load_count(), 4);
+    assert_eq!(
+        repo.event_load_count(),
+        4,
+        "pending tasks should only read events while validating each state cache"
+    );
+}
+
+#[tokio::test]
 async fn retries_return_same_users_active_assignment() {
     let temp = tempfile::tempdir().unwrap();
     let repo = DatasetRepository::new(temp.path());

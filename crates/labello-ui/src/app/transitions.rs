@@ -34,6 +34,7 @@ impl LabelloApp {
                 }
             }
             PendingTransition::View(view) => {
+                self.runtime.notice = None;
                 self.work.show_tutorial = false;
                 self.work.drawer = None;
                 self.begin_workspace_epoch();

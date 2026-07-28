@@ -133,10 +133,13 @@ impl LabelloApp {
     }
 
     pub(crate) fn can_open_view(&self, view: AppView) -> bool {
+        if view == AppView::Adjudicate {
+            return false;
+        }
         let role = match view {
             AppView::Annotate => Some(DatasetRole::Annotator),
             AppView::Review => Some(DatasetRole::Reviewer),
-            AppView::Adjudicate => Some(DatasetRole::Adjudicator),
+            AppView::Adjudicate => unreachable!("adjudication is disabled"),
             AppView::Admin => Some(DatasetRole::DataAdmin),
             AppView::Setup | AppView::Stats => None,
         };

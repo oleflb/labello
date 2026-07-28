@@ -2,6 +2,8 @@ use super::*;
 
 impl DatasetRepository {
     pub async fn load_events(&self, image_id: &ImageId) -> StorageResult<Vec<EventLogEntry>> {
+        #[cfg(test)]
+        self.event_loads.fetch_add(1, Ordering::Relaxed);
         let path = self.events_path(image_id);
         if !tokio::fs::try_exists(&path).await.with_path(&path)? {
             return Ok(Vec::new());
@@ -79,6 +81,16 @@ impl DatasetRepository {
     #[cfg(test)]
     pub(crate) fn image_state_load_count(&self) -> u64 {
         self.image_state_loads.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_event_load_count(&self) {
+        self.event_loads.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn event_load_count(&self) -> u64 {
+        self.event_loads.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn append_events_atomic(

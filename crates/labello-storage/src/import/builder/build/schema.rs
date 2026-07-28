@@ -47,7 +47,7 @@ fn build_tasks(
             .task_mappings
             .iter()
             .filter(|mapping| planned.contains(mapping.task.task_id.as_str()))
-            .map(|mapping| mapping.task.clone())
+            .map(|mapping| normalize_manual_migration_review(mapping.task.clone()))
             .collect::<Vec<_>>();
         tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         if tasks
@@ -77,22 +77,6 @@ fn build_tasks(
             } else {
                 None
             };
-            let review = match plan.request.intent {
-                ImportIntent::AuthoritativeGroundTruth => ReviewConfig {
-                    required_reviews: 0,
-                    workflow: ReviewWorkflow::None,
-                    allow_reviewer_corrections: false,
-                    agreement_threshold: None,
-                },
-                ImportIntent::RequireApproval | ImportIntent::SeedFutureAnnotation => {
-                    ReviewConfig {
-                        required_reviews: 1,
-                        workflow: ReviewWorkflow::Approval,
-                        allow_reviewer_corrections: false,
-                        agreement_threshold: None,
-                    }
-                }
-            };
             let manual_box_guide_migration = if annotation_type == AnnotationType::Skeleton
                 && matches!(
                     plan.request.output.box_to_skeleton,
@@ -106,6 +90,11 @@ fn build_tasks(
                 })
             } else {
                 None
+            };
+            let review = if manual_box_guide_migration.is_some() {
+                manual_migration_review_config()
+            } else {
+                review_config(plan.request.intent)
             };
             tasks.push(TaskDefinition {
                 task_id: TaskId::from(id.clone()),
@@ -138,6 +127,36 @@ fn build_tasks(
     tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
     validate_manual_tasks(&tasks)?;
     Ok(tasks)
+}
+
+fn normalize_manual_migration_review(mut task: TaskDefinition) -> TaskDefinition {
+    if task.manual_box_guide_migration.is_some() {
+        task.review = manual_migration_review_config();
+    }
+    task
+}
+
+fn manual_migration_review_config() -> ReviewConfig {
+    ReviewConfig {
+        required_reviews: 1,
+        workflow: ReviewWorkflow::Approval,
+        allow_reviewer_corrections: false,
+        agreement_threshold: None,
+    }
+}
+
+fn review_config(intent: ImportIntent) -> ReviewConfig {
+    match intent {
+        ImportIntent::AuthoritativeGroundTruth => ReviewConfig {
+            required_reviews: 0,
+            workflow: ReviewWorkflow::None,
+            allow_reviewer_corrections: false,
+            agreement_threshold: None,
+        },
+        ImportIntent::RequireApproval | ImportIntent::SeedFutureAnnotation => {
+            manual_migration_review_config()
+        }
+    }
 }
 
 fn validate_manual_tasks(tasks: &[TaskDefinition]) -> StorageResult<()> {

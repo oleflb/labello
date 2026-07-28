@@ -2,7 +2,10 @@ use eframe::egui::{self, RichText};
 use labello_domain::{DatasetId, DatasetRole};
 
 use crate::{
-    app::{AppView, LabelloApp, LayoutMode, PendingTransition, SetupSection},
+    app::{
+        ADJUDICATION_UNAVAILABLE_MESSAGE, AppView, LabelloApp, LayoutMode, PendingTransition,
+        SetupSection,
+    },
     theme,
 };
 
@@ -327,10 +330,6 @@ impl LabelloApp {
         }
 
         for dataset in datasets {
-            let recommended_destination = recommended
-                .as_ref()
-                .filter(|item| item.dataset_id == dataset.dataset_id)
-                .map(|item| recommended_view(&item.roles));
             let card_label = format!("Dataset card {}", dataset.name);
             let response = theme::card_frame().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -345,23 +344,19 @@ impl LabelloApp {
                     for (role, view, label) in [
                         (DatasetRole::Annotator, AppView::Annotate, "Annotate"),
                         (DatasetRole::Reviewer, AppView::Review, "Review"),
-                        (DatasetRole::Adjudicator, AppView::Adjudicate, "Adjudicate"),
                     ] {
                         if dataset.roles.contains(&role)
-                            && recommended_destination != Some(view)
                             && dataset_action(ui, !self.loading.dataset, label, &dataset.name)
                         {
                             self.open_dataset(dataset.dataset_id.clone(), view);
                         }
                     }
                     if dataset.roles.contains(&DatasetRole::DataAdmin)
-                        && recommended_destination != Some(AppView::Admin)
                         && dataset_action(ui, !self.loading.dataset, "Admin", &dataset.name)
                     {
                         self.open_dataset(dataset.dataset_id.clone(), AppView::Admin);
                     }
                     if !dataset.roles.is_empty()
-                        && recommended_destination != Some(AppView::Stats)
                         && dataset_action(ui, !self.loading.dataset, "Stats", &dataset.name)
                     {
                         self.open_dataset(dataset.dataset_id.clone(), AppView::Stats);
@@ -456,7 +451,6 @@ impl LabelloApp {
         for (view, role, label) in [
             (AppView::Annotate, DatasetRole::Annotator, "Annotate"),
             (AppView::Review, DatasetRole::Reviewer, "Review"),
-            (AppView::Adjudicate, DatasetRole::Adjudicator, "Adjudicate"),
         ] {
             if self.has_dataset_role(role) {
                 destinations.push((view, label));
@@ -487,8 +481,11 @@ impl LabelloApp {
             return;
         }
         if !self.can_open_view(view) {
-            self.runtime.error =
-                Some("The current user is not authorized for that view.".to_string());
+            self.runtime.error = Some(if view == AppView::Adjudicate {
+                ADJUDICATION_UNAVAILABLE_MESSAGE.to_string()
+            } else {
+                "The current user is not authorized for that view.".to_string()
+            });
             return;
         }
         if matches!(
@@ -560,8 +557,6 @@ fn recommended_view(roles: &[DatasetRole]) -> AppView {
         AppView::Annotate
     } else if roles.contains(&DatasetRole::Reviewer) {
         AppView::Review
-    } else if roles.contains(&DatasetRole::Adjudicator) {
-        AppView::Adjudicate
     } else {
         AppView::Stats
     }

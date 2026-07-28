@@ -23,16 +23,6 @@ pub(super) fn loaded_review_harness(api: Rc<SpyApi>) -> Harness<'static, Labello
     harness
 }
 
-pub(super) fn loaded_adjudication_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
-    let mut harness = live_harness(api);
-    step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);
-    click(&mut harness, "Adjudicate Demo Dataset");
-    step_until(&mut harness, 12, |app| {
-        app.view == AppView::Adjudicate && app.work.current.is_some()
-    });
-    harness
-}
-
 pub(super) fn loaded_admin_harness(api: Rc<SpyApi>) -> Harness<'static, LabelloApp> {
     let mut harness = live_harness(api);
     step_until(&mut harness, 8, |app| app.datasets.summaries.len() == 1);

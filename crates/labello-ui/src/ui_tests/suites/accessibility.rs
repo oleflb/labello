@@ -405,7 +405,7 @@ fn desktop_app_bar_shows_direct_navigation_and_accessible_icon_actions() {
     harness.set_size(egui::vec2(1500.0, 780.0));
     harness.step();
 
-    for label in ["Annotate", "Review", "Adjudicate", "Statistics", "Admin"] {
+    for label in ["Annotate", "Review", "Statistics", "Admin"] {
         assert_control_inside(
             &harness,
             label,

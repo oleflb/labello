@@ -802,7 +802,7 @@ fn setup_describes_a_data_admin_recommendation_as_statistics() {
             .query_by_label("Open the suggested work queue for this dataset.")
             .is_none()
     );
-    assert!(harness.query_by_label("Stats Demo Dataset").is_none());
+    assert!(harness.query_by_label("Stats Demo Dataset").is_some());
     assert!(harness.query_by_label("Admin Demo Dataset").is_some());
 }
 

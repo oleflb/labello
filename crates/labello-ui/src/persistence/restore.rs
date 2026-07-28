@@ -84,9 +84,7 @@ impl crate::app::LabelloApp {
             crate::app::AppView::Review => summary
                 .roles
                 .contains(&labello_domain::DatasetRole::Reviewer),
-            crate::app::AppView::Adjudicate => summary
-                .roles
-                .contains(&labello_domain::DatasetRole::Adjudicator),
+            crate::app::AppView::Adjudicate => false,
             crate::app::AppView::Admin => summary
                 .roles
                 .contains(&labello_domain::DatasetRole::DataAdmin),
@@ -94,10 +92,12 @@ impl crate::app::LabelloApp {
             crate::app::AppView::Setup => false,
         };
         if !authorized {
-            self.runtime.notice = Some(
+            self.runtime.notice = Some(if view == crate::app::AppView::Adjudicate {
+                crate::app::ADJUDICATION_UNAVAILABLE_MESSAGE.to_string()
+            } else {
                 "The previous view is no longer authorized; choose an available dataset view."
-                    .to_string(),
-            );
+                    .to_string()
+            });
             return;
         }
         self.runtime.persistence.expected_assignment = preference.assignment_id.clone();
