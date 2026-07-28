@@ -1,6 +1,6 @@
 use labello_domain::{
     Actor, AnnotationOrigin, AnnotationVersion, DatasetMetadata, DatasetRole, EventLogEntry,
-    EventPayload, HumanRevisionKind, ImageState, OfflineAnnotationSource, OfflineBundle,
+    EventPayload, HumanRevisionKind, ImageId, ImageState, OfflineAnnotationSource, OfflineBundle,
     OfflineImageBundle, OfflineMutation, OfflineSyncRequest, OfflineSyncResult, RevisionSource,
     SyncConflict, require_role,
 };
@@ -341,6 +341,36 @@ fn validate_offline_reason(reason: Option<&str>) -> StorageResult<()> {
         ))
     } else {
         Ok(())
+    }
+}
+
+impl DatasetRepository {
+    pub(crate) async fn append_resequenced_events(
+        &self,
+        image_id: &ImageId,
+        state: &mut ImageState,
+        events: &[EventLogEntry],
+    ) -> StorageResult<usize> {
+        let mut next_state = state.clone();
+        let mut resequenced = Vec::with_capacity(events.len());
+        for original in events {
+            let mut event = original.clone();
+            event.event_sequence = next_state.current_sequence + 1;
+            event.image_id = image_id.clone();
+            next_state.apply_event(&event)?;
+            resequenced.push(event);
+        }
+        self.append_events_atomic(image_id, &resequenced).await?;
+        *state = next_state;
+        crate::fsjson::write_json_atomic(&self.state_path(image_id), state).await?;
+        if resequenced
+            .iter()
+            .any(crate::repository::stats_relevant_event)
+        {
+            self.stats_cache.invalidate();
+        }
+        self.assignment_availability_cache.invalidate();
+        Ok(events.len())
     }
 }
 

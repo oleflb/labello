@@ -12,6 +12,7 @@ use crate::{DatasetRepository, StorageError, StorageResult};
 mod claim;
 mod migration;
 mod review;
+mod transaction;
 
 pub(crate) use migration::append_guide_invalidation_payloads;
 pub use migration::*;

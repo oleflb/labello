@@ -53,3 +53,33 @@ review.
 No generalized transition framework is introduced. A planner is extracted
 only when it is independent of Axum, filesystem access, client DTOs, egui, and
 authorization context.
+
+## Repository transaction boundary
+
+`DatasetRepository` remains the storage facade, but repository mechanics no
+longer own feature validation or event-batch construction:
+
+| Location | Responsibility |
+| --- | --- |
+| `labello-storage/repository/events.rs` | Loads and atomically appends the authoritative event log, rebuilds the replay cache, and invalidates derived caches after an explicit rebuild. |
+| `labello-storage/assignment/transaction.rs` | Applies the common single-image commit order after annotation, review, adjudication, or migration code has validated its request and constructed its feature-specific batch. |
+| `labello-storage/assignment/{mod,review,migration}.rs` | Owns feature authorization, exact-state validation, and the event payloads required for that transition. |
+| `labello-storage/sync.rs` | Owns offline-fragment validation and resequencing before using the same authoritative append and rebuildable-cache mechanics. |
+
+The single-image commit order is:
+
+1. Load the replay-validated state derived from `events.jsonl`.
+2. Complete assignment/migration invalidation policy for the planned batch.
+3. Apply the entire batch to a cloned next state so any invalid event rejects
+   the batch before persistence.
+4. Atomically publish `events.jsonl`.
+5. Publish the rebuildable `state.json` cache only after the event log.
+6. Invalidate statistics and assignment-availability caches after durable
+   publication.
+
+Existing repository recovery tests prove that a missing or stale `state.json`
+is rebuilt from a complete event batch. Assignment batch tests prove a failed
+batch leaves no partial events, while exact-version migration and workflow
+claim tests prove concurrent writers have one winner. The refactor preserves
+those lock scopes and tests rather than introducing a generic transaction,
+repository, callback, or cache framework.
