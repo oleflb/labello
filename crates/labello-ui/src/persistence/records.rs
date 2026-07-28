@@ -37,6 +37,8 @@ pub(crate) struct WorkspacePreference {
     pub assignment_image_id: Option<ImageId>,
     pub assignment_kind: Option<AssignmentKind>,
     pub drawer: Option<String>,
+    #[serde(default)]
+    pub workflow_panel_collapsed: bool,
     pub show_settings: bool,
     pub show_tutorial: bool,
     pub selected_annotation: Option<AnnotationId>,

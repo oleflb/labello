@@ -634,38 +634,27 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
     );
     let guide_task_id = TaskId::from("bounding_box:person");
     let target_task_id = TaskId::from("skeleton:person");
-    app.work.tasks.push(labello_domain::TaskDefinition {
-        task_id: target_task_id.clone(),
-        name: "Person skeleton migration".to_string(),
-        annotation_type: AnnotationType::Skeleton,
-        class_ids: vec![ClassId::from("person")],
-        instructions: labello_domain::TutorialContent {
-            title: "Place a skeleton for each imported box".to_string(),
-            example_text: "Use the canonical box as a guide.".to_string(),
-            example_images: Vec::new(),
-        },
-        skeleton: Some(SkeletonSpec {
-            keypoints: ["head", "left_hand", "right_hand", "left_foot", "right_foot"]
-                .into_iter()
-                .map(|name| KeypointSpec {
-                    name: name.to_string(),
-                    required: name == "head",
-                })
-                .collect(),
-            edges: Vec::new(),
-            allow_hidden: true,
-            allow_absent: true,
-        }),
-        review: Default::default(),
-        prelabel_config_ids: Vec::new(),
-        manual_box_guide_migration: Some(ManualBoxGuideMigration {
-            guide_task_id: guide_task_id.clone(),
-            cardinality: MigrationCardinality::ExactlyOne,
-            allow_exclusion: true,
-            sequence: MigrationSequence::ImportedSpatialOrderV1,
-        }),
-        enabled: true,
-    });
+    app.work.tasks.push(migration_target_workflow(
+        target_task_id.clone(),
+        guide_task_id.clone(),
+    ));
+    app.work.tasks.extend([
+        inspector_workflow(
+            "bounding_box:person_cleanup",
+            "Imported person bounding-box cleanup",
+            AnnotationType::BoundingBox,
+        ),
+        inspector_workflow(
+            "skeleton:person_refinement",
+            "Detailed person pose refinement",
+            AnnotationType::Skeleton,
+        ),
+        inspector_workflow(
+            "bounding_box:person_occluded",
+            "Occluded person bounding boxes",
+            AnnotationType::BoundingBox,
+        ),
+    ]);
     app.work.selected_task_id = Some(target_task_id.clone());
     app.work.tool = crate::app::Tool::Keypoints;
     app.work.assignment.as_mut().unwrap().task_id = target_task_id.clone();
@@ -785,6 +774,80 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
         app.work.migration.review_index = 1;
     }
     app
+}
+
+fn migration_target_workflow(
+    task_id: TaskId,
+    guide_task_id: TaskId,
+) -> labello_domain::TaskDefinition {
+    labello_domain::TaskDefinition {
+        task_id,
+        name: "Person skeleton migration".to_string(),
+        annotation_type: AnnotationType::Skeleton,
+        class_ids: vec![ClassId::from("person")],
+        instructions: labello_domain::TutorialContent {
+            title: "Place a skeleton for each imported box".to_string(),
+            example_text: "Use the canonical box as a guide.".to_string(),
+            example_images: Vec::new(),
+        },
+        skeleton: Some(SkeletonSpec {
+            keypoints: ["head", "left_hand", "right_hand", "left_foot", "right_foot"]
+                .into_iter()
+                .map(|name| KeypointSpec {
+                    name: name.to_string(),
+                    required: name == "head",
+                })
+                .collect(),
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: true,
+        }),
+        review: Default::default(),
+        prelabel_config_ids: Vec::new(),
+        manual_box_guide_migration: Some(ManualBoxGuideMigration {
+            guide_task_id,
+            cardinality: MigrationCardinality::ExactlyOne,
+            allow_exclusion: true,
+            sequence: MigrationSequence::ImportedSpatialOrderV1,
+        }),
+        enabled: true,
+    }
+}
+
+fn inspector_workflow(
+    task_id: &str,
+    name: &str,
+    annotation_type: AnnotationType,
+) -> labello_domain::TaskDefinition {
+    let skeleton = (annotation_type == AnnotationType::Skeleton).then(|| SkeletonSpec {
+        keypoints: ["head", "left_shoulder", "right_shoulder"]
+            .into_iter()
+            .map(|name| KeypointSpec {
+                name: name.to_string(),
+                required: name == "head",
+            })
+            .collect(),
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: true,
+    });
+    labello_domain::TaskDefinition {
+        task_id: TaskId::from(task_id),
+        name: name.to_string(),
+        annotation_type,
+        class_ids: vec![ClassId::from("person")],
+        instructions: labello_domain::TutorialContent {
+            title: name.to_string(),
+            example_text: "Inspector-only workflow used to exercise workflow navigation."
+                .to_string(),
+            example_images: Vec::new(),
+        },
+        skeleton,
+        review: Default::default(),
+        prelabel_config_ids: Vec::new(),
+        manual_box_guide_migration: None,
+        enabled: true,
+    }
 }
 
 fn guide_annotation(target: &MigrationTarget, index: usize) -> AnnotationVersion {
@@ -1084,8 +1147,31 @@ mod tests {
     fn specialized_presets_keep_their_required_state() {
         let ctx = egui::Context::default();
         let correction = build(InspectorPreset::ReviewCorrection, &ctx);
-        assert!(correction.tasks[0].review.allow_reviewer_corrections);
-        assert!(correction.correction_draft.is_some());
+        assert!(correction.work.tasks[0].review.allow_reviewer_corrections);
+        assert!(correction.work.correction_draft.is_some());
+
+        let migration = build(InspectorPreset::MigrationObject, &ctx);
+        assert_eq!(migration.workflow_choices().len(), 5);
+        assert_eq!(
+            migration
+                .workflow_choices()
+                .iter()
+                .filter(|workflow| workflow.annotation_type == AnnotationType::BoundingBox)
+                .count(),
+            3
+        );
+        assert_eq!(
+            migration
+                .workflow_choices()
+                .iter()
+                .filter(|workflow| workflow.annotation_type == AnnotationType::Skeleton)
+                .count(),
+            2
+        );
+        assert_eq!(
+            migration.selected_workflow().unwrap().label(),
+            "Person skeleton migration"
+        );
 
         let statistics = build(InspectorPreset::Statistics, &ctx);
         assert!(

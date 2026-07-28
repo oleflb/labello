@@ -55,9 +55,9 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
     let durable = api.image_state(&image_id);
     let mut reloaded =
         inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
-    reloaded.current_state = Some(durable.clone());
-    reloaded.annotations = durable.active_annotations().cloned().collect();
-    reloaded.migration = Default::default();
+    reloaded.work.current_state = Some(durable.clone());
+    reloaded.work.annotations = durable.active_annotations().cloned().collect();
+    reloaded.work.migration = Default::default();
     let mut reload_harness = Harness::builder()
         .with_size(egui::vec2(1440.0, 1000.0))
         .build_eframe(|_| reloaded);

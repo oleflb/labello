@@ -25,6 +25,7 @@ impl eframe::App for LabelloApp {
         self.handle_shortcuts(ui.ctx());
         let viewport = ui.available_size();
         let layout = LayoutMode::for_width(ui.available_width());
+        let workflow_panel_width = self.workflow_panel_width(ui.ctx());
         egui::Panel::top("app_bar")
             .exact_size(56.0)
             .frame(theme::top_bar_frame().inner_margin(egui::Margin::symmetric(14, 6)))
@@ -55,13 +56,15 @@ impl eframe::App for LabelloApp {
             ui.ctx().content_rect().right() - LayoutMode::INSPECTOR_PANEL_WIDTH - theme::SPACE_2
         });
         if self.work_view() && layout == LayoutMode::Wide {
-            egui::Panel::left("task_panel")
-                .resizable(false)
-                .exact_size(LayoutMode::TASK_PANEL_WIDTH)
-                .frame(theme::side_frame())
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
-                });
+            if !self.work.workflow_panel_collapsed {
+                egui::Panel::left("task_panel")
+                    .resizable(false)
+                    .exact_size(workflow_panel_width)
+                    .frame(theme::side_frame())
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
+                    });
+            }
             egui::Panel::right("review_panel")
                 .resizable(false)
                 .exact_size(LayoutMode::INSPECTOR_PANEL_WIDTH)

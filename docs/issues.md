@@ -18,6 +18,15 @@ Only after that continue with the next issue.
 
 # Feedback Issues
 
+- [x] Simplify the workflow panel and size it to its workflow pills.
+  - Remove the redundant workflow heading, subtitle, and separate assignment summary.
+  - Keep loaded assignment queue status only in the selected workflow pill's hover tooltip.
+  - Size the desktop workflow panel and responsive workflow drawer from the widest workflow pill.
+  - Keep the initial assignment-availability spinner and let the desktop panel collapse from a persistent left-panel toggle next to `Fit`.
+  - Collapse only the workflow panel; keep the desktop inspector visible.
+  - Include the initial availability row in panel-width measurement so its text is never clipped.
+  - Expand the migration annotation inspector preset with several bounding-box and skeleton workflows.
+  - Preserve actionable assignment-availability states and accessible workflow names.
 - [x] Show assignment availability in the workflow selector.
   - Add one authenticated batch endpoint for the current assignment kind; do not issue one request per workflow or infer availability from dataset statistics.
   - Reuse the claim path's task, image-state, reservation, review, adjudication, migration, and imbalance eligibility rules so availability does not drift from actual assignment claims.

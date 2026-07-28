@@ -197,8 +197,20 @@ impl LabelloApp {
             }
             UserAction::ToggleWorkflowPanel => {
                 self.work.show_tutorial = false;
-                self.work.drawer =
-                    (self.work.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow)
+                let layout = self
+                    .runtime
+                    .repaint_ctx
+                    .as_ref()
+                    .map(|ctx| LayoutMode::for_width(ctx.content_rect().width()))
+                    .unwrap_or(LayoutMode::Medium);
+                if layout == LayoutMode::Wide {
+                    self.work.drawer = None;
+                    self.work.workflow_panel_collapsed =
+                        !self.work.workflow_panel_collapsed;
+                } else {
+                    self.work.drawer =
+                        (self.work.drawer != Some(Drawer::Workflow)).then_some(Drawer::Workflow);
+                }
             }
             UserAction::ToggleInspectorPanel => {
                 self.work.show_tutorial = false;

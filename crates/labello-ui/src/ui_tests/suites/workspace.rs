@@ -205,7 +205,10 @@ fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
     assert_eq!(bounding_box.width(), skeleton.width());
     assert_eq!(bounding_box.height(), vehicle.height());
     assert_eq!(bounding_box.height(), skeleton.height());
-    assert!(bounding_box.width() >= 220.0);
+    assert!(
+        bounding_box.width() > LayoutMode::TASK_PANEL_WIDTH,
+        "the longest workflow pill should expand the workflow panel: {bounding_box:?}"
+    );
     assert!(bounding_box.height() <= 52.0);
     assert!(
         skeleton.top() - bounding_box.bottom() <= 8.0,
@@ -225,6 +228,99 @@ fn workflow_selector_uses_equal_compact_cards_and_type_icons() {
 }
 
 #[test]
+fn wide_workflow_panel_keeps_its_toggle_beside_fit() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.set_size(egui::vec2(1500.0, 780.0));
+    for _ in 0..4 {
+        harness.step();
+    }
+
+    let expanded_canvas = harness.get_by_label("Annotation canvas").rect();
+    let fit = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Fit")
+        .rect();
+    let collapse = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Collapse workflow panel")
+        .rect();
+    assert!(
+        collapse.left() >= fit.right() && collapse.left() - fit.right() <= 12.0,
+        "the collapse control should sit beside Fit: fit={fit:?} collapse={collapse:?}"
+    );
+    assert_eq!(collapse.top(), fit.top());
+    assert_eq!(collapse.bottom(), fit.bottom());
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
+            .is_some()
+    );
+
+    click_accesskit_button(&mut harness, "Collapse workflow panel");
+    assert!(
+        harness.output().platform_output.num_completed_passes > 0,
+        "collapsing should settle its geometry before presenting the frame"
+    );
+    harness.step();
+
+    let collapsed_canvas = harness.get_by_label("Annotation canvas").rect();
+    assert!(harness.state().work.workflow_panel_collapsed);
+    assert!(
+        harness.query_by_label("Inspector").is_some(),
+        "collapsing the workflow panel should keep the inspector visible"
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Expand workflow panel",
+            )
+            .is_some()
+    );
+    let fit = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Fit")
+        .rect();
+    let expand = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Expand workflow panel")
+        .rect();
+    assert!(
+        expand.left() >= fit.right() && expand.left() - fit.right() <= 12.0,
+        "the expand control should sit beside Fit: fit={fit:?} expand={expand:?}"
+    );
+    assert_eq!(expand.top(), fit.top());
+    assert_eq!(expand.bottom(), fit.bottom());
+    assert!(
+        collapsed_canvas.left() < expanded_canvas.left(),
+        "collapsing should return horizontal space to the canvas: \
+         expanded={expanded_canvas:?} collapsed={collapsed_canvas:?}"
+    );
+    assert!(
+        collapsed_canvas.left() <= theme::SPACE_2 + 1.0,
+        "the collapsed panel should not leave a rail: {collapsed_canvas:?}"
+    );
+
+    click_accesskit_button(&mut harness, "Expand workflow panel");
+    for _ in 0..4 {
+        harness.step();
+    }
+
+    assert!(!harness.state().work.workflow_panel_collapsed);
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
+            .is_some()
+    );
+    assert_eq!(
+        harness.get_by_label("Annotation canvas").rect().left(),
+        expanded_canvas.left()
+    );
+}
+
+#[test]
 fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failures() {
     let api = Rc::new(SpyApi::new());
     api.set_workflow_availability("bounding_box:vehicle", false);
@@ -238,12 +334,47 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
         .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
         .unwrap();
     assert!(vehicle.accesskit_node().is_disabled());
+    let vehicle = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Vehicle boxes");
+    assert_eq!(
+        vehicle.accesskit_node().description(),
+        Some("No assignments available".to_string())
+    );
+    harness.state_mut().work.availability.tasks.clear();
+    harness.state_mut().work.availability.loading = true;
+    harness.step();
     assert!(
         harness
-            .query_by_label_contains("No assignments available")
+            .query_by_role_and_label(
+                egui::accesskit::Role::ProgressIndicator,
+                "Loading workflow assignment availability",
+            )
+            .is_some(),
+        "the initial availability check should retain its spinner"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Checking assignment availability")
             .is_some()
     );
-    harness.state_mut().work.availability.loading = true;
+    let availability_text = harness
+        .query_by_label_contains("Checking assignment availability")
+        .unwrap()
+        .rect();
+    let workflow_pill = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
+        .rect();
+    assert!(
+        availability_text.right() <= workflow_pill.right(),
+        "availability text should fit the workflow panel: \
+         text={availability_text:?} pill={workflow_pill:?}"
+    );
+    harness
+        .state_mut()
+        .work
+        .availability
+        .tasks
+        .insert(TaskId::from("bounding_box:vehicle"), false);
     harness.step();
     assert!(
         harness
@@ -438,6 +569,7 @@ fn expired_or_wrong_scope_cached_availability_requires_a_new_check() {
         assignment_image_id: None,
         assignment_kind: None,
         drawer: None,
+        workflow_panel_collapsed: false,
         show_settings: false,
         show_tutorial: false,
         selected_annotation: None,
@@ -637,11 +769,25 @@ fn annotation_prefetch_fills_two_without_blocking_the_current_image() {
 
     assert_eq!(harness.state().work.queue.queue_size(), 2);
     assert!(!harness.state().loading.image);
+    let selected_workflow =
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Person boxes");
+    assert_eq!(
+        selected_workflow.accesskit_node().description(),
+        Some("Loaded assignment queue: 2 of 2".to_string())
+    );
+    assert!(
+        harness.query_by_label("2/2").is_none(),
+        "the assignment queue should not be rendered inside the workflow pill"
+    );
+    selected_workflow.hover();
+    harness.run_steps(3);
     assert!(
         harness
-            .query_by_label("Prepared queue: 2 of 2 ready")
-            .is_some()
+            .query_by_label_contains("Loaded assignment queue: 2 of 2")
+            .is_some(),
+        "the selected workflow tooltip should expose the assignment queue"
     );
+    assert!(harness.query_by_label("Assignment").is_none());
     let exclusions = api.exclusions();
     assert!(exclusions.iter().all(|excluded| excluded.len() <= 3));
     assert_eq!(exclusions[0], Vec::<ImageId>::new());
@@ -843,6 +989,7 @@ fn explicit_dataset_transition_suppresses_workspace_restoration() {
         assignment_image_id: None,
         assignment_kind: None,
         drawer: None,
+        workflow_panel_collapsed: false,
         show_settings: false,
         show_tutorial: false,
         selected_annotation: None,
@@ -1238,7 +1385,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     let mut harness = loaded_work_harness(api.clone());
     assert!(harness.state().work.current.is_some());
     assert_eq!(harness.state().work.queue.queue_size(), IMAGE_QUEUE_SIZE);
-    assert!(harness.query_by_label("Assignment").is_some());
+    assert!(harness.query_by_label("Assignment").is_none());
     assert!(harness.query_by_label("Approve object").is_none());
     assert!(harness.query_by_label("Reject object & finish").is_none());
     assert!(harness.query_by_label("Accept all annotations").is_none());

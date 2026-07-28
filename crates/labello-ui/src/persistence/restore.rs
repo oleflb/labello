@@ -139,6 +139,7 @@ impl crate::app::LabelloApp {
                 crate::app::Drawer::Workflow => "workflow".to_string(),
                 crate::app::Drawer::Inspector => "inspector".to_string(),
             }),
+            workflow_panel_collapsed: self.work.workflow_panel_collapsed,
             show_settings: self.work.show_settings,
             show_tutorial: self.work.show_tutorial,
             selected_annotation: self.work.selected_annotation.clone(),
@@ -282,6 +283,7 @@ impl crate::app::LabelloApp {
             Some("inspector") => Some(crate::app::Drawer::Inspector),
             _ => None,
         };
+        self.work.workflow_panel_collapsed = preference.workflow_panel_collapsed;
         self.work.show_settings = preference.show_settings;
         self.work.show_tutorial = preference.show_tutorial;
     }

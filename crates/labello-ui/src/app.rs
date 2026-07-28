@@ -365,6 +365,7 @@ pub struct WorkState {
     pub(crate) show_tutorial: bool,
     pub(crate) pending_transition: Option<PendingTransition>,
     pub(crate) drawer: Option<Drawer>,
+    pub(crate) workflow_panel_collapsed: bool,
     pub(crate) show_settings: bool,
     pub(crate) shortcut_settings: ShortcutSettingsState,
     pub(crate) next_operation_id: u64,

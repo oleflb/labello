@@ -43,8 +43,20 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         if LayoutMode::for_width(width) == LayoutMode::Wide {
             let canvas = migration.get_by_label("Annotation canvas").rect();
             let inspector = migration.get_by_label("Inspector").rect();
-            let workflow_boundary = LayoutMode::TASK_PANEL_WIDTH;
+            let workflow_label = migration.state().selected_workflow().unwrap().label();
+            let workflow_boundary = migration
+                .get_by_role_and_label(egui::accesskit::Role::Button, &workflow_label)
+                .rect()
+                .right()
+                + theme::SPACE_4
+                + theme::side_frame().stroke.width;
             let inspector_boundary = width - LayoutMode::INSPECTOR_PANEL_WIDTH;
+            let selected_workflow = migration
+                .get_by_role_and_label(egui::accesskit::Role::Button, &workflow_label);
+            assert_eq!(
+                selected_workflow.accesskit_node().description(),
+                Some("Loaded assignment queue: 2 of 2".to_string())
+            );
             let workflow_gutter = canvas.left() - workflow_boundary;
             let inspector_gutter = inspector_boundary - canvas.right();
             assert!(
@@ -101,8 +113,8 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         InspectorPreset::MigrationFullImage,
         &egui::Context::default(),
     );
-    let task_id = no_guides_app.selected_task_id.clone().unwrap();
-    let state = no_guides_app.current_state.as_mut().unwrap();
+    let task_id = no_guides_app.work.selected_task_id.clone().unwrap();
+    let state = no_guides_app.work.current_state.as_mut().unwrap();
     state
         .migration_target_sets
         .get_mut(&task_id)
@@ -114,10 +126,10 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         .get_mut(&task_id)
         .unwrap()
         .clear();
-    no_guides_app.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
-    no_guides_app.migration.progress = None;
+    no_guides_app.work.migration.cursor = Some(labello_domain::MigrationCursor::FullImage);
+    no_guides_app.work.migration.progress = None;
     let no_guides_api = Rc::new(SpyApi::new());
-    no_guides_api.set_image_state(no_guides_app.current_state.clone().unwrap());
+    no_guides_api.set_image_state(no_guides_app.work.current_state.clone().unwrap());
     let mut no_guides = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .with_max_steps(40)

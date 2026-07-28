@@ -38,7 +38,10 @@ impl LabelloApp {
         if layout != LayoutMode::Wide && self.work_view() {
             let screen = ctx.content_rect();
             let compact = layout == LayoutMode::Compact;
-            let width = if compact {
+            let width = if self.work.drawer == Some(Drawer::Workflow) {
+                self.workflow_panel_width(ctx)
+                    .min((screen.width() - 48.0).max(240.0))
+            } else if compact {
                 (screen.width() - 96.0).max(240.0)
             } else {
                 308.0_f32.min(screen.width() - 48.0)
@@ -176,7 +179,7 @@ impl LabelloApp {
                     && view != AppView::Annotate
                     && current.is_some()));
         let response = if short && current.is_some() {
-            ui.horizontal(|ui| self.canvas_controls(ui))
+            ui.horizontal(|ui| self.canvas_controls(ui, layout))
         } else if stack_controls {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -192,7 +195,7 @@ impl LabelloApp {
                     }
                 });
                 if current.is_some() {
-                    self.canvas_controls(ui);
+                    self.canvas_controls(ui, layout);
                 }
             })
         } else {
@@ -234,7 +237,7 @@ impl LabelloApp {
                     );
                 }
                 if current.is_some() {
-                    self.canvas_controls(ui);
+                    self.canvas_controls(ui, layout);
                 }
                 if layout == LayoutMode::Wide {
                     ui.separator();
@@ -247,7 +250,7 @@ impl LabelloApp {
         });
     }
 
-    fn canvas_controls(&mut self, ui: &mut egui::Ui) {
+    fn canvas_controls(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         ui.horizontal(|ui| {
             let pan_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
@@ -305,6 +308,9 @@ impl LabelloApp {
                 .clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::FitImage);
+            }
+            if layout == LayoutMode::Wide {
+                self.workflow_panel_toggle(ui);
             }
         });
     }
