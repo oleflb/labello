@@ -959,6 +959,18 @@ impl LabelloApp {
             }
         } else {
             self.migration_primary_button(ui, compact);
+            if compact && self.migration_keypoint_undo_available() {
+                let response = ui.add_enabled(
+                    self.migration_keypoint_undo_enabled(),
+                    egui::Button::new("Undo"),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Undo last keypoint")
+                });
+                if response.clicked() {
+                    self.remove_last_migration_keypoint();
+                }
+            }
             self.migration_object_navigation_button(ui);
         }
         if compact {
@@ -966,6 +978,26 @@ impl LabelloApp {
         } else {
             self.migration_assignment_buttons(ui);
         }
+    }
+
+    pub(crate) fn migration_keypoint_undo_available(&self) -> bool {
+        self.view == AppView::Annotate
+            && self.work.migration.inspected_group_id.is_none()
+            && self.work.migration.keypoint_index > 0
+            && matches!(
+                self.work.migration.cursor,
+                Some(MigrationCursor::Object { .. })
+            )
+    }
+
+    fn migration_keypoint_undo_enabled(&self) -> bool {
+        let Some(MigrationCursor::Object {
+            object_group_id, ..
+        }) = self.work.migration.cursor.as_ref()
+        else {
+            return false;
+        };
+        !self.work.migration.busy && self.migration_guide_valid(object_group_id)
     }
 
     fn migration_object_navigation_button(&mut self, ui: &mut egui::Ui) {

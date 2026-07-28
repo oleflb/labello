@@ -373,6 +373,32 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
         "primary={primary:?} workflow={workflow:?}"
     );
     assert!((primary.top() - inspector.top()).abs() <= 1.0);
+    assert!(
+        object.get_by_label("Annotation canvas").rect().bottom() <= primary.top(),
+        "the canvas must stop above the compact migration action bar"
+    );
+
+    let canvas = object.get_by_label("Annotation canvas").rect();
+    click_at(&mut object, canvas.center());
+    object.step();
+    let undo = object.get_by_label("Undo last keypoint").rect();
+    let canvas = object.get_by_label("Annotation canvas").rect();
+    assert!(
+        canvas.bottom() <= undo.top(),
+        "canvas={canvas:?} undo={undo:?}"
+    );
+    click_accesskit_button(&mut object, "Undo last keypoint");
+    assert_eq!(object.state().work.migration.keypoint_index, 0);
+    object.set_size(egui::vec2(320.0, 568.0));
+    object.step();
+    let primary = object.get_by_label_contains("Save & next").rect();
+    let canvas = object.get_by_label("Annotation canvas").rect();
+    assert!(
+        canvas.bottom() <= primary.top(),
+        "canvas={canvas:?} primary={primary:?}"
+    );
+    object.set_size(egui::vec2(390.0, 667.0));
+    object.step();
 
     click(&mut object, "More application actions");
     assert!(object.query_by_label("Workflow panel").is_none());

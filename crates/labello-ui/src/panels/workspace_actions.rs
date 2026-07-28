@@ -116,17 +116,10 @@ impl LabelloApp {
         if self.manual_migration_active() {
             let available_width = ui.available_width();
             let icon_only = available_width < 432.0;
-            if available_width >= 272.0 {
-                ui.horizontal_wrapped(|ui| {
-                    self.migration_workspace_actions(ui, true);
-                    self.drawer_panel_buttons(ui, icon_only);
-                });
-            } else {
-                ui.vertical(|ui| {
-                    self.migration_workspace_actions(ui, true);
-                    ui.horizontal(|ui| self.drawer_panel_buttons(ui, true));
-                });
-            }
+            ui.horizontal_wrapped(|ui| {
+                self.migration_workspace_actions(ui, true);
+                self.drawer_panel_buttons(ui, icon_only);
+            });
             return;
         }
         let ready = (self.work.assignment.is_some() || self.runtime.api.is_none())
