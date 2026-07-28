@@ -140,8 +140,26 @@ impl LabelloApp {
         use labello_domain::UserAction;
         if self.manual_migration_active() {
             match action {
+                UserAction::NextImage => {
+                    self.trigger_migration_primary_action();
+                    return;
+                }
+                UserAction::AcceptReviewObject if self.view == AppView::Review => {
+                    self.trigger_migration_review_action(labello_domain::ReviewDecision::Approved);
+                    return;
+                }
+                UserAction::RejectReviewObject if self.view == AppView::Review => {
+                    self.trigger_migration_review_action(labello_domain::ReviewDecision::Rejected);
+                    return;
+                }
                 UserAction::ToggleKeypointHidden => {
-                    self.work.migration.next_hidden = !self.work.migration.next_hidden;
+                    if self
+                        .selected_task()
+                        .and_then(|task| task.skeleton.as_ref())
+                        .is_some_and(|spec| spec.allow_hidden)
+                    {
+                        self.work.migration.next_hidden = !self.work.migration.next_hidden;
+                    }
                     return;
                 }
                 UserAction::MarkKeypointAbsent => {
@@ -152,8 +170,7 @@ impl LabelloApp {
                     self.remove_last_migration_keypoint();
                     return;
                 }
-                UserAction::NextImage
-                | UserAction::PreviousImage
+                UserAction::PreviousImage
                 | UserAction::RedoEdit
                 | UserAction::SaveAnnotations
                 | UserAction::SelectPreviousObject
@@ -214,8 +231,20 @@ impl LabelloApp {
             }
             UserAction::ToggleInspectorPanel => {
                 self.work.show_tutorial = false;
-                self.work.drawer =
-                    (self.work.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector)
+                let layout = self
+                    .runtime
+                    .repaint_ctx
+                    .as_ref()
+                    .map(|ctx| LayoutMode::for_width(ctx.content_rect().width()))
+                    .unwrap_or(LayoutMode::Medium);
+                if layout == LayoutMode::Wide {
+                    self.work.drawer = None;
+                    self.work.inspector_panel_collapsed =
+                        !self.work.inspector_panel_collapsed;
+                } else {
+                    self.work.drawer =
+                        (self.work.drawer != Some(Drawer::Inspector)).then_some(Drawer::Inspector);
+                }
             }
             UserAction::OpenSettings => self.open_shortcut_settings(),
             UserAction::SelectPreviousWorkflow if self.view == AppView::Annotate && ready => {
@@ -308,14 +337,28 @@ impl LabelloApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if !self.work_view()
             || ctx.text_edit_focused()
-            || self.loading.saving
-            || self.loading.image
             || self.work.pending_transition.is_some()
             || self.work.show_settings
-            || self.work.drawer.is_some()
             || self.runtime.persistence.recovery.is_some()
             || egui::Popup::is_any_open(ctx)
         {
+            return;
+        }
+        if let Some(drawer) = self.work.drawer {
+            let action = match drawer {
+                Drawer::Workflow => labello_domain::UserAction::ToggleWorkflowPanel,
+                Drawer::Inspector => labello_domain::UserAction::ToggleInspectorPanel,
+            };
+            let chord = self.work.keybindings.bindings.get(&action).cloned();
+            if chord
+                .as_ref()
+                .is_some_and(|chord| consume_keyboard_shortcut(ctx, chord))
+            {
+                self.trigger_user_action(action);
+            }
+            return;
+        }
+        if self.loading.saving || self.loading.image {
             return;
         }
         if self.work.canvas.pan_mode() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {

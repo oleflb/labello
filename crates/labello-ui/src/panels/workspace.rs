@@ -205,7 +205,11 @@ impl LabelloApp {
                     if short {
                         0.0
                     } else if layout == LayoutMode::Wide {
-                        160.0
+                        if ui.ctx().content_rect().width() < 1366.0 {
+                            128.0
+                        } else {
+                            160.0
+                        }
                     } else {
                         60.0
                     },
@@ -311,6 +315,7 @@ impl LabelloApp {
             }
             if layout == LayoutMode::Wide {
                 self.workflow_panel_toggle(ui);
+                self.inspector_panel_toggle(ui);
             }
         });
     }

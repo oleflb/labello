@@ -32,6 +32,7 @@ impl LabelloApp {
         self.admin = Default::default();
         self.work.drawer = None;
         self.work.workflow_panel_collapsed = false;
+        self.work.inspector_panel_collapsed = false;
         self.work.show_tutorial = false;
         self.work.shortcut_settings = Default::default();
         self.work.keybindings =

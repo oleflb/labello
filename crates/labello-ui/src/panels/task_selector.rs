@@ -81,10 +81,11 @@ impl LabelloApp {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
         });
-        paint_workflow_panel_toggle_icon(
+        paint_side_panel_toggle_icon(
             ui,
             response.rect,
             self.work.workflow_panel_collapsed,
+            false,
             ui.style().interact(&response).fg_stroke.color,
         );
         if response.clicked() {
@@ -207,14 +208,16 @@ impl LabelloApp {
 
 }
 
-fn paint_workflow_panel_toggle_icon(
+fn paint_side_panel_toggle_icon(
     ui: &egui::Ui,
     rect: egui::Rect,
     expanding: bool,
+    panel_on_right: bool,
     color: egui::Color32,
 ) {
     let icon = egui::Rect::from_center_size(rect.center(), egui::vec2(25.0, 16.0));
-    let (panel, chevron_x) = if expanding {
+    let panel_at_left = expanding != panel_on_right;
+    let (panel, chevron_x) = if panel_at_left {
         (
             egui::Rect::from_min_size(icon.min, egui::vec2(16.0, icon.height())),
             icon.right() - 3.0,
@@ -243,7 +246,7 @@ fn paint_workflow_panel_toggle_icon(
         egui::CornerRadius::same(1),
         color,
     );
-    let direction = if expanding { 1.0 } else { -1.0 };
+    let direction = if panel_at_left { 1.0 } else { -1.0 };
     for y in [-4.0, 4.0] {
         painter.line_segment(
             [

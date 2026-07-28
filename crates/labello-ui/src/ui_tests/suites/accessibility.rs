@@ -32,11 +32,19 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
         migration.step();
         assert!(migration.query_by_label("Annotation canvas").is_some());
         if width >= 600.0 || height >= 667.0 {
-            assert!(migration.query_by_label("Canonical guide").is_some());
-            assert!(migration.query_by_label("Exclusion reason").is_some());
             assert!(
                 migration
-                    .query_by_label("Object 1 of 2 | Read-only guide")
+                    .query_by_label("Canonical bounding-box guide · read only")
+                    .is_some()
+            );
+            assert!(
+                migration
+                    .query_by_label("Object 1 of 2")
+                    .is_some()
+            );
+            assert!(
+                migration
+                    .query_by_label("Can't annotate this object")
                     .is_some()
             );
         }
@@ -75,8 +83,12 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
                 canvas.right() + 15.0 <= inspector.left(),
                 "canvas crowds the inspector text: canvas={canvas:?} inspector={inspector:?}",
             );
+            click_accesskit_button(&mut migration, "Can't annotate this object");
             let exclusion_note = migration
-                .get_by_role_and_label(egui::accesskit::Role::MultilineTextInput, "Exclusion note")
+                .get_by_role_and_label(
+                    egui::accesskit::Role::MultilineTextInput,
+                    "Note (optional)",
+                )
                 .rect();
             assert!(
                 exclusion_note.right() <= width - 16.5,
@@ -99,7 +111,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     );
     assert!(
         full_image
-            .query_by_label("Confirm all guides & finish")
+            .query_by_label_contains("Confirm all guides & finish")
             .is_some()
     );
     assert!(
@@ -137,7 +149,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     no_guides.step();
     assert!(
         no_guides
-            .query_by_label("Confirm no guides & finish")
+            .query_by_label_contains("Confirm no guides & finish")
             .is_some()
     );
     assert!(
@@ -166,11 +178,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             app
         });
     deleted.step();
-    assert!(
-        deleted
-            .query_by_label("Deleted guide tombstone | Status: Pending")
-            .is_some()
-    );
+    assert!(deleted.query_by_label("Object 1 of 2").is_some());
     assert!(deleted.query_by_label("Reload assignment state").is_some());
     assert_label_inside(
         &deleted,
@@ -294,7 +302,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
     assert!(annotated.query_by_label("Reopen excluded target").is_none());
     assert!(
         annotated
-            .query_by_label("Focus current box (guide v1)")
+            .query_by_label("Refocus box")
             .is_some()
     );
 }

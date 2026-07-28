@@ -4,8 +4,10 @@ impl LabelloApp {
             return;
         }
         if self.manual_migration_active() {
-            if layout != LayoutMode::Wide && ui.button("Migration controls").clicked() {
-                self.work.drawer = Some(Drawer::Inspector);
+            let icon_only = ui.available_width() < 432.0;
+            if layout != LayoutMode::Wide {
+                self.migration_workspace_actions(ui, false);
+                self.drawer_panel_buttons(ui, icon_only);
             }
             return;
         }
@@ -112,8 +114,18 @@ impl LabelloApp {
 
     pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
         if self.manual_migration_active() {
-            if ui.button("Migration controls").clicked() {
-                self.work.drawer = Some(Drawer::Inspector);
+            let available_width = ui.available_width();
+            let icon_only = available_width < 432.0;
+            if available_width >= 272.0 {
+                ui.horizontal_wrapped(|ui| {
+                    self.migration_workspace_actions(ui, true);
+                    self.drawer_panel_buttons(ui, icon_only);
+                });
+            } else {
+                ui.vertical(|ui| {
+                    self.migration_workspace_actions(ui, true);
+                    ui.horizontal(|ui| self.drawer_panel_buttons(ui, true));
+                });
             }
             return;
         }
@@ -224,6 +236,64 @@ impl LabelloApp {
                 },
             );
         });
+    }
+
+    fn drawer_panel_buttons(&mut self, ui: &mut egui::Ui, icon_only: bool) {
+        self.drawer_panel_button(ui, Drawer::Workflow, "Workflow", false, icon_only);
+        self.drawer_panel_button(ui, Drawer::Inspector, "Inspector", true, icon_only);
+    }
+
+    fn drawer_panel_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        drawer: Drawer,
+        label: &'static str,
+        panel_on_right: bool,
+        icon_only: bool,
+    ) {
+        let selected = self.work.drawer == Some(drawer);
+        let icon_id = ui.id().with(("drawer-panel-icon", label));
+        let icon_width = if icon_only { 20.0 } else { 25.0 };
+        let icon = egui::Atom::custom(icon_id, egui::vec2(icon_width, 16.0));
+        let content = if icon_only {
+            egui::Atoms::new(icon)
+        } else {
+            egui::Atoms::new((icon, RichText::new(label)))
+        };
+        let choice = egui::Button::new(content)
+        .selected(selected)
+        .min_size(egui::vec2(if icon_only { 44.0 } else { 0.0 }, 44.0))
+        .gap(theme::SPACE_2)
+        .atom_ui(ui);
+        let icon_rect = choice.rect(icon_id);
+        let action = match drawer {
+            Drawer::Workflow => labello_domain::UserAction::ToggleWorkflowPanel,
+            Drawer::Inspector => labello_domain::UserAction::ToggleInspectorPanel,
+        };
+        let response = choice.response.on_hover_text(format!(
+            "{label} ({})",
+            self.shortcut_text(ui.ctx(), action)
+        ));
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                true,
+                selected,
+                label,
+            )
+        });
+        if let Some(icon_rect) = icon_rect {
+            paint_side_panel_toggle_icon(
+                ui,
+                icon_rect,
+                !selected,
+                panel_on_right,
+                ui.style().interact(&response).fg_stroke.color,
+            );
+        }
+        if response.clicked() {
+            self.trigger_user_action(action);
+        }
     }
 
 }

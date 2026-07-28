@@ -115,7 +115,8 @@ impl LabelloApp {
             && right_remaining >= 96.0 + spacing;
         let hidden_account = account.is_some() && !show_account;
         let hidden_actions = actions[visible_action_count..].to_vec();
-        let panel_actions_in_overflow = layout != LayoutMode::Wide && self.work_view();
+        let panel_actions_in_overflow =
+            layout != LayoutMode::Wide && self.work_view() && !self.manual_migration_active();
 
         let destinations = self.primary_navigation_destinations();
         let navigation_width = |label: &str| 30.0 + label.chars().count() as f32 * 7.5;

@@ -22,6 +22,7 @@ impl LabelloApp {
                             }
                             self.work.migration.draft = None;
                             self.work.migration.draft_group = None;
+                            self.work.migration.draft_dirty = false;
                             self.work.migration.keypoint_index = 0;
                             self.work.migration.error = None;
                             if self.view == AppView::Review {

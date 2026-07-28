@@ -49,7 +49,7 @@ impl LabelloApp {
         }
         for suggestion in &prelabels {
             let selected = self.work.selected_prelabel.as_ref() == Some(&suggestion.suggestion_id);
-            let frame = theme::selected_card_frame(selected);
+            let frame = theme::prelabel_card_frame(selected);
             frame.show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     if ui

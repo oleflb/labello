@@ -15,11 +15,34 @@ use crate::{
 const MAX_EXCLUSION_NOTE_BYTES: usize = 2_000;
 
 #[derive(Clone, Debug)]
+enum MigrationPrimaryAction {
+    SaveSkeleton(ObjectGroupId),
+    KeepDisposition(ObjectGroupId),
+    Confirm { no_guides: bool },
+}
+
+impl MigrationPrimaryAction {
+    fn label(&self, compact: bool) -> &'static str {
+        match (self, compact) {
+            (Self::SaveSkeleton(_), true) => "Save & next",
+            (Self::SaveSkeleton(_), false) => "Save skeleton & advance",
+            (Self::KeepDisposition(_), true) => "Keep & next",
+            (Self::KeepDisposition(_), false) => "Keep current & advance",
+            (Self::Confirm { no_guides: true }, true) => "Confirm & finish",
+            (Self::Confirm { no_guides: true }, false) => "Confirm no guides & finish",
+            (Self::Confirm { no_guides: false }, true) => "Confirm & finish",
+            (Self::Confirm { no_guides: false }, false) => "Confirm all guides & finish",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ManualMigrationState {
     pub cursor: Option<MigrationCursor>,
     pub active_pass_id: Option<MigrationPassId>,
     pub draft: Option<SkeletonGeometry>,
     pub draft_group: Option<ObjectGroupId>,
+    pub draft_dirty: bool,
     pub keypoint_index: usize,
     pub next_hidden: bool,
     pub exclusion_reason: MigrationExclusionReason,
@@ -37,6 +60,7 @@ impl Default for ManualMigrationState {
             active_pass_id: None,
             draft: None,
             draft_group: None,
+            draft_dirty: false,
             keypoint_index: 0,
             next_hidden: false,
             exclusion_reason: MigrationExclusionReason::NoValidSkeleton,
@@ -114,6 +138,7 @@ impl LabelloApp {
             self.work.migration.cursor = cursor;
             self.work.migration.draft = None;
             self.work.migration.draft_group = None;
+            self.work.migration.draft_dirty = false;
             self.work.migration.keypoint_index = 0;
             self.work.migration.next_hidden = false;
             self.work.migration.exclusion_note.clear();
@@ -135,6 +160,10 @@ impl LabelloApp {
             return;
         };
         let active = self.migration_active_target();
+        let object_focused = matches!(
+            self.work.migration.cursor,
+            Some(MigrationCursor::Object { .. })
+        ) || (self.view == AppView::Review && active.is_some());
         let guide = active.as_ref().and_then(|(_, target)| {
             state
                 .current_annotation(&target.guide_annotation_id)
@@ -158,6 +187,9 @@ impl LabelloApp {
                 let current = active
                     .as_ref()
                     .is_some_and(|(group, _)| group == &target.object_group_id);
+                if object_focused && !current {
+                    continue;
+                }
                 let color = if current {
                     theme::ACCENT_HOVER
                 } else {
@@ -228,23 +260,6 @@ impl LabelloApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if let Some((group_id, _)) = active.as_ref() {
-            let guide_state = if guide.as_ref().is_some_and(|guide| guide.deleted) {
-                "Deleted guide tombstone"
-            } else if guide.is_some() {
-                "Canonical guide"
-            } else {
-                "Guide unavailable"
-            };
-            let disposition = self.migration_disposition(group_id);
-            ui.label(
-                RichText::new(format!(
-                    "{guide_state} | Status: {}",
-                    disposition_label(disposition.as_ref())
-                ))
-                .strong(),
-            );
-        }
         let interaction = CanvasInteraction {
             editable: !self.work.migration.busy
                 && guide.as_ref().is_some_and(|guide| !guide.deleted)
@@ -276,7 +291,11 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn manual_migration_actions(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn manual_migration_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        show_primary_actions: bool,
+    ) {
         if let Some(error) = self.work.migration.error.clone() {
             theme::inline_message(ui, theme::Intent::Error, error);
             if ui
@@ -290,27 +309,38 @@ impl LabelloApp {
             }
         }
         if self.view == AppView::Review {
-            self.migration_review_actions(ui);
+            self.migration_review_actions(ui, show_primary_actions);
             return;
         }
         let (expected, annotated, excluded, pending) = self.migration_counts();
-        ui.label(RichText::new("Migration status").strong());
-        ui.horizontal_wrapped(|ui| {
-            theme::badge(ui, &format!("Total {expected}"), theme::Intent::Info);
-            theme::badge(
-                ui,
-                &format!("Annotated {annotated}"),
-                theme::Intent::Success,
+        if expected == 0 {
+            ui.label(RichText::new("No canonical guides").color(theme::TEXT_MUTED));
+        } else {
+            let resolved = annotated + excluded;
+            ui.label(
+                RichText::new(format!(
+                    "{resolved} of {expected} resolved · {pending} remaining"
+                ))
+                .strong(),
             );
-            theme::badge(ui, &format!("Excluded {excluded}"), theme::Intent::Error);
-            theme::badge(ui, &format!("Pending {pending}"), theme::Intent::Neutral);
-        });
+            if resolved > 0 {
+                ui.small(format!("{annotated} skeletons · {excluded} excluded"));
+            }
+        }
         match self.work.migration.cursor.clone() {
             Some(MigrationCursor::Object {
                 object_group_id,
                 sequence_index,
-            }) => self.migration_object_actions(ui, object_group_id, sequence_index, expected),
-            Some(MigrationCursor::FullImage) => self.migration_full_image_actions(ui, expected),
+            }) => self.migration_object_actions(
+                ui,
+                object_group_id,
+                sequence_index,
+                expected,
+                show_primary_actions,
+            ),
+            Some(MigrationCursor::FullImage) => {
+                self.migration_full_image_actions(ui, expected, show_primary_actions)
+            }
             None => {
                 theme::inline_message(
                     ui,
@@ -336,18 +366,21 @@ impl LabelloApp {
         group_id: ObjectGroupId,
         sequence_index: u64,
         expected: u64,
+        show_primary_action: bool,
     ) {
         ui.separator();
-        ui.label(RichText::new("Canonical guide").strong());
-        ui.label(format!(
-            "Object {} of {expected} | Read-only guide",
-            sequence_index + 1
-        ));
         let status = self.migration_disposition(&group_id);
-        ui.label(format!(
-            "Current status: {}",
-            disposition_label(status.as_ref())
-        ));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!("Object {} of {expected}", sequence_index + 1)).strong(),
+            );
+            theme::badge(
+                ui,
+                disposition_label(status.as_ref()),
+                disposition_intent(status.as_ref()),
+            );
+        });
+        ui.small("Canonical bounding-box guide · read only");
         let guide = self.work.current_state.as_ref().and_then(|state| {
             let target = state
                 .migration_target_sets
@@ -362,9 +395,7 @@ impl LabelloApp {
         let target_available = self.migration_expectation(&group_id).is_some();
         let guide_valid = guide.as_ref().is_some_and(|guide| !guide.deleted);
         if let Some(guide) = guide.as_ref().filter(|guide| !guide.deleted)
-            && ui
-                .button(format!("Focus current box (guide v{})", guide.version))
-                .clicked()
+            && ui.small_button("Refocus box").clicked()
         {
             self.work.canvas.focus_annotation(guide);
         }
@@ -405,32 +436,18 @@ impl LabelloApp {
             && status
                 .as_ref()
                 .is_some_and(|status| !matches!(status, MigrationDispositionStatus::Pending))
-        {
-            if ui
+            && matches!(status, Some(MigrationDispositionStatus::Excluded { .. }))
+            && ui
                 .add_enabled(
-                    !self.work.migration.busy && guide_valid && !dependency,
-                    egui::Button::new("Keep current disposition & advance"),
+                    !self.work.migration.busy && guide_valid,
+                    egui::Button::new("Reopen excluded target"),
                 )
                 .clicked()
-            {
-                self.request_keep_migration_target(group_id.clone());
-            }
-            if matches!(status, Some(MigrationDispositionStatus::Excluded { .. })) {
-                if ui
-                    .add_enabled(
-                        !self.work.migration.busy && guide_valid,
-                        egui::Button::new("Reopen excluded target"),
-                    )
-                    .clicked()
-                {
-                    self.request_reopen_migration_target(group_id.clone());
-                }
-            } else {
-                ui.small("Edit the annotated skeleton directly below; reopening is not required.");
-            }
+        {
+            self.request_reopen_migration_target(group_id.clone());
         }
         ui.separator();
-        ui.label(RichText::new("Skeleton draft").strong());
+        ui.label(RichText::new("Skeleton").strong());
         self.ensure_migration_draft(&group_id);
         if matches!(status, Some(MigrationDispositionStatus::Annotated { .. }))
             && ui
@@ -449,6 +466,7 @@ impl LabelloApp {
                 .unwrap_or_default();
             self.work.migration.draft = Some(ManualMigrationState::empty_skeleton(names));
             self.work.migration.keypoint_index = 0;
+            self.work.migration.draft_dirty = true;
         }
         let (placed, total, next_name) = self
             .work
@@ -470,52 +488,97 @@ impl LabelloApp {
                 )
             })
             .unwrap_or_default();
-        ui.label(format!(
-            "Draft status: {placed} of {total} keypoints placed"
-        ));
-        if ui
-            .add_enabled(
-                guide_valid && self.work.migration.keypoint_index > 0 && !self.work.migration.busy,
-                egui::Button::new("Undo last keypoint").shortcut_text(
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::UndoEdit),
-                ),
-            )
-            .clicked()
+        if let Some(name) = next_name.as_ref() {
+            ui.label(RichText::new(format!("Place {name}")).strong());
+            ui.small(format!(
+                "{placed} of {total} placed · click its position inside the box"
+            ));
+        } else {
+            ui.label(RichText::new("Skeleton ready").strong());
+            ui.small(format!("{placed} of {total} keypoints placed"));
+        }
+        if self.work.migration.keypoint_index > 0
+            && ui
+                .add_enabled(
+                    guide_valid && !self.work.migration.busy,
+                    egui::Button::new("Undo last keypoint").shortcut_text(
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::UndoEdit),
+                    ),
+                )
+                .clicked()
         {
             self.remove_last_migration_keypoint();
         }
         if let Some(name) = next_name {
-            ui.label(format!("Next keypoint: {name}"));
-            ui.checkbox(&mut self.work.migration.next_hidden, "Place as hidden");
-            let can_absent = self
+            let (allow_hidden, can_absent) = self
                 .selected_task()
                 .and_then(|task| task.skeleton.as_ref())
-                .is_some_and(|spec| {
-                    spec.allow_absent
-                        && spec
-                            .keypoints
-                            .get(self.work.migration.keypoint_index)
-                            .is_some_and(|keypoint| !keypoint.required)
-                });
-            if ui
-                .add_enabled(can_absent, egui::Button::new("Mark keypoint absent"))
-                .clicked()
-            {
-                self.skip_migration_keypoint();
-            }
+                .map(|spec| {
+                    (
+                        spec.allow_hidden,
+                        spec.allow_absent
+                            && spec
+                                .keypoints
+                                .get(self.work.migration.keypoint_index)
+                                .is_some_and(|keypoint| !keypoint.required),
+                    )
+                })
+                .unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                if allow_hidden {
+                    ui.checkbox(
+                        &mut self.work.migration.next_hidden,
+                        format!("Place {name} as hidden"),
+                    );
+                }
+                if can_absent
+                    && ui
+                        .add(
+                            egui::Button::new(format!("Mark {name} absent")).shortcut_text(
+                                self.shortcut_text(
+                                    ui.ctx(),
+                                    labello_domain::UserAction::MarkKeypointAbsent,
+                                ),
+                            ),
+                        )
+                        .clicked()
+                {
+                    self.skip_migration_keypoint();
+                }
+            });
         }
-        if theme::primary_button(
-            ui,
-            !self.work.migration.busy && guide_valid && self.migration_draft_valid(),
-            egui::Button::new("Save skeleton & advance"),
-        )
-        .clicked()
-        {
-            self.request_save_migration_skeleton(group_id.clone());
+        if show_primary_action {
+            self.migration_primary_button(ui, false);
         }
         ui.separator();
-        ui.label(RichText::new("Exclude target").strong());
-        let reason_label = ui.label("Exclusion reason");
+        let exclusion = ui
+            .scope(|ui| {
+                ui.style_mut().animation_time = 0.0;
+                egui::CollapsingHeader::new("Can't annotate this object")
+                    .id_salt(("migration-exclusion", group_id.as_str()))
+                    .show(ui, |ui| {
+                        self.migration_exclusion_actions(ui, &group_id, target_available);
+                    })
+            })
+            .inner;
+        if exclusion.header_response.clicked()
+            && let Some(body) = exclusion.body_response
+        {
+            body.scroll_to_me(Some(egui::Align::Center));
+        }
+    }
+
+    fn migration_exclusion_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        group_id: &ObjectGroupId,
+        target_available: bool,
+    ) {
+        ui.label(
+            RichText::new("Use only when a valid skeleton cannot be placed.")
+                .color(theme::TEXT_MUTED),
+        );
+        let reason_label = ui.label("Reason");
         egui::ComboBox::from_id_salt("migration-exclusion-reason")
             .width(ui.available_width())
             .selected_text(exclusion_label(self.work.migration.exclusion_reason))
@@ -537,27 +600,28 @@ impl LabelloApp {
             })
             .response
             .labelled_by(reason_label.id);
-        let note_label = ui.label("Exclusion note");
+        let note_label = ui.label(
+            if self.work.migration.exclusion_reason == MigrationExclusionReason::Other {
+                "Note (required)"
+            } else {
+                "Note (optional)"
+            },
+        );
         theme::resizable_multiline_text_edit(
             ui,
             ui.make_persistent_id("migration-exclusion-note"),
             &mut self.work.migration.exclusion_note,
             2,
-            Some("Optional context for reviewers"),
+            Some("Context for reviewers"),
         )
         .labelled_by(note_label.id);
         let note_bytes = self.work.migration.exclusion_note.trim().len();
         let note_valid = note_bytes <= MAX_EXCLUSION_NOTE_BYTES
             && (self.work.migration.exclusion_reason != MigrationExclusionReason::Other
                 || !self.work.migration.exclusion_note.trim().is_empty());
-        ui.small(format!(
-            "{note_bytes} of {MAX_EXCLUSION_NOTE_BYTES} bytes{}",
-            if self.work.migration.exclusion_reason == MigrationExclusionReason::Other {
-                "; required for Other"
-            } else {
-                ""
-            }
-        ));
+        if note_bytes > 0 || !note_valid {
+            ui.small(format!("{note_bytes} of {MAX_EXCLUSION_NOTE_BYTES} bytes"));
+        }
         if !note_valid {
             theme::inline_message(
                 ui,
@@ -565,24 +629,30 @@ impl LabelloApp {
                 "Use at most 2000 UTF-8 bytes; the Other reason also requires a note.",
             );
         }
-        if ui
-            .add_enabled(
-                !self.work.migration.busy && note_valid && target_available,
-                egui::Button::new("Exclude target & advance"),
-            )
-            .clicked()
+        if theme::danger_button(
+            ui,
+            !self.work.migration.busy && note_valid && target_available,
+            egui::Button::new("Exclude & advance"),
+        )
+        .clicked()
         {
-            self.request_exclude_migration_target(group_id);
+            self.request_exclude_migration_target(group_id.clone());
         }
     }
 
-    fn migration_full_image_actions(&mut self, ui: &mut egui::Ui, expected: u64) {
+    fn migration_full_image_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        expected: u64,
+        show_primary_action: bool,
+    ) {
         ui.separator();
         ui.label(RichText::new("Full-image confirmation").strong());
-        ui.label(
-            "Object selection is fixed by canonical replay order; canvas clicks do not change it.",
-        );
-        self.migration_status_list(ui);
+        if expected > 0 {
+            egui::CollapsingHeader::new(format!("Review {expected} resolved objects"))
+                .id_salt("migration-resolved-objects")
+                .show(ui, |ui| self.migration_status_list(ui));
+        }
         let (confirmation, button_label) = if expected == 0 {
             (
                 "Confirm that this image has no canonical guides and needs no skeletons.",
@@ -595,14 +665,14 @@ impl LabelloApp {
             )
         };
         ui.label(confirmation);
-        if theme::primary_button(
-            ui,
-            !self.work.migration.busy,
-            egui::Button::new(button_label),
-        )
-        .clicked()
-        {
-            self.request_confirm_migration();
+        if show_primary_action {
+            debug_assert_eq!(
+                self.migration_primary_action()
+                    .as_ref()
+                    .map(|(action, _)| action.label(false)),
+                Some(button_label)
+            );
+            self.migration_primary_button(ui, false);
         }
         if self.work.migration.active_pass_id.is_none()
             && expected > 0
@@ -617,7 +687,7 @@ impl LabelloApp {
         }
     }
 
-    fn migration_review_actions(&mut self, ui: &mut egui::Ui) {
+    fn migration_review_actions(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         let Some((task_id, targets, confirmation)) =
             self.work.current_state.as_ref().and_then(|state| {
                 let task_id = self.work.selected_task_id.clone()?;
@@ -669,25 +739,33 @@ impl LabelloApp {
                     }
                 })
             });
-            if let Some(review_target) = review_target {
-                self.migration_review_buttons(ui, task_id, review_target);
-            } else {
-                theme::inline_message(
-                    ui,
-                    theme::Intent::Error,
-                    "This migration target is pending or unavailable and cannot be reviewed.",
-                );
+            match review_target {
+                Some(review_target) if show_primary_actions => {
+                    self.migration_review_buttons(ui, task_id, review_target);
+                }
+                Some(_) => {}
+                None => {
+                    theme::inline_message(
+                        ui,
+                        theme::Intent::Error,
+                        "This migration target is pending or unavailable and cannot be reviewed.",
+                    );
+                }
             }
         } else if let Some(confirmation) = confirmation {
             theme::compact_metric(ui, "Review target", "Full-image confirmation");
-            self.migration_status_list(ui);
-            self.migration_review_buttons(
-                ui,
-                task_id,
-                labello_client::MigrationReviewTarget::Confirmation {
-                    confirmation_hash: confirmation.confirmation_hash,
-                },
-            );
+            egui::CollapsingHeader::new("Resolved objects")
+                .id_salt("migration-review-resolved-objects")
+                .show(ui, |ui| self.migration_status_list(ui));
+            if show_primary_actions {
+                self.migration_review_buttons(
+                    ui,
+                    task_id,
+                    labello_client::MigrationReviewTarget::Confirmation {
+                        confirmation_hash: confirmation.confirmation_hash,
+                    },
+                );
+            }
         } else {
             theme::inline_message(
                 ui,
@@ -707,7 +785,9 @@ impl LabelloApp {
             if theme::primary_button(
                 ui,
                 !self.work.migration.busy,
-                egui::Button::new("Approve migration item"),
+                egui::Button::new("Approve migration item").shortcut_text(
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::AcceptReviewObject),
+                ),
             )
             .clicked()
             {
@@ -720,7 +800,9 @@ impl LabelloApp {
             if theme::danger_button(
                 ui,
                 !self.work.migration.busy,
-                egui::Button::new("Reject migration item"),
+                egui::Button::new("Reject migration item").shortcut_text(
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::RejectReviewObject),
+                ),
             )
             .clicked()
             {
@@ -731,6 +813,174 @@ impl LabelloApp {
                 );
             }
         });
+    }
+
+    pub(crate) fn migration_workspace_actions(&mut self, ui: &mut egui::Ui, compact: bool) {
+        if self.view == AppView::Review {
+            if let Some((task_id, target)) = self.current_migration_review_target() {
+                self.migration_review_buttons(ui, task_id, target);
+            }
+            return;
+        }
+        self.migration_primary_button(ui, compact);
+    }
+
+    fn migration_primary_button(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let Some((action, enabled)) = self.migration_primary_action() else {
+            return;
+        };
+        let label = action.label(compact);
+        if theme::primary_button(
+            ui,
+            enabled,
+            egui::Button::new(label)
+                .shortcut_text(self.shortcut_text(ui.ctx(), labello_domain::UserAction::NextImage)),
+        )
+        .clicked()
+        {
+            self.perform_migration_primary_action(action);
+        }
+    }
+
+    fn migration_primary_action(&self) -> Option<(MigrationPrimaryAction, bool)> {
+        if self.view != AppView::Annotate {
+            return None;
+        }
+        match self.work.migration.cursor.as_ref()? {
+            MigrationCursor::Object {
+                object_group_id, ..
+            } => {
+                let status = self.migration_disposition(object_group_id)?;
+                let guide_valid = self.migration_guide_valid(object_group_id);
+                let target_available = self.migration_expectation(object_group_id).is_some();
+                let (action, action_ready) =
+                    if !matches!(status, MigrationDispositionStatus::Pending)
+                        && self.work.migration.active_pass_id.is_some()
+                        && !self.work.migration.draft_dirty
+                    {
+                        (
+                            MigrationPrimaryAction::KeepDisposition(object_group_id.clone()),
+                            !self.migration_dependency_changed(object_group_id),
+                        )
+                    } else {
+                        (
+                            MigrationPrimaryAction::SaveSkeleton(object_group_id.clone()),
+                            self.migration_draft_valid(),
+                        )
+                    };
+                Some((
+                    action,
+                    !self.work.migration.busy && guide_valid && target_available && action_ready,
+                ))
+            }
+            MigrationCursor::FullImage => {
+                let (expected, ..) = self.migration_counts();
+                Some((
+                    MigrationPrimaryAction::Confirm {
+                        no_guides: expected == 0,
+                    },
+                    !self.work.migration.busy,
+                ))
+            }
+        }
+    }
+
+    fn perform_migration_primary_action(&mut self, action: MigrationPrimaryAction) {
+        match action {
+            MigrationPrimaryAction::SaveSkeleton(group_id) => {
+                self.request_save_migration_skeleton(group_id)
+            }
+            MigrationPrimaryAction::KeepDisposition(group_id) => {
+                self.request_keep_migration_target(group_id)
+            }
+            MigrationPrimaryAction::Confirm { .. } => self.request_confirm_migration(),
+        }
+    }
+
+    pub(crate) fn trigger_migration_primary_action(&mut self) {
+        if let Some((action, true)) = self.migration_primary_action() {
+            self.perform_migration_primary_action(action);
+        }
+    }
+
+    pub(crate) fn trigger_migration_review_action(
+        &mut self,
+        decision: labello_domain::ReviewDecision,
+    ) {
+        if self.work.migration.busy {
+            return;
+        }
+        let Some((task_id, target)) = self.current_migration_review_target() else {
+            return;
+        };
+        self.request_review_migration(task_id, target, decision);
+    }
+
+    fn current_migration_review_target(
+        &self,
+    ) -> Option<(
+        labello_domain::TaskId,
+        labello_client::MigrationReviewTarget,
+    )> {
+        let state = self.work.current_state.as_ref()?;
+        let task_id = self.work.selected_task_id.clone()?;
+        let mut targets = state.migration_target_sets.get(&task_id)?.targets.clone();
+        targets.sort_by_key(|target| target.sequence_index);
+        if let Some(target) = targets.get(self.work.migration.review_index) {
+            let disposition = state
+                .migration_dispositions
+                .get(&task_id)?
+                .get(&target.object_group_id)?;
+            if matches!(disposition.status, MigrationDispositionStatus::Pending) {
+                return None;
+            }
+            return Some((
+                task_id,
+                labello_client::MigrationReviewTarget::Disposition {
+                    object_group_id: target.object_group_id.clone(),
+                    disposition_version: disposition.disposition_version,
+                },
+            ));
+        }
+        let confirmation = state.migration_confirmations.get(&task_id)?;
+        Some((
+            task_id,
+            labello_client::MigrationReviewTarget::Confirmation {
+                confirmation_hash: confirmation.confirmation_hash.clone(),
+            },
+        ))
+    }
+
+    fn migration_guide_valid(&self, group_id: &ObjectGroupId) -> bool {
+        let Some(state) = self.work.current_state.as_ref() else {
+            return false;
+        };
+        let Some(target) = self.work.selected_task_id.as_ref().and_then(|task_id| {
+            state
+                .migration_target_sets
+                .get(task_id)?
+                .targets
+                .iter()
+                .find(|target| &target.object_group_id == group_id)
+        }) else {
+            return false;
+        };
+        state
+            .current_annotation(&target.guide_annotation_id)
+            .is_some_and(|guide| !guide.deleted)
+    }
+
+    fn migration_dependency_changed(&self, group_id: &ObjectGroupId) -> bool {
+        self.work
+            .current_state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .migration_dependencies
+                    .get(self.work.selected_task_id.as_ref()?)
+                    .and_then(|markers| markers.get(group_id))
+            })
+            .is_some()
     }
 
     fn migration_status_list(&self, ui: &mut egui::Ui) {
@@ -957,6 +1207,7 @@ impl LabelloApp {
         self.work.migration.draft =
             Some(existing.unwrap_or_else(|| ManualMigrationState::empty_skeleton(names)));
         self.work.migration.draft_group = Some(group_id.clone());
+        self.work.migration.draft_dirty = false;
     }
 
     fn place_migration_keypoint(&mut self, point: NormalizedPoint) {
@@ -980,6 +1231,7 @@ impl LabelloApp {
             KeypointState::Visible
         };
         self.work.migration.keypoint_index += 1;
+        self.work.migration.draft_dirty = true;
         self.work.migration.next_hidden = false;
     }
 
@@ -997,6 +1249,7 @@ impl LabelloApp {
             });
         if allowed {
             self.work.migration.keypoint_index += 1;
+            self.work.migration.draft_dirty = true;
             self.work.migration.next_hidden = false;
         }
     }
@@ -1020,6 +1273,7 @@ impl LabelloApp {
         keypoint.point = None;
         keypoint.state = KeypointState::Absent;
         self.work.migration.keypoint_index = index;
+        self.work.migration.draft_dirty = true;
         self.work.migration.next_hidden = false;
     }
 
@@ -1280,6 +1534,14 @@ fn disposition_label(status: Option<&MigrationDispositionStatus>) -> &'static st
         Some(MigrationDispositionStatus::Annotated { .. }) => "Skeleton annotated",
         Some(MigrationDispositionStatus::Excluded { .. }) => "Excluded",
         None => "Unavailable",
+    }
+}
+
+fn disposition_intent(status: Option<&MigrationDispositionStatus>) -> theme::Intent {
+    match status {
+        Some(MigrationDispositionStatus::Annotated { .. }) => theme::Intent::Success,
+        Some(MigrationDispositionStatus::Excluded { .. }) => theme::Intent::Error,
+        Some(MigrationDispositionStatus::Pending) | None => theme::Intent::Neutral,
     }
 }
 

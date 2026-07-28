@@ -295,6 +295,18 @@ pub fn selected_card_frame(selected: bool) -> Frame {
     }
 }
 
+pub fn prelabel_card_frame(selected: bool) -> Frame {
+    let alpha = if selected { 48 } else { 24 };
+    card_frame()
+        .fill(Color32::from_rgba_unmultiplied(
+            PRELABEL.r(),
+            PRELABEL.g(),
+            PRELABEL.b(),
+            alpha,
+        ))
+        .stroke(Stroke::new(if selected { 2.0 } else { 1.0 }, PRELABEL))
+}
+
 pub fn modal(ctx: &egui::Context, id: Id) -> Modal {
     Modal::new(id).frame(Frame::window(&ctx.style_of(ctx.theme())))
 }
@@ -663,5 +675,18 @@ mod tests {
         assert!(adjudicator.top() >= annotator.bottom());
         assert!(annotator.height() <= 32.0);
         assert!(adjudicator.height() <= 32.0);
+    }
+
+    #[test]
+    fn prelabel_cards_reuse_the_canvas_prelabel_color() {
+        let idle = prelabel_card_frame(false);
+        let selected = prelabel_card_frame(true);
+
+        assert_eq!(idle.stroke.color, PRELABEL);
+        assert_eq!(selected.stroke.color, PRELABEL);
+        assert_eq!(idle.fill.a(), 24);
+        assert_eq!(selected.fill.a(), 48);
+        assert!(selected.fill.a() > idle.fill.a());
+        assert!(selected.stroke.width > idle.stroke.width);
     }
 }

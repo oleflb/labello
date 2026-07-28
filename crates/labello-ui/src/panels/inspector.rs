@@ -1,8 +1,34 @@
 impl LabelloApp {
+    pub(crate) fn inspector_panel_toggle(&mut self, ui: &mut egui::Ui) {
+        let (label, hover) = if self.work.inspector_panel_collapsed {
+            ("Expand inspector panel", "Expand inspector panel")
+        } else {
+            ("Collapse inspector panel", "Collapse inspector panel")
+        };
+        let response = ui
+            .add(egui::Button::new("").min_size(egui::vec2(44.0, 44.0)))
+            .on_hover_text(hover);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
+        });
+        paint_side_panel_toggle_icon(
+            ui,
+            response.rect,
+            self.work.inspector_panel_collapsed,
+            true,
+            ui.style().interact(&response).fg_stroke.color,
+        );
+        if response.clicked() {
+            self.trigger_user_action(labello_domain::UserAction::ToggleInspectorPanel);
+            ui.ctx()
+                .request_discard("inspector panel visibility changed");
+        }
+    }
+
     pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         ui.heading(RichText::new("Inspector").color(theme::TEXT));
         if self.manual_migration_active() {
-            self.manual_migration_actions(ui);
+            self.manual_migration_actions(ui, show_primary_actions);
             return;
         }
         let active_count = self

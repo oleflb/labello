@@ -1112,6 +1112,110 @@ fn responsive_modes_do_not_switch_at_1240() {
 }
 
 #[test]
+fn wide_inspector_uses_the_toolbar_toggle_and_returns_its_width_to_the_canvas() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.set_size(egui::vec2(1288.0, 900.0));
+    harness.step();
+
+    let expanded_canvas_right = harness.get_by_label("Annotation canvas").rect().right();
+    let workflow_toggle = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Collapse workflow panel",
+        )
+        .rect();
+    let inspector_toggle = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::Button,
+            "Collapse inspector panel",
+        )
+        .rect();
+    assert!(
+        inspector_toggle.left() >= workflow_toggle.right()
+            && inspector_toggle.left() - workflow_toggle.right() <= 12.0,
+        "the side-panel controls should form one toolbar group"
+    );
+    let more_actions = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "More actions")
+        .rect();
+    assert!(
+        more_actions.right() <= 1288.0,
+        "the paired panel controls must not push workspace actions off-screen: {more_actions:?}"
+    );
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Collapse inspector panel")
+        .click_accesskit();
+    harness.step();
+    harness.step();
+
+    assert!(harness.state().work.inspector_panel_collapsed);
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Collapse inspector panel")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Expand inspector panel")
+            .is_some()
+    );
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Expand inspector panel")
+            .rect()
+            .right()
+            <= 1288.0
+    );
+    let collapsed_canvas_right = harness.get_by_label("Annotation canvas").rect().right();
+    assert!(
+        collapsed_canvas_right - expanded_canvas_right
+            >= LayoutMode::INSPECTOR_PANEL_WIDTH - theme::SPACE_4,
+        "collapsing the Inspector did not return its width to the canvas"
+    );
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Expand inspector panel")
+        .click_accesskit();
+    harness.step();
+    harness.step();
+    assert!(!harness.state().work.inspector_panel_collapsed);
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Collapse inspector panel")
+            .is_some()
+    );
+
+    harness.set_size(egui::vec2(900.0, 900.0));
+    harness.step();
+    harness
+        .state_mut()
+        .trigger_user_action(labello_domain::UserAction::ToggleInspectorPanel);
+    assert_eq!(harness.state().work.drawer, Some(Drawer::Inspector));
+}
+
+#[test]
+fn compact_panel_shortcuts_close_the_drawer_they_open() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.set_size(egui::vec2(900.0, 800.0));
+    harness.step();
+
+    for (key, drawer) in [
+        (egui::Key::W, Drawer::Workflow),
+        (egui::Key::I, Drawer::Inspector),
+    ] {
+        harness.key_press(key);
+        harness.step();
+        assert_eq!(harness.state().work.drawer, Some(drawer));
+
+        harness.key_press(key);
+        harness.step();
+        assert_eq!(harness.state().work.drawer, None);
+    }
+}
+
+#[test]
 fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());

@@ -52,7 +52,10 @@ impl eframe::App for LabelloApp {
                     }
                 });
         }
-        let inspector_left = (self.work_view() && layout == LayoutMode::Wide).then(|| {
+        let show_wide_inspector = self.work_view()
+            && layout == LayoutMode::Wide
+            && !self.work.inspector_panel_collapsed;
+        let inspector_left = show_wide_inspector.then(|| {
             ui.ctx().content_rect().right() - LayoutMode::INSPECTOR_PANEL_WIDTH - theme::SPACE_2
         });
         if self.work_view() && layout == LayoutMode::Wide {
@@ -65,29 +68,31 @@ impl eframe::App for LabelloApp {
                         egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
                     });
             }
-            egui::Panel::right("review_panel")
-                .resizable(false)
-                .exact_size(LayoutMode::INSPECTOR_PANEL_WIDTH)
-                .frame(theme::side_frame().inner_margin(egui::Margin {
-                    left: 24,
-                    right: 16,
-                    top: 16,
-                    bottom: 16,
-                }))
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            egui::Frame::new()
-                                .inner_margin(egui::Margin {
-                                    left: 2,
-                                    right: 0,
-                                    top: 0,
-                                    bottom: 0,
-                                })
-                                .show(ui, |ui| self.right_panel(ui, true));
-                        });
-                });
+            if show_wide_inspector {
+                egui::Panel::right("review_panel")
+                    .resizable(false)
+                    .exact_size(LayoutMode::INSPECTOR_PANEL_WIDTH)
+                    .frame(theme::side_frame().inner_margin(egui::Margin {
+                        left: 24,
+                        right: 16,
+                        top: 16,
+                        bottom: 16,
+                    }))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin {
+                                        left: 2,
+                                        right: 0,
+                                        top: 0,
+                                        bottom: 0,
+                                    })
+                                    .show(ui, |ui| self.right_panel(ui, true));
+                            });
+                    });
+            }
         }
         let central_frame = if self.work_view() {
             theme::central_frame()
