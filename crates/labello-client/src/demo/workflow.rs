@@ -36,6 +36,7 @@ impl ImageApi for DemoLabelloApi {
             Ok(crate::AssignmentAvailability {
                 kind: request.kind,
                 tasks: std::collections::BTreeMap::new(),
+                related: Vec::new(),
             })
         })
     }

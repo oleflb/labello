@@ -20,6 +20,15 @@ pub struct AssignmentAvailabilityRequest {
 pub struct AssignmentAvailability {
     pub kind: AssignmentKind,
     pub tasks: BTreeMap<TaskId, bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<AssignmentAvailabilityEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentAvailabilityEntry {
+    pub kind: AssignmentKind,
+    pub tasks: BTreeMap<TaskId, bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

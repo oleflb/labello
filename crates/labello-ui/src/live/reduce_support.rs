@@ -43,12 +43,21 @@ impl LabelloApp {
                         Ok(availability)
                             if self.assignment_kind().as_ref() == Some(&availability.kind) =>
                         {
+                            let checked_at = labello_domain::now();
+                            for related in availability.related {
+                                self.cache_assignment_availability(
+                                    self.config.dataset_id.clone(),
+                                    related.kind,
+                                    related.tasks,
+                                    checked_at,
+                                );
+                            }
                             self.work.availability.dataset_id =
                                 Some(self.config.dataset_id.clone());
                             self.work.availability.kind = Some(availability.kind);
                             self.work.availability.tasks = availability.tasks;
                             self.work.availability.resolved = true;
-                            self.work.availability.checked_at = Some(labello_domain::now());
+                            self.work.availability.checked_at = Some(checked_at);
                             self.work.availability.error = None;
                             if self.work.availability.load_after_resolution {
                                 self.request_next_image();

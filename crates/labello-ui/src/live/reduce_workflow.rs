@@ -189,7 +189,7 @@ impl LabelloApp {
                                 .to_string(),
                         );
                     } else {
-                        self.request_assignment_availability();
+                        self.refresh_assignment_availability_if_due();
                     }
                 }
                 UiMessage::SaveFinished {
@@ -281,7 +281,7 @@ impl LabelloApp {
                             }
                             self.runtime.error = None;
                             self.finish_annotation_transition(ctx, released_image_id);
-                            self.request_assignment_availability();
+                            self.refresh_assignment_availability_if_due();
                         }
                         Err(error) => {
                             self.work.pending_transition = None;

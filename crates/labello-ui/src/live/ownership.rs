@@ -2,7 +2,7 @@ impl LabelloApp {
     pub(crate) fn queue_command(&mut self, command: UiCommand) -> bool {
         if self.runtime.commands.len() < 64 {
             if command.invalidates_assignment_availability() {
-                self.work.availability.checked_at = None;
+                self.invalidate_assignment_availability(command.request().dataset_id.as_ref());
             }
             let request_id = command
                 .import_request()
@@ -316,7 +316,7 @@ impl LabelloApp {
     pub(crate) fn begin_workspace_epoch(&mut self) {
         self.workspace_epoch = self.workspace_epoch.wrapping_add(1);
         self.invalidate_async_ownership();
-        self.work.availability = Default::default();
+        self.reset_assignment_availability_for_workspace();
     }
 
 }

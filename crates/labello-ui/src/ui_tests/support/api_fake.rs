@@ -1090,7 +1090,7 @@ impl ImageApi for SpyApi {
                 "missing dataset {dataset_id}"
             ))));
         }
-        let tasks = state
+        let tasks: BTreeMap<TaskId, bool> = state
             .metadata
             .tasks
             .iter()
@@ -1106,8 +1106,20 @@ impl ImageApi for SpyApi {
             })
             .collect();
         ready(Ok(labello_client::AssignmentAvailability {
-            kind: request.kind,
-            tasks,
+            kind: request.kind.clone(),
+            tasks: tasks.clone(),
+            related: [
+                AssignmentKind::Annotation,
+                AssignmentKind::Review,
+                AssignmentKind::Adjudication,
+            ]
+            .into_iter()
+            .filter(|kind| kind != &request.kind)
+            .map(|kind| labello_client::AssignmentAvailabilityEntry {
+                kind,
+                tasks: tasks.clone(),
+            })
+            .collect(),
         }))
     }
 

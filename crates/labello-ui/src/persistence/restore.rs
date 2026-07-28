@@ -211,6 +211,9 @@ impl crate::app::LabelloApp {
     }
 
     pub(crate) fn restore_cached_assignment_availability(&mut self) -> bool {
+        if self.restore_session_assignment_availability() {
+            return true;
+        }
         let Some(kind) = self.assignment_kind() else {
             return false;
         };

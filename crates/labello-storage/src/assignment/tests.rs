@@ -109,7 +109,11 @@ async fn assignment_availability_caches_single_pass_scans_and_invalidates_on_wri
     metadata.role_assignments.push(DatasetRoleAssignment {
         dataset_id: metadata.dataset_id.clone(),
         user_id: user_id.clone(),
-        roles: BTreeSet::from([DatasetRole::Annotator]),
+        roles: BTreeSet::from([
+            DatasetRole::Annotator,
+            DatasetRole::Reviewer,
+            DatasetRole::Adjudicator,
+        ]),
         assigned_at: now(),
         assigned_by: None,
     });
@@ -194,6 +198,23 @@ async fn assignment_availability_caches_single_pass_scans_and_invalidates_on_wri
         repo.assignment_availability_cache.scan_count(),
         1,
         "an unchanged request should reuse the completed scan"
+    );
+
+    let review = repo
+        .assignment_availability(&user_id, AssignmentKind::Review)
+        .await
+        .unwrap();
+    let adjudication = repo
+        .assignment_availability(&user_id, AssignmentKind::Adjudication)
+        .await
+        .unwrap();
+    assert!(review.values().all(|available| !available));
+    assert!(adjudication.values().all(|available| !available));
+    assert_eq!(repo.image_state_load_count(), images.len() as u64);
+    assert_eq!(
+        repo.assignment_availability_cache.scan_count(),
+        1,
+        "one authorized kind scan should warm the other work views"
     );
 
     let first_image = &images.values().next().unwrap().image_id;
