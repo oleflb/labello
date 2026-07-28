@@ -84,7 +84,7 @@ Only after that continue with the next issue.
       - Preserve public paths with temporary re-exports and reduce visibility only after all internal callers move.
     - Phase 3 — clarify domain and workflow policy:
       - Separate current in-memory event/state models, version-specific wire decoding, replay, import provenance/coverage, migration digests, and review policy into cohesive domain modules without changing serialized representations.
-      - Inventory every exhaustive `EventPayload` and `AssignmentKind` match. Give each rule one named owner: domain shape/replay validity, API actor/authorization policy, or storage workflow/transaction policy.
+      - Inventory every exhaustive `EventPayload` and `AssignmentKind` match in the [workflow policy ownership map](structural-refactor-policy-ownership.md). Give each rule one named owner: domain shape/replay validity, API actor/authorization policy, or storage workflow/transaction policy.
       - Extract pure transition planners only where they can be tested without filesystem, Axum, client DTO, or egui types. Keep authorization out of domain.
     - Phase 4 — separate repository mechanics from feature policy:
       - Keep `DatasetRepository` as the public facade while extracting layout/path validation, config/index I/O, event append/load, replayed state cache, snapshots, artifact migration, locking, and cache lifecycle.

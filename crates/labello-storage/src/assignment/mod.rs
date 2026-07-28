@@ -3,7 +3,8 @@ use labello_domain::{
     AssignmentStatus, CorrectionId, DatasetMetadata, DatasetRole, EventLogEntry, EventPayload,
     ImageId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow,
     ReviewerCorrectionRecord, RevisionSource, TaskDefinition, TaskId, TaskOutcome, TaskState,
-    TaskStatus, UserId, require_role,
+    TaskStatus, UserId, current_task_reviews, has_task_review_by_user, require_role,
+    task_approval_count,
 };
 
 use crate::{DatasetRepository, StorageError, StorageResult};

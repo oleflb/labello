@@ -1,5 +1,4 @@
 use super::migration::{has_migration_final_review_by_user, migration_final_approval_count};
-use super::review::{has_task_review_by_user, task_approval_count};
 use super::*;
 
 fn assignment_kind_cache_key(kind: &AssignmentKind) -> &'static str {

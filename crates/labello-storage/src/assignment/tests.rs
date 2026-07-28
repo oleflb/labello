@@ -10,7 +10,6 @@ use labello_domain::{
     TutorialContent, now,
 };
 
-use super::review::{current_task_reviews_from_events, task_approval_count};
 use super::*;
 
 #[test]
@@ -67,7 +66,7 @@ fn current_reviews_begin_after_the_latest_submission() {
         .collect::<Vec<_>>();
 
     assert_eq!(
-        current_task_reviews_from_events(&events, &task_id),
+        current_task_reviews(&events, &task_id),
         vec![review("current_review")]
     );
 }

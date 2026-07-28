@@ -7,7 +7,7 @@ impl DatasetRepository {
         task_id: &TaskId,
     ) -> StorageResult<Vec<ReviewRecord>> {
         let events = self.load_events(image_id).await?;
-        Ok(current_task_reviews_from_events(&events, task_id))
+        Ok(current_task_reviews(&events, task_id))
     }
 
     pub async fn record_review_for_assignment(
@@ -165,7 +165,7 @@ impl DatasetRepository {
         }];
         if complete {
             let events = self.load_events(image_id).await?;
-            let current_reviews = current_task_reviews_from_events(&events, task_id);
+            let current_reviews = current_task_reviews(&events, task_id);
             if has_task_review_by_user(&current_reviews, task_id, user_id) {
                 return Err(StorageError::AssignmentConflict(format!(
                     "user {user_id} already reviewed task {task_id} in this round"
@@ -446,66 +446,4 @@ impl DatasetRepository {
             .next()
             .expect("one reviewer correction event was appended"))
     }
-}
-
-pub(super) fn current_task_reviews_from_events(
-    events: &[EventLogEntry],
-    task_id: &TaskId,
-) -> Vec<ReviewRecord> {
-    let Some(round_start) = events.iter().rposition(|event| {
-        matches!(
-            &event.payload,
-            EventPayload::TaskStateChanged { task_state }
-                if task_state.task_id == *task_id
-                    && task_state.status == TaskStatus::Submitted
-        )
-    }) else {
-        return Vec::new();
-    };
-    events
-        .iter()
-        .skip(round_start + 1)
-        .filter_map(|event| match &event.payload {
-            EventPayload::ReviewRecorded { review }
-                if matches!(
-                    &review.target,
-                    ReviewTarget::Task { task_id: reviewed } if reviewed == task_id
-                ) =>
-            {
-                Some(review.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-pub(super) fn has_task_review_by_user(
-    reviews: &[ReviewRecord],
-    task_id: &TaskId,
-    user_id: &UserId,
-) -> bool {
-    reviews.iter().any(|review| {
-        review.reviewer_user_id == *user_id
-            && matches!(
-                &review.target,
-                ReviewTarget::Task {
-                    task_id: reviewed_task_id
-                } if reviewed_task_id == task_id
-            )
-    })
-}
-
-pub(super) fn task_approval_count(reviews: &[ReviewRecord], task_id: &TaskId) -> u32 {
-    reviews
-        .iter()
-        .filter_map(|review| match (&review.target, &review.decision) {
-            (ReviewTarget::Task { task_id: reviewed }, ReviewDecision::Approved)
-                if reviewed == task_id =>
-            {
-                Some(&review.reviewer_user_id)
-            }
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .len() as u32
 }
