@@ -1623,7 +1623,65 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
     );
     assert_eq!(retry.image_state.current_sequence, sequence);
 
-    let second = migration_expectation(&saved.image_state, &fixture.task_id, &fixture.targets[1]);
+    let revisit = labello_client::RevisitMigrationTargetRequest {
+        assignment_id: assignment.assignment_id.clone(),
+        pass_id: None,
+        target: migration_expectation(&saved.image_state, &fixture.task_id, &fixture.targets[0]),
+    };
+    let revisited = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "revisit",
+            Some("revisit-first"),
+            &revisit,
+        )
+        .await,
+    );
+    assert!(matches!(
+        revisited.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &fixture.targets[0].object_group_id
+    ));
+    let sequence = revisited.image_state.current_sequence;
+    let retry = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "revisit",
+            Some("revisit-first"),
+            &revisit,
+        )
+        .await,
+    );
+    assert_eq!(retry.image_state.current_sequence, sequence);
+    let resumed = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeleton",
+            Some("correct-revisited-first"),
+            &labello_client::SaveMigrationSkeletonRequest {
+                assignment_id: assignment.assignment_id.clone(),
+                pass_id: None,
+                target: migration_expectation(
+                    &revisited.image_state,
+                    &fixture.task_id,
+                    &fixture.targets[0],
+                ),
+                skeleton: migration_skeleton(0.25),
+            },
+        )
+        .await,
+    );
+    assert!(matches!(
+        resumed.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &fixture.targets[1].object_group_id
+    ));
+
+    let second =
+        migration_expectation(&resumed.image_state, &fixture.task_id, &fixture.targets[1]);
     let exclude = labello_client::ExcludeMigrationTargetRequest {
         assignment_id: assignment.assignment_id.clone(),
         pass_id: None,

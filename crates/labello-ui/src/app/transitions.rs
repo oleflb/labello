@@ -116,7 +116,8 @@ impl LabelloApp {
         }
         if self.view == AppView::Annotate
             && self.runtime.api.is_some()
-            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+            && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+                || (self.manual_migration_active() && self.migration_has_unsaved_input()))
         {
             self.work.pending_transition = Some(PendingTransition::NextAssignment);
             return;
@@ -154,7 +155,8 @@ impl LabelloApp {
             return;
         }
         if self.work.assignment.is_some()
-            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+            && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+                || (self.manual_migration_active() && self.migration_has_unsaved_input()))
         {
             self.work.pending_transition = Some(PendingTransition::PreviousAssignment(previous));
             return;

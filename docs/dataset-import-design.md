@@ -968,7 +968,9 @@ viewport pattern instead of requiring the annotator to click source boxes:
 1. When an initial assignment opens or resumes, replay selects the
    lowest-sequence `Pending` group. A correction-required marker or active
    correction pass instead selects its first required or unhandled index.
-   Arbitrary canvas selection cannot change the active target.
+   Arbitrary canvas selection cannot change the active target. The browser may
+   inspect already resolved earlier groups without changing this replayed
+   cursor.
 2. The source box is rendered read-only and highlighted. Other source boxes and
    completed skeletons remain visible as subdued context.
 3. The viewport focuses the source box once when the canonical target changes.
@@ -985,8 +987,11 @@ viewport pattern instead of requiring the annotator to click source boxes:
    exclusion and returns replayed state. Failure leaves the same box active and
    preserves a recoverable draft.
 7. The next render selects and focuses the next canonical remaining group.
-   There is no normal skip or click-to-jump action; exclusion is the explicit
-   resolution when no valid skeleton can be annotated.
+   There is no mutation-time skip or click-to-jump action; exclusion is the
+   explicit resolution when no valid skeleton can be annotated. Read-only
+   Previous/Next controls may browse already resolved groups locally. Editing
+   one requires an explicit idempotent revisit command that records a
+   correction dependency and makes that group canonical again.
 8. Reload, reconnect, assignment renewal, and another authorized client
    reconstruct the same canonical target from events rather than a stored
    browser index.
@@ -1417,18 +1422,22 @@ fetch helper while control-plane operations remain in the shared API trait.
 
 Manual migration extends the normal assigned-annotation and review APIs with
 bounded commands to save the skeleton for the canonical current guide, exclude
-or reopen that guide, start a sequential correction pass, keep the exact current
-disposition in that pass, and confirm the full-image phase. Item commands carry
+or reopen that guide, explicitly revisit an earlier resolved guide, start a
+sequential correction pass, keep the exact current disposition in that pass,
+and confirm the full-image phase. Item commands carry
 the assignment ID, active pass ID when applicable, expected object-group ID,
 expected guide annotation version/deleted state, expected disposition and
 skeleton versions, and idempotency key. Pass start, item mutation/keep, reopen,
 confirmation/submission, and review commands all require idempotency keys; a
 lost pass-start response returns the same pass ID, and a lost submit response
 returns the already committed result. The server reloads the assignment and
-replayed state, verifies that the group is the canonical target for the current
-phase/pass, constructs actor/timestamp/group fields itself, and returns the
-resulting state. A client cannot advance by naming a later box or submit from an
-object phase.
+replayed state, verifies that mutation commands name the canonical target for
+the current phase/pass, constructs actor/timestamp/group fields itself, and
+returns the resulting state. The revisit command is the sole exception: it
+accepts only an earlier resolved target (or a resolved target from full-image
+confirmation), appends an audited dependency marker, and thereby makes that
+target canonical before any edit. A client cannot advance by naming a later box
+or submit from an object phase.
 
 ## Diagnostics
 

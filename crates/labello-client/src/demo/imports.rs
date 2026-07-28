@@ -152,6 +152,16 @@ impl ImportApi for DemoLabelloApi {
         import_unavailable()
     }
 
+    fn revisit_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::RevisitMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
     fn start_migration_pass<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

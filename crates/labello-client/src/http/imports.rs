@@ -262,6 +262,16 @@ impl ImportApi for HttpLabelloApi {
         self.migration_json(dataset_id, image_id, "reopen", request, idempotency_key)
     }
 
+    fn revisit_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::RevisitMigrationTargetRequest,
+        idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        self.migration_json(dataset_id, image_id, "revisit", request, idempotency_key)
+    }
+
     fn start_migration_pass<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

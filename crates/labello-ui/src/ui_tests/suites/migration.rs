@@ -71,6 +71,101 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_previous_objects_are_read_only_until_explicitly_revisited() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Previous object");
+    harness.step();
+    assert_eq!(
+        harness.state().work.migration.inspected_group_id,
+        Some(labello_domain::ObjectGroupId::from("group-right"))
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Reviewing object 2 of 2 · Read only")
+            .is_some()
+    );
+    assert_eq!(api.counts().migration_commands, 0);
+
+    harness.key_press(egui::Key::ArrowUp);
+    harness.step();
+    assert_eq!(
+        harness.state().work.migration.inspected_group_id,
+        Some(labello_domain::ObjectGroupId::from("group-left"))
+    );
+    harness.key_press(egui::Key::ArrowDown);
+    harness.step();
+    assert_eq!(
+        harness.state().work.migration.inspected_group_id,
+        Some(labello_domain::ObjectGroupId::from("group-right"))
+    );
+    assert_eq!(api.counts().migration_commands, 0);
+
+    click_accesskit_button(&mut harness, "Edit this object");
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(harness.state().work.migration.inspected_group_id.is_none());
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
+    ));
+    assert!(api.image_state(&image_id).migration_dependencies
+        [&labello_domain::TaskId::from("skeleton:person")]
+        .contains_key(&labello_domain::ObjectGroupId::from("group-right")));
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn migration_skip_requires_confirmation_before_discarding_a_local_draft() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+    harness.state_mut().work.migration.draft_dirty = true;
+
+    click_accesskit_button(&mut harness, "Skip");
+    harness.step();
+    assert!(harness.query_by_label("Unsaved migration draft").is_some());
+    assert!(
+        harness
+            .query_by_label("Discard draft and switch")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Submit and switch").is_none());
+    assert_eq!(api.counts().release_assignment, 0);
+
+    click_accesskit_button(&mut harness, "Cancel");
+    harness.step();
+    assert!(harness.state().work.pending_transition.is_none());
+    assert!(harness.state().work.migration.draft_dirty);
+    assert_eq!(api.counts().release_assignment, 0);
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn migration_draft_supports_undo_and_delete() {
     use crate::inspector_presets::{self, InspectorPreset};
 
@@ -240,6 +335,14 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
     assert_eq!(api.counts().get_image_preview, previews_before);
     assert_eq!(api.counts().release_assignment, 0);
     assert!(!harness.state().loading.image);
+    assert!(
+        harness
+            .state()
+            .work
+            .previous_annotation_assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.status == AssignmentStatus::Completed)
+    );
     harness.step();
     assert_eq!(api.counts().migration_commands, 1);
 }
@@ -265,7 +368,10 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     let inspector = object.get_by_label("Inspector").rect();
     assert!(workflow.width() <= 44.5, "{workflow:?}");
     assert!(inspector.width() <= 44.5, "{inspector:?}");
-    assert!((primary.top() - workflow.top()).abs() <= 1.0);
+    assert!(
+        (primary.top() - workflow.top()).abs() <= 1.0,
+        "primary={primary:?} workflow={workflow:?}"
+    );
     assert!((primary.top() - inspector.top()).abs() <= 1.0);
 
     click(&mut object, "More application actions");

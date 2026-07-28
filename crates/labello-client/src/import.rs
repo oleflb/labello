@@ -1136,6 +1136,15 @@ pub struct ReopenMigrationTargetRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevisitMigrationTargetRequest {
+    pub assignment_id: AssignmentId,
+    #[serde(default)]
+    pub pass_id: Option<MigrationPassId>,
+    pub target: MigrationTargetExpectation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartMigrationPassRequest {
     pub assignment_id: AssignmentId,
     pub task_id: TaskId,
@@ -1321,6 +1330,21 @@ mod tests {
             "profile": "coco_instances_gt_v1",
             "source": { "transport": "server_directory", "importRootId": "root", "relativePath": "source", "followLinks": true },
             "attestations": { "groundTruth": true, "exhaustive": true, "coverageScope": [], "provenance": "release" }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+
+        let error = serde_json::from_value::<RevisitMigrationTargetRequest>(serde_json::json!({
+            "assignmentId": "asg_1",
+            "passId": null,
+            "target": {
+                "objectGroupId": "group_1",
+                "expectedGuideAnnotationVersion": 1,
+                "expectedGuideDeleted": false,
+                "expectedDispositionVersion": 2,
+                "expectedSkeletonVersion": 1
+            },
+            "jump": true
         }))
         .unwrap_err();
         assert!(error.to_string().contains("unknown field"));

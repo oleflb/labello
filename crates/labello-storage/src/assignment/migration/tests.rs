@@ -306,6 +306,115 @@ async fn migration_commands_are_canonical_idempotent_atomic_and_replayable() {
 }
 
 #[tokio::test]
+async fn revisiting_a_resolved_target_is_audited_idempotent_and_returns_to_the_cursor() {
+    let fixture = fixture(ReviewWorkflow::None, 2).await;
+    let assignment = fixture
+        .repository
+        .assign_next_image(
+            &fixture.annotator,
+            &fixture.task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let initial = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    let first = expectation(&initial.image_state, &fixture.task_id, &fixture.targets[0]);
+    let saved = fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &first,
+            skeleton(0.2),
+            "revisit-save-first",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        saved.cursor,
+        MigrationCursor::Object { ref object_group_id, .. }
+            if object_group_id == &fixture.targets[1].object_group_id
+    ));
+
+    let revisit = expectation(&saved.image_state, &fixture.task_id, &fixture.targets[0]);
+    let revisited = fixture
+        .repository
+        .revisit_migration_target(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &revisit,
+            "revisit-first",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        revisited.cursor,
+        MigrationCursor::Object { ref object_group_id, .. }
+            if object_group_id == &fixture.targets[0].object_group_id
+    ));
+    assert!(matches!(
+        revisited.image_state.migration_dispositions[&fixture.task_id]
+            [&fixture.targets[0].object_group_id]
+            .status,
+        MigrationDispositionStatus::Annotated { .. }
+    ));
+    assert_eq!(
+        revisited.image_state.migration_dependencies[&fixture.task_id]
+            [&fixture.targets[0].object_group_id]
+            .kind,
+        MigrationDependencyKind::CorrectionRequired
+    );
+
+    let sequence = revisited.image_state.current_sequence;
+    let retry = fixture
+        .repository
+        .revisit_migration_target(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &revisit,
+            "revisit-first",
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.image_state.current_sequence, sequence);
+
+    let corrected = expectation(
+        &revisited.image_state,
+        &fixture.task_id,
+        &fixture.targets[0],
+    );
+    let resumed = fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &corrected,
+            skeleton(0.3),
+            "revisit-correct-first",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resumed.cursor,
+        MigrationCursor::Object { ref object_group_id, .. }
+            if object_group_id == &fixture.targets[1].object_group_id
+    ));
+    assert!(
+        !resumed.image_state.migration_dependencies[&fixture.task_id]
+            .contains_key(&fixture.targets[0].object_group_id)
+    );
+}
+
+#[tokio::test]
 async fn concurrent_exact_version_writes_have_one_winner() {
     let fixture = fixture(ReviewWorkflow::None, 1).await;
     let assignment = fixture

@@ -222,6 +222,10 @@ pub fn router(state: ApiState) -> Router {
             post(workflow::reopen_migration_target),
         )
         .route(
+            "/datasets/{dataset_id}/images/{image_id}/migration/revisit",
+            post(workflow::revisit_migration_target),
+        )
+        .route(
             "/datasets/{dataset_id}/images/{image_id}/migration/passes",
             post(workflow::start_migration_pass),
         )

@@ -14,8 +14,8 @@ Labello currently supports:
 - filesystem image ingestion, duplicate detection, statistics, and snapshots;
 - atomic new-dataset import for explicit YOLO detection/pose and COCO
   instances/keypoints ground-truth profiles;
-- guided box-to-skeleton migration with audited exclusions and replayed
-  progress;
+- guided box-to-skeleton migration with audited exclusions, replayed progress,
+  assignment navigation, and read-only browsing of resolved objects;
 - loopback-only local administrator login and GitHub OAuth.
 
 The project is under active development. See [Current limitations](#current-limitations)

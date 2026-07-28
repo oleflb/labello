@@ -708,6 +708,63 @@ impl ImportApi for SpyApi {
         self.migration_result(dataset_id, image_id)
     }
 
+    fn revisit_migration_target<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: labello_client::RevisitMigrationTargetRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        let image_state = state
+            .states
+            .get_mut(image_id)
+            .expect("migration test image state");
+        let task_id = image_state
+            .migration_target_sets
+            .iter()
+            .find(|(_, set)| {
+                set.targets
+                    .iter()
+                    .any(|target| target.object_group_id == request.target.object_group_id)
+            })
+            .map(|(task_id, _)| task_id.clone())
+            .expect("migration test target");
+        image_state
+            .migration_dependencies
+            .entry(task_id.clone())
+            .or_default()
+            .insert(
+                request.target.object_group_id,
+                labello_domain::MigrationDependencyMarker {
+                    marker_version: 1,
+                    kind: labello_domain::MigrationDependencyKind::CorrectionRequired,
+                    required_disposition_version: request.target.expected_disposition_version,
+                    event_id: EventId::from("spy-revisit"),
+                    timestamp: now(),
+                },
+            );
+        let image_state = image_state.clone();
+        let cursor = image_state
+            .migration_cursor(&task_id, request.pass_id.as_ref())
+            .ok();
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            progress: migration_progress(&image_state, &task_id),
+            image_state,
+            cursor,
+            active_pass: request.pass_id.and_then(|pass_id| {
+                state.states[image_id]
+                    .migration_passes
+                    .get(&pass_id)
+                    .cloned()
+            }),
+            confirmation: None,
+            assignment: None,
+            annotation_id: None,
+        }))
+    }
+
     fn start_migration_pass<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

@@ -9,11 +9,15 @@ impl LabelloApp {
                     self.work.migration.busy = false;
                     match *result {
                         Ok(result) => {
-                            let completed = result.assignment.as_ref().is_some_and(|assignment| {
-                                assignment.status == labello_domain::AssignmentStatus::Completed
-                            });
+                            let completed_assignment =
+                                result.assignment.clone().filter(|assignment| {
+                                    assignment.status
+                                        == labello_domain::AssignmentStatus::Completed
+                                });
                             self.apply_state(result.image_state);
                             self.work.migration.cursor = result.cursor;
+                            self.work.migration.inspected_group_id = None;
+                            self.work.migration.pending_revisit_target = None;
                             self.work.migration.progress = Some(result.progress);
                             self.work.migration.active_pass_id =
                                 result.active_pass.map(|pass| pass.pass_id);
@@ -24,12 +28,15 @@ impl LabelloApp {
                             self.work.migration.draft_group = None;
                             self.work.migration.draft_dirty = false;
                             self.work.migration.keypoint_index = 0;
+                            self.work.migration.exclusion_note.clear();
+                            self.work.migration.exclusion_dirty = false;
                             self.work.migration.error = None;
                             if self.view == AppView::Review {
                                 self.work.migration.review_index =
                                     self.canonical_migration_review_index();
                             }
-                            if completed {
+                            if let Some(assignment) = completed_assignment {
+                                self.remember_previous_annotation_assignment(assignment);
                                 self.open_next_annotation_assignment(ctx, None);
                             }
                             self.request_assignment_availability();
