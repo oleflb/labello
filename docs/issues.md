@@ -93,7 +93,7 @@ Only after that continue with the next issue.
     - Phase 5 — establish one clear import vertical slice:
       - In storage, separate capabilities/limits, durable jobs and reservations, browser/server sources, sealing, profile parsers, IR, planning/diagnostics, building, verification, publication, and recovery.
       - In API, retain request extraction, authentication/authorization, idempotency semantics, safe error mapping, and DTO adaptation. Move raw durable-file operations behind narrow storage-owned methods without making storage depend on client DTOs.
-      - Document the semantic owner and exhaustive adapter for every duplicated import concept. Move context-free mapping validation to that owner, keep browser-only draft validation close to the UI, and keep source-content validation authoritative in storage.
+      - Document the semantic owner and exhaustive adapter for every duplicated import concept in the [import ownership map](import-ownership.md). Move context-free mapping validation to that owner, keep browser-only draft validation close to the UI, and keep source-content validation authoritative in storage.
       - Split `import_flow` into editable state/drafts, pure local validation, request mapping, command/recovery orchestration, browser upload, and stage views. Preserve stale-plan invalidation and exact-request ownership.
     - Phase 6 — decompose UI state and runtime by feature:
       - Remove implicit `Deref<Target = WorkState>` access after callers use explicit `work`, `datasets`, `admin`, `import`, `auth`, and runtime state.
