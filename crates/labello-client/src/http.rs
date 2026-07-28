@@ -412,6 +412,7 @@ mod tests {
             r#"{"diagnostics":[],"total":0}"#.to_string(),
             r#"{"importId":"imp_1","datasetId":"animals","planHash":"plan"}"#.to_string(),
             r#"{"importId":"imp_1","lifecycle":"cancelled"}"#.to_string(),
+            migration_result.clone(),
             migration_result,
         ];
         let server = std::thread::spawn(move || {
@@ -569,6 +570,24 @@ mod tests {
         )
         .await
         .unwrap();
+        api.revisit_migration_target(
+            &DatasetId::from("animals"),
+            &ImageId::from("img_1"),
+            crate::RevisitMigrationTargetRequest {
+                assignment_id: labello_domain::AssignmentId::from("asg_1"),
+                pass_id: None,
+                target: crate::MigrationTargetExpectation {
+                    object_group_id: labello_domain::ObjectGroupId::from("group_1"),
+                    expected_guide_annotation_version: 1,
+                    expected_guide_deleted: false,
+                    expected_disposition_version: 1,
+                    expected_skeleton_version: None,
+                },
+            },
+            "revisit-key",
+        )
+        .await
+        .unwrap();
 
         let requests = server.join().unwrap();
         let starts = [
@@ -588,6 +607,7 @@ mod tests {
             "POST /imports/imp_1/commit ",
             "POST /imports/imp_1/cancel ",
             "POST /datasets/animals/images/img_1/migration/skeleton ",
+            "POST /datasets/animals/images/img_1/migration/revisit ",
         ];
         for ((headers, _), start) in requests.iter().zip(starts) {
             assert!(headers.starts_with(start), "unexpected request: {headers}");
@@ -602,6 +622,7 @@ mod tests {
             (13, "commit-key"),
             (14, "cancel-key"),
             (15, "migration-key"),
+            (16, "revisit-key"),
         ] {
             let headers = requests[index].0.to_ascii_lowercase();
             assert!(headers.contains("x-csrf-token: csrf-import\r\n"));

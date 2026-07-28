@@ -153,7 +153,8 @@ impl LabelloApp {
                     return;
                 }
                 UserAction::ToggleKeypointHidden => {
-                    if self
+                    if self.work.migration.inspected_group_id.is_none()
+                        && self
                         .selected_task()
                         .and_then(|task| task.skeleton.as_ref())
                         .is_some_and(|spec| spec.allow_hidden)
@@ -163,18 +164,27 @@ impl LabelloApp {
                     return;
                 }
                 UserAction::MarkKeypointAbsent => {
-                    self.skip_migration_keypoint();
+                    if self.work.migration.inspected_group_id.is_none() {
+                        self.skip_migration_keypoint();
+                    }
                     return;
                 }
                 UserAction::UndoEdit | UserAction::DeleteAnnotation => {
-                    self.remove_last_migration_keypoint();
+                    if self.work.migration.inspected_group_id.is_none() {
+                        self.remove_last_migration_keypoint();
+                    }
                     return;
                 }
-                UserAction::PreviousImage
-                | UserAction::RedoEdit
+                UserAction::SelectPreviousObject => {
+                    self.inspect_migration_object(-1);
+                    return;
+                }
+                UserAction::SelectNextObject => {
+                    self.inspect_migration_object(1);
+                    return;
+                }
+                UserAction::RedoEdit
                 | UserAction::SaveAnnotations
-                | UserAction::SelectPreviousObject
-                | UserAction::SelectNextObject
                 | UserAction::SelectPreviousPrelabel
                 | UserAction::SelectNextPrelabel
                 | UserAction::AcceptPrelabel

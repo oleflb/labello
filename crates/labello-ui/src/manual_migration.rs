@@ -39,6 +39,8 @@ impl MigrationPrimaryAction {
 #[derive(Clone, Debug)]
 pub(crate) struct ManualMigrationState {
     pub cursor: Option<MigrationCursor>,
+    pub inspected_group_id: Option<ObjectGroupId>,
+    pub pending_revisit_target: Option<ObjectGroupId>,
     pub active_pass_id: Option<MigrationPassId>,
     pub draft: Option<SkeletonGeometry>,
     pub draft_group: Option<ObjectGroupId>,
@@ -47,6 +49,7 @@ pub(crate) struct ManualMigrationState {
     pub next_hidden: bool,
     pub exclusion_reason: MigrationExclusionReason,
     pub exclusion_note: String,
+    pub exclusion_dirty: bool,
     pub review_index: usize,
     pub progress: Option<labello_client::ManualMigrationProgress>,
     pub busy: bool,
@@ -57,6 +60,8 @@ impl Default for ManualMigrationState {
     fn default() -> Self {
         Self {
             cursor: None,
+            inspected_group_id: None,
+            pending_revisit_target: None,
             active_pass_id: None,
             draft: None,
             draft_group: None,
@@ -65,6 +70,7 @@ impl Default for ManualMigrationState {
             next_hidden: false,
             exclusion_reason: MigrationExclusionReason::NoValidSkeleton,
             exclusion_note: String::new(),
+            exclusion_dirty: false,
             review_index: 0,
             progress: None,
             busy: false,
@@ -136,12 +142,15 @@ impl LabelloApp {
             .and_then(|state| state.migration_cursor(&task_id, active_pass).ok());
         if self.work.migration.cursor != cursor {
             self.work.migration.cursor = cursor;
+            self.work.migration.inspected_group_id = None;
+            self.work.migration.pending_revisit_target = None;
             self.work.migration.draft = None;
             self.work.migration.draft_group = None;
             self.work.migration.draft_dirty = false;
             self.work.migration.keypoint_index = 0;
             self.work.migration.next_hidden = false;
             self.work.migration.exclusion_note.clear();
+            self.work.migration.exclusion_dirty = false;
         }
         if self.view == AppView::Review {
             self.work.migration.review_index = self.canonical_migration_review_index();
@@ -224,6 +233,7 @@ impl LabelloApp {
         }
         let mut selected = None;
         if let Some((group_id, target)) = active.as_ref()
+            && self.work.migration.draft_group.as_ref() == Some(group_id)
             && let Some(draft) = self.work.migration.draft.clone()
         {
             annotations.retain(|annotation| {
@@ -262,6 +272,7 @@ impl LabelloApp {
             .unwrap_or_default();
         let interaction = CanvasInteraction {
             editable: !self.work.migration.busy
+                && self.work.migration.inspected_group_id.is_none()
                 && guide.as_ref().is_some_and(|guide| !guide.deleted)
                 && matches!(
                     self.work.migration.cursor,
@@ -326,6 +337,10 @@ impl LabelloApp {
             if resolved > 0 {
                 ui.small(format!("{annotated} skeletons · {excluded} excluded"));
             }
+        }
+        if let Some(group_id) = self.work.migration.inspected_group_id.clone() {
+            self.migration_inspection_actions(ui, group_id, expected, show_primary_actions);
+            return;
         }
         match self.work.migration.cursor.clone() {
             Some(MigrationCursor::Object {
@@ -549,6 +564,8 @@ impl LabelloApp {
         }
         if show_primary_action {
             self.migration_primary_button(ui, false);
+            self.migration_object_navigation_button(ui);
+            self.migration_assignment_section(ui);
         }
         ui.separator();
         let exclusion = ui
@@ -568,6 +585,88 @@ impl LabelloApp {
         }
     }
 
+    fn migration_inspection_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        group_id: ObjectGroupId,
+        expected: u64,
+        show_workspace_actions: bool,
+    ) {
+        let Some(target) = self.migration_target(&group_id) else {
+            self.work.migration.inspected_group_id = None;
+            return;
+        };
+        let status = self.migration_disposition(&group_id);
+        ui.separator();
+        ui.label(
+            RichText::new(format!(
+                "Reviewing object {} of {expected} · Read only",
+                target.sequence_index + 1
+            ))
+            .strong(),
+        );
+        theme::badge(
+            ui,
+            disposition_label(status.as_ref()),
+            disposition_intent(status.as_ref()),
+        );
+        ui.small("Browsing does not change migration progress.");
+        if let Some(MigrationDispositionStatus::Excluded { exclusion }) = status.as_ref() {
+            ui.label(format!(
+                "Exclusion reason: {}",
+                exclusion_label(exclusion.reason)
+            ));
+            if let Some(note) = exclusion.note.as_deref() {
+                ui.label(format!("Exclusion note: {note}"));
+            }
+        } else {
+            ui.label("Review the saved skeleton against the read-only canonical guide.");
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    self.can_inspect_previous_migration_object(),
+                    egui::Button::new("Previous object").shortcut_text(
+                        self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::SelectPreviousObject,
+                        ),
+                    ),
+                )
+                .clicked()
+            {
+                self.inspect_migration_object(-1);
+            }
+            let returns_to_current = self.inspection_next_returns_to_current();
+            if ui
+                .button(if returns_to_current {
+                    "Return to current object"
+                } else {
+                    "Next object"
+                })
+                .on_hover_text(
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject),
+                )
+                .clicked()
+            {
+                self.inspect_migration_object(1);
+            }
+        });
+        if theme::primary_button(
+            ui,
+            !self.work.migration.busy && self.migration_expectation(&group_id).is_some(),
+            egui::Button::new("Edit this object"),
+        )
+        .on_hover_text("Make this resolved object the audited canonical correction target.")
+        .clicked()
+        {
+            self.begin_revisit_migration_target(group_id);
+        }
+        if show_workspace_actions {
+            self.migration_assignment_section(ui);
+        }
+    }
+
     fn migration_exclusion_actions(
         &mut self,
         ui: &mut egui::Ui,
@@ -579,6 +678,7 @@ impl LabelloApp {
                 .color(theme::TEXT_MUTED),
         );
         let reason_label = ui.label("Reason");
+        let previous_reason = self.work.migration.exclusion_reason;
         egui::ComboBox::from_id_salt("migration-exclusion-reason")
             .width(ui.available_width())
             .selected_text(exclusion_label(self.work.migration.exclusion_reason))
@@ -600,6 +700,9 @@ impl LabelloApp {
             })
             .response
             .labelled_by(reason_label.id);
+        if self.work.migration.exclusion_reason != previous_reason {
+            self.work.migration.exclusion_dirty = true;
+        }
         let note_label = ui.label(
             if self.work.migration.exclusion_reason == MigrationExclusionReason::Other {
                 "Note (required)"
@@ -607,14 +710,18 @@ impl LabelloApp {
                 "Note (optional)"
             },
         );
-        theme::resizable_multiline_text_edit(
+        if theme::resizable_multiline_text_edit(
             ui,
             ui.make_persistent_id("migration-exclusion-note"),
             &mut self.work.migration.exclusion_note,
             2,
             Some("Context for reviewers"),
         )
-        .labelled_by(note_label.id);
+        .labelled_by(note_label.id)
+        .changed()
+        {
+            self.work.migration.exclusion_dirty = true;
+        }
         let note_bytes = self.work.migration.exclusion_note.trim().len();
         let note_valid = note_bytes <= MAX_EXCLUSION_NOTE_BYTES
             && (self.work.migration.exclusion_reason != MigrationExclusionReason::Other
@@ -673,6 +780,8 @@ impl LabelloApp {
                 Some(button_label)
             );
             self.migration_primary_button(ui, false);
+            self.migration_object_navigation_button(ui);
+            self.migration_assignment_section(ui);
         }
         if self.work.migration.active_pass_id.is_none()
             && expected > 0
@@ -822,7 +931,128 @@ impl LabelloApp {
             }
             return;
         }
-        self.migration_primary_button(ui, compact);
+        if let Some(group_id) = self.work.migration.inspected_group_id.clone() {
+            if theme::primary_button(
+                ui,
+                !self.work.migration.busy && self.migration_expectation(&group_id).is_some(),
+                egui::Button::new(if compact {
+                    "Edit object"
+                } else {
+                    "Edit this object"
+                }),
+            )
+            .clicked()
+            {
+                self.begin_revisit_migration_target(group_id);
+            }
+            self.migration_object_navigation_button(ui);
+            if !compact
+                && ui
+                    .button(if self.inspection_next_returns_to_current() {
+                        "Return current"
+                    } else {
+                        "Next object"
+                    })
+                    .clicked()
+            {
+                self.inspect_migration_object(1);
+            }
+        } else {
+            self.migration_primary_button(ui, compact);
+            self.migration_object_navigation_button(ui);
+        }
+        if compact {
+            self.migration_more_actions(ui);
+        } else {
+            self.migration_assignment_buttons(ui);
+        }
+    }
+
+    fn migration_object_navigation_button(&mut self, ui: &mut egui::Ui) {
+        if !self.can_inspect_previous_migration_object() {
+            return;
+        }
+        if ui
+            .add(egui::Button::new("Previous object").shortcut_text(
+                self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectPreviousObject),
+            ))
+            .clicked()
+        {
+            self.inspect_migration_object(-1);
+        }
+    }
+
+    fn migration_assignment_buttons(&mut self, ui: &mut egui::Ui) {
+        let ready = self.work.assignment.is_some()
+            && self.runtime.api.is_some()
+            && !self.loading.saving
+            && !self.loading.image
+            && !self.work.migration.busy
+            && self.work.pending_transition.is_none();
+        if self.work.previous_annotation_assignment.is_some()
+            && ui
+                .add_enabled(
+                    ready,
+                    egui::Button::new("Previous assignment").shortcut_text(
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::PreviousImage),
+                    ),
+                )
+                .clicked()
+        {
+            self.trigger_user_action(labello_domain::UserAction::PreviousImage);
+        }
+        if ui
+            .add_enabled(
+                ready,
+                egui::Button::new("Skip").shortcut_text(
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SkipAssignment),
+                ),
+            )
+            .clicked()
+        {
+            self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
+        }
+    }
+
+    fn migration_assignment_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label(RichText::new("Assignment").strong());
+        self.migration_assignment_buttons(ui);
+    }
+
+    fn migration_more_actions(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("More", |ui| {
+            if self.work.migration.inspected_group_id.is_some()
+                && ui
+                    .button(if self.inspection_next_returns_to_current() {
+                        "Return to current object"
+                    } else {
+                        "Next object"
+                    })
+                    .clicked()
+            {
+                self.inspect_migration_object(1);
+                ui.close();
+            }
+            let ready = self.work.assignment.is_some()
+                && self.runtime.api.is_some()
+                && !self.loading.saving
+                && !self.loading.image
+                && !self.work.migration.busy
+                && self.work.pending_transition.is_none();
+            if self.work.previous_annotation_assignment.is_some()
+                && ui
+                    .add_enabled(ready, egui::Button::new("Previous assignment"))
+                    .clicked()
+            {
+                self.trigger_user_action(labello_domain::UserAction::PreviousImage);
+                ui.close();
+            }
+            if ui.add_enabled(ready, egui::Button::new("Skip")).clicked() {
+                self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
+                ui.close();
+            }
+        });
     }
 
     fn migration_primary_button(&mut self, ui: &mut egui::Ui, compact: bool) {
@@ -843,7 +1073,7 @@ impl LabelloApp {
     }
 
     fn migration_primary_action(&self) -> Option<(MigrationPrimaryAction, bool)> {
-        if self.view != AppView::Annotate {
+        if self.view != AppView::Annotate || self.work.migration.inspected_group_id.is_some() {
             return None;
         }
         match self.work.migration.cursor.as_ref()? {
@@ -1120,6 +1350,139 @@ impl LabelloApp {
             .unwrap_or(targets.len())
     }
 
+    fn migration_targets(&self) -> Vec<labello_domain::MigrationTarget> {
+        let mut targets = self
+            .work
+            .current_state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .migration_target_sets
+                    .get(self.work.selected_task_id.as_ref()?)
+            })
+            .map(|set| set.targets.clone())
+            .unwrap_or_default();
+        targets.sort_by_key(|target| target.sequence_index);
+        targets
+    }
+
+    fn migration_target(
+        &self,
+        group_id: &ObjectGroupId,
+    ) -> Option<labello_domain::MigrationTarget> {
+        self.migration_targets()
+            .into_iter()
+            .find(|target| &target.object_group_id == group_id)
+    }
+
+    fn migration_browse_boundary(&self, targets: &[labello_domain::MigrationTarget]) -> usize {
+        match self.work.migration.cursor.as_ref() {
+            Some(MigrationCursor::Object {
+                object_group_id, ..
+            }) => targets
+                .iter()
+                .position(|target| &target.object_group_id == object_group_id)
+                .unwrap_or(0),
+            Some(MigrationCursor::FullImage) => targets.len(),
+            None => 0,
+        }
+    }
+
+    pub(crate) fn can_inspect_previous_migration_object(&self) -> bool {
+        if self.view != AppView::Annotate || self.work.migration.busy {
+            return false;
+        }
+        let targets = self.migration_targets();
+        let boundary = self.migration_browse_boundary(&targets);
+        let position = self
+            .work
+            .migration
+            .inspected_group_id
+            .as_ref()
+            .and_then(|group_id| {
+                targets
+                    .iter()
+                    .position(|target| &target.object_group_id == group_id)
+            })
+            .unwrap_or(boundary);
+        position > 0
+    }
+
+    fn inspection_next_returns_to_current(&self) -> bool {
+        let targets = self.migration_targets();
+        let boundary = self.migration_browse_boundary(&targets);
+        self.work
+            .migration
+            .inspected_group_id
+            .as_ref()
+            .and_then(|group_id| {
+                targets
+                    .iter()
+                    .position(|target| &target.object_group_id == group_id)
+            })
+            .is_none_or(|position| position + 1 >= boundary)
+    }
+
+    pub(crate) fn inspect_migration_object(&mut self, direction: isize) {
+        if self.view != AppView::Annotate || self.work.migration.busy {
+            return;
+        }
+        let targets = self.migration_targets();
+        let boundary = self.migration_browse_boundary(&targets);
+        let position = self
+            .work
+            .migration
+            .inspected_group_id
+            .as_ref()
+            .and_then(|group_id| {
+                targets
+                    .iter()
+                    .position(|target| &target.object_group_id == group_id)
+            })
+            .unwrap_or(boundary);
+        if direction < 0 {
+            if position > 0 {
+                self.work.migration.inspected_group_id =
+                    Some(targets[position - 1].object_group_id.clone());
+            }
+        } else if self.work.migration.inspected_group_id.is_some() {
+            if position + 1 < boundary {
+                self.work.migration.inspected_group_id =
+                    Some(targets[position + 1].object_group_id.clone());
+            } else {
+                self.work.migration.inspected_group_id = None;
+            }
+        }
+    }
+
+    pub(crate) fn migration_has_unsaved_input(&self) -> bool {
+        self.work.migration.draft_dirty || self.work.migration.exclusion_dirty
+    }
+
+    fn begin_revisit_migration_target(&mut self, group_id: ObjectGroupId) {
+        if self.migration_has_unsaved_input() {
+            self.work.migration.pending_revisit_target = Some(group_id);
+        } else {
+            self.request_revisit_migration_target(group_id);
+        }
+    }
+
+    pub(crate) fn confirm_pending_migration_revisit(&mut self) {
+        let Some(group_id) = self.work.migration.pending_revisit_target.take() else {
+            return;
+        };
+        self.work.migration.draft = None;
+        self.work.migration.draft_group = None;
+        self.work.migration.draft_dirty = false;
+        self.work.migration.exclusion_note.clear();
+        self.work.migration.exclusion_dirty = false;
+        self.request_revisit_migration_target(group_id);
+    }
+
+    pub(crate) fn cancel_pending_migration_revisit(&mut self) {
+        self.work.migration.pending_revisit_target = None;
+    }
+
     fn migration_active_target(&self) -> Option<(ObjectGroupId, labello_domain::MigrationTarget)> {
         if self.view == AppView::Review {
             let task_id = self.work.selected_task_id.as_ref()?;
@@ -1133,6 +1496,10 @@ impl LabelloApp {
                 .get(self.work.migration.review_index)?
                 .clone();
             return Some((target.object_group_id.clone(), target));
+        }
+        if let Some(group_id) = self.work.migration.inspected_group_id.as_ref() {
+            let target = self.migration_target(group_id)?;
+            return Some((group_id.clone(), target));
         }
         let MigrationCursor::Object {
             object_group_id, ..
@@ -1394,6 +1761,24 @@ impl LabelloApp {
         };
         self.queue_migration_action(MigrationAction::Reopen(
             labello_client::ReopenMigrationTargetRequest {
+                assignment_id: assignment.assignment_id,
+                pass_id: self.work.migration.active_pass_id.clone(),
+                target,
+            },
+        ));
+    }
+
+    fn request_revisit_migration_target(&mut self, group_id: ObjectGroupId) {
+        let Some((assignment, target)) = self
+            .work
+            .assignment
+            .clone()
+            .zip(self.migration_expectation(&group_id))
+        else {
+            return;
+        };
+        self.queue_migration_action(MigrationAction::Revisit(
+            labello_client::RevisitMigrationTargetRequest {
                 assignment_id: assignment.assignment_id,
                 pass_id: self.work.migration.active_pass_id.clone(),
                 target,

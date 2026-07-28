@@ -10,7 +10,8 @@ use labello_client::{
     AssignmentAvailabilityRequest, ConfirmMigrationRequest, CorrectionRequest,
     ExcludeMigrationTargetRequest, KeepMigrationTargetRequest, ManualMigrationCommandResult,
     OfflineBundleRequest, PrelabelSuggestionRequest, ReopenMigrationTargetRequest,
-    ReviewMigrationRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
+    ReviewMigrationRequest, RevisitMigrationTargetRequest, SaveMigrationSkeletonRequest,
+    StartMigrationPassRequest,
 };
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationType, Assignment, AssignmentKind,
@@ -538,6 +539,35 @@ pub(crate) async fn reopen_migration_target(
     .await?;
     let result = repo
         .reopen_migration_target(
+            &actor.user_id,
+            migration_context(&assignment, &image_id),
+            request.pass_id.as_ref(),
+            &storage_expectation(&request.target),
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn revisit_migration_target(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<RevisitMigrationTargetRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .revisit_migration_target(
             &actor.user_id,
             migration_context(&assignment, &image_id),
             request.pass_id.as_ref(),

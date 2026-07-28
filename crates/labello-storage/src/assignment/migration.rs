@@ -523,6 +523,125 @@ impl DatasetRepository {
         command_result(state, context.task_id, pass_id, Some(assignment), None)
     }
 
+    pub async fn revisit_migration_target(
+        &self,
+        user_id: &UserId,
+        context: AssignmentContext<'_>,
+        pass_id: Option<&MigrationPassId>,
+        expected: &MigrationTargetExpectation,
+        idempotency_key: &str,
+    ) -> StorageResult<ManualMigrationCommandResult> {
+        validate_idempotency_key(idempotency_key)?;
+        let (metadata, image) = self.load_migration_inputs(context.image_id).await?;
+        let (task, guide_task, _) = migration_metadata(&metadata, &image, context.task_id)?;
+        require_annotation_context(&metadata, user_id, &context)?;
+        let lock = self.image_lock(context.image_id);
+        let _guard = lock.lock().await;
+        let state = self.load_image_state(context.image_id).await?;
+        let primary_id = command_event_id(user_id, context.assignment_id, idempotency_key, None);
+        if let Some(command) = find_command(self, context.image_id, &primary_id).await? {
+            let matches = matches!(
+                &command.primary.payload,
+                EventPayload::MigrationDependencyMarked {
+                    task_id,
+                    object_group_id,
+                    marker,
+                } if task_id == context.task_id
+                    && object_group_id == &expected.object_group_id
+                    && marker.event_id == primary_id
+            ) && expectation_matches(&command.before, context.task_id, expected)
+                && assignment_pass(&command.before, context.assignment_id, context.task_id)
+                    == pass_id;
+            return replay_retry(
+                matches,
+                state,
+                context.task_id,
+                pass_id,
+                Some(context.assignment_id),
+                None,
+            );
+        }
+
+        let now = labello_domain::now();
+        let mut assignment = exact_active_assignment(
+            &state.assignments,
+            context.assignment_id,
+            context.image_id,
+            context.task_id,
+            user_id,
+            &AssignmentKind::Annotation,
+            now,
+        )?
+        .clone();
+        ensure_annotation_status(&state, context.task_id)?;
+        if assignment_pass(&state, context.assignment_id, context.task_id) != pass_id {
+            return Err(conflict(
+                "migration revisit pass does not match the assignment's active pass",
+            ));
+        }
+        let target = migration_target(&state, context.task_id, &expected.object_group_id)?;
+        validate_target_identity(&state, task, guide_task, target, expected)?;
+        if has_dependency(&state, context.task_id, &expected.object_group_id) {
+            return Err(conflict("migration target already requires correction"));
+        }
+        if matches!(
+            current_disposition(&state, context.task_id, &expected.object_group_id)?.status,
+            MigrationDispositionStatus::Pending
+        ) {
+            return Err(conflict("pending migration target cannot be revisited"));
+        }
+        match state.migration_cursor(context.task_id, pass_id)? {
+            MigrationCursor::Object { sequence_index, .. }
+                if target.sequence_index < sequence_index => {}
+            MigrationCursor::FullImage => {}
+            _ => {
+                return Err(conflict(
+                    "only a previously resolved migration target can be revisited",
+                ));
+            }
+        }
+        let guide = state
+            .current_annotation(&target.guide_annotation_id)
+            .ok_or_else(|| conflict("migration guide is missing"))?;
+        let marker = labello_domain::MigrationDependencyMarker {
+            marker_version: 1,
+            kind: if guide.deleted {
+                MigrationDependencyKind::GuideUnavailable
+            } else {
+                MigrationDependencyKind::CorrectionRequired
+            },
+            required_disposition_version: expected.expected_disposition_version,
+            event_id: primary_id,
+            timestamp: now,
+        };
+        let payloads = vec![
+            EventPayload::MigrationDependencyMarked {
+                task_id: context.task_id.clone(),
+                object_group_id: expected.object_group_id.clone(),
+                marker,
+            },
+            {
+                renew(&mut assignment, now);
+                EventPayload::AssignmentUpdated {
+                    assignment: assignment.clone(),
+                }
+            },
+        ];
+        let state = self
+            .append_migration_command_unlocked(
+                context.image_id,
+                user_id,
+                DatasetRole::Annotator,
+                idempotency_key,
+                context.assignment_id,
+                payloads,
+                0,
+                now,
+            )
+            .await?;
+        command_result(state, context.task_id, pass_id, Some(assignment), None)
+    }
+
     pub async fn start_migration_pass(
         &self,
         user_id: &UserId,
@@ -2066,6 +2185,19 @@ fn pass_request_matches(events: &[EventLogEntry], pass_id: Option<&MigrationPass
         _ => None,
     });
     persisted == pass_id
+}
+
+fn assignment_pass<'a>(
+    state: &'a ImageState,
+    assignment_id: &AssignmentId,
+    task_id: &TaskId,
+) -> Option<&'a MigrationPassId> {
+    state
+        .migration_passes
+        .values()
+        .filter(|pass| pass.assignment_id == *assignment_id && pass.task_id == *task_id)
+        .max_by_key(|pass| pass.started_at)
+        .map(|pass| &pass.pass_id)
 }
 
 fn validate_idempotency_key(key: &str) -> StorageResult<()> {

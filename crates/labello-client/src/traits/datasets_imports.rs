@@ -159,6 +159,14 @@ pub trait ImportApi {
         idempotency_key: &'a str,
     ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
 
+    fn revisit_migration_target<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::RevisitMigrationTargetRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
     fn start_migration_pass<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

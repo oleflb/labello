@@ -121,15 +121,20 @@ impl LabelloApp {
             .map(|workflow| workflow.label())
             .unwrap_or_else(|| "No workflow".to_string());
         let destination = self.transition_label(&pending);
+        let discards_migration_draft =
+            self.manual_migration_active() && self.migration_has_unsaved_input();
         let discards_edits = matches!(
             pending,
             PendingTransition::NextAssignment | PendingTransition::PreviousAssignment(_)
         ) && self.view == AppView::Annotate
-            && matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry);
+            && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
+                || discards_migration_draft);
         if pending == PendingTransition::NextAssignment && !discards_edits {
             return;
         }
-        let modal_title = if discards_edits {
+        let modal_title = if discards_migration_draft {
+            "Unsaved migration draft"
+        } else if discards_edits {
             "Unsaved annotation changes"
         } else {
             "Switch active assignment?"
@@ -141,15 +146,16 @@ impl LabelloApp {
                 ui.label(format!("Current workflow: {current}"));
                 ui.label(format!("Pending destination: {destination}"));
                 if discards_edits {
-                    theme::inline_message(
-                        ui,
-                        theme::Intent::Warning,
-                        "Skipping now will discard annotation changes that have not been saved.",
-                    );
+                    theme::inline_message(ui, theme::Intent::Warning, if discards_migration_draft {
+                        "Continuing will discard migration keypoints or exclusion input that has not been saved."
+                    } else {
+                        "Skipping now will discard annotation changes that have not been saved."
+                    });
                 }
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
                     if self.view == AppView::Annotate
+                        && !discards_migration_draft
                         && theme::primary_button(
                             ui,
                             !self.loading.saving,
@@ -163,7 +169,11 @@ impl LabelloApp {
                         ui,
                         !self.loading.saving,
                         egui::Button::new(if discards_edits {
-                            "Discard edits and skip"
+                            if discards_migration_draft {
+                                "Discard draft and switch"
+                            } else {
+                                "Discard edits and skip"
+                            }
                         } else {
                             "Release and switch"
                         }),
@@ -188,6 +198,49 @@ impl LabelloApp {
         });
         if response.should_close() {
             self.cancel_pending_transition();
+        }
+    }
+
+    fn migration_revisit_discard_modal(&mut self, ctx: &egui::Context) {
+        let response =
+            theme::modal(ctx, egui::Id::new("migration-revisit-discard-modal")).show(ctx, |ui| {
+                ui.set_max_width((ctx.content_rect().width() - 48.0).clamp(240.0, 560.0));
+                ui.heading("Discard current migration draft?");
+                theme::inline_message(
+                    ui,
+                    theme::Intent::Warning,
+                    "Editing the previous object will discard migration keypoints or exclusion input that has not been saved.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if theme::danger_button(
+                        ui,
+                        !self.work.migration.busy,
+                        egui::Button::new("Discard draft and edit object"),
+                    )
+                    .clicked()
+                    {
+                        self.confirm_pending_migration_revisit();
+                    }
+                    if theme::quiet_button(
+                        ui,
+                        !self.work.migration.busy,
+                        egui::Button::new("Cancel"),
+                    )
+                    .clicked()
+                    {
+                        self.cancel_pending_migration_revisit();
+                    }
+                });
+            });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Window,
+                true,
+                "Discard current migration draft",
+            )
+        });
+        if response.should_close() {
+            self.cancel_pending_migration_revisit();
         }
     }
 
