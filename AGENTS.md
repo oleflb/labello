@@ -31,6 +31,24 @@ Keep dependencies flowing from domain types toward storage/client, API/UI, and
 finally the executable apps. Do not move API, filesystem, or UI concerns into
 `labello-domain`.
 
+Within those crates:
+
+- domain `state/`, `task/`, `review/`, and `migration/` own pure replay and
+  transition policy;
+- storage `repository/` owns filesystem mechanics, while assignment modules own
+  lock/validate/append/replay/cache transaction ordering;
+- storage import modules own durable jobs/control records, source sealing,
+  parsing, planning, build, verification, publication, and recovery;
+- client capability modules retain the closed `LabelloApi` facade;
+- API routes own authentication, authorization, untrusted-input conversion,
+  and response mapping;
+- UI feature state is explicit, live request ownership is centralized, and
+  browser persistence is never authoritative workflow state.
+
+See `docs/architecture.md`, `docs/structural-refactor-policy-ownership.md`,
+`docs/import-ownership.md`, and `docs/ui-ownership.md` before moving behavior
+across these boundaries.
+
 ## Working Approach
 
 - Read the complete flow and its callers, then fix the root cause at the

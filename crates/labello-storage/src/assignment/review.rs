@@ -213,7 +213,10 @@ impl DatasetRepository {
         Ok(state)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the public correction boundary keeps actor, assignment, and correction inputs explicit"
+    )]
     pub async fn correct_review_annotation(
         &self,
         user_id: &UserId,

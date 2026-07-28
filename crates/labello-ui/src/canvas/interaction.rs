@@ -1,4 +1,7 @@
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cursor selection combines independent interaction facts without owning them"
+)]
 fn canvas_hover_cursor(
     pointer: Option<Pos2>,
     image_rect: Rect,
@@ -186,7 +189,10 @@ fn handle_view_gestures(
     false
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pointer handling receives the explicit canvas state needed for gesture priority"
+)]
 fn handle_annotation_pointer(
     ui: &Ui,
     response: Response,

@@ -1,4 +1,7 @@
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "painting is a leaf operation over explicit immutable render inputs"
+)]
 fn paint_canvas(
     ui: &Ui,
     viewport: Rect,

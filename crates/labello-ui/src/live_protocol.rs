@@ -329,17 +329,26 @@ pub(crate) enum UiMessage {
         request: RequestIdentity,
         result: Result<KeybindingSet, String>,
     },
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "constructed only by asynchronous spawn paths on supported runtime targets"
+    )]
     RequestFailed {
         request: RequestIdentity,
         error: String,
     },
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "constructed by the browser-folder uploader only on wasm targets"
+    )]
     FolderUploadProgress {
         request: RequestIdentity,
         progress: FolderUploadProgress,
     },
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "constructed by the browser-folder uploader only on wasm targets"
+    )]
     FolderUploadFinished {
         request: RequestIdentity,
         result: Result<String, String>,

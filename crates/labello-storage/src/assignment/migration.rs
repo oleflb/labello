@@ -106,7 +106,10 @@ impl DatasetRepository {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the migration command boundary keeps actor, assignment, and version inputs explicit"
+    )]
     pub async fn save_migration_skeleton(
         &self,
         user_id: &UserId,
@@ -286,7 +289,10 @@ impl DatasetRepository {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the migration command boundary keeps actor, assignment, and version inputs explicit"
+    )]
     pub async fn exclude_migration_target(
         &self,
         user_id: &UserId,
@@ -816,7 +822,10 @@ impl DatasetRepository {
         command_result(state, context.task_id, None, Some(assignment), None)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the migration review boundary keeps actor, assignment, and decision inputs explicit"
+    )]
     pub async fn review_migration(
         &self,
         user_id: &UserId,
@@ -1024,7 +1033,10 @@ impl DatasetRepository {
         command_result(state, context.task_id, None, Some(assignment), None)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the transaction helper keeps lock-protected command inputs visible"
+    )]
     async fn append_migration_command_unlocked(
         &self,
         image_id: &ImageId,
@@ -1456,7 +1468,10 @@ fn has_dependency(state: &ImageState, task_id: &TaskId, group_id: &ObjectGroupId
         .is_some_and(|values| values.contains_key(group_id))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "dependency clearing is a pure transition over explicit migration facts"
+)]
 fn make_dependency_clearable(
     state: &mut ImageState,
     task_id: &TaskId,

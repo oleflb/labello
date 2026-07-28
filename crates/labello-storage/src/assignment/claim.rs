@@ -320,7 +320,10 @@ impl DatasetRepository {
         Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "assignment eligibility is a leaf policy check over explicit claim inputs"
+    )]
     async fn image_accepts_assignment(
         &self,
         image_id: &ImageId,

@@ -238,6 +238,17 @@ labello-domain
 | `labello-server` | Tokio/Axum API executable |
 | `labello-wasm` | Browser entry point and Trunk build target |
 
+Inside the crates, ownership follows the same direction. Domain modules own
+pure replay and workflow policy; storage modules own filesystem mechanics and
+transaction ordering; the API owns authorization and transport trust
+boundaries; and the UI owns explicit feature state with closed asynchronous
+commands and responses. `DatasetRepository`, `ImportService`, and `LabelloApi`
+are intentional capability facades, not generic abstraction layers.
+
+See the current [architecture and ownership map](docs/architecture.md), plus
+the detailed [import](docs/import-ownership.md) and
+[UI](docs/ui-ownership.md) ownership references.
+
 The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
 

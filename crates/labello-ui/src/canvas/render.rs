@@ -108,7 +108,10 @@ pub fn show_canvas_configured(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the styled canvas adapter keeps rendering policy explicit at its caller"
+)]
 pub(crate) fn show_canvas_styled(
     ui: &mut Ui,
     state: &mut CanvasState,
@@ -138,7 +141,10 @@ pub(crate) fn show_canvas_styled(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the colored canvas adapter keeps per-object styling explicit at its caller"
+)]
 pub(crate) fn show_canvas_colored(
     ui: &mut Ui,
     state: &mut CanvasState,

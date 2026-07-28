@@ -26,11 +26,12 @@ Only after that continue with the next issue.
   - Treat availability as advisory because another worker can claim the last item; keep the claim response authoritative and test stale-result, race, and dataset-switch behavior.
 - [ ] Investigate why prepared assignments still spend significant time decoding after image switches.
   - Determine whether queue prefetch stops before image decoding or whether 4096 x 3072 source images dominate decode and texture-upload time.
-- [ ] LOCKED Refactor the codebase around explicit ownership boundaries after the import and migration behavior is stable.
+- [x] Refactor the codebase around explicit ownership boundaries after the import and migration behavior is stable.
   - Objective:
     - Perform a behavior-preserving structural refactor focused on maintainability, reviewability, and code quality rather than new product behavior.
     - Keep the existing crate graph. The dependency direction is sound; the main problem is mixed responsibility and duplicated policy inside individual crates.
     - Treat line count and churn as signals, not success metrics. A large cohesive module may remain large when splitting it would obscure an invariant.
+    - Final audit and phase-by-phase result: [`structural-refactor-result.md`](structural-refactor-result.md).
   - Audit baseline:
     - The workspace dependency graph follows the intended direction: `labello-domain` has no internal dependency, storage and client depend on domain, API depends on client/domain/storage, UI depends on client/domain, and the apps compose those crates. Do not add a crate merely to make the diagram more layered.
     - The current Rust footprint is approximately 92,000 lines including tests. The most concentrated production areas are `crates/labello-ui/src/import_flow.rs` (about 6,300 lines), `crates/labello-storage/src/assignment/migration.rs` (about 4,300), `crates/labello-storage/src/import/formats.rs` (about 3,900), `crates/labello-api/src/handlers/imports/mod.rs` (about 3,900), `crates/labello-ui/src/admin.rs` (about 3,800), `crates/labello-ui/src/live.rs` (about 3,000), and `crates/labello-storage/src/assignment/mod.rs` (about 3,000).

@@ -1895,7 +1895,10 @@ async fn claim_review(
     assignment
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the test helper exposes every correction input varied by its callers"
+)]
 async fn correct(
     repo: &DatasetRepository,
     image_id: &ImageId,

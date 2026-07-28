@@ -767,8 +767,5 @@ fn renew_assignment(assignment: &mut Assignment, now: labello_domain::Timestamp)
     assignment.expires_at = Some(lease_expiration(now));
 }
 
-#[allow(dead_code)]
-fn _image_id_type_is_used(_: &ImageId) {}
-
 #[cfg(test)]
 mod tests;

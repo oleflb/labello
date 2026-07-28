@@ -13,9 +13,9 @@ use labello_client::{
     ReviewMigrationRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
 };
 use labello_domain::{
-    Actor, AdjudicationDecision, AnnotationGeometry, AnnotationSource, AnnotationType, Assignment,
-    AssignmentKind, DatasetId, DatasetRole, EventPayload, ImageId, KeybindingSet,
-    OfflineSyncRequest, PrelabelSuggestion, TaskOutcome, TaskState, TaskStatus,
+    Actor, AdjudicationDecision, AnnotationGeometry, AnnotationType, Assignment, AssignmentKind,
+    DatasetId, DatasetRole, EventPayload, ImageId, KeybindingSet, OfflineSyncRequest,
+    PrelabelSuggestion, TaskOutcome, TaskState, TaskStatus,
 };
 use labello_storage::assignment::AssignmentContext;
 
@@ -1148,6 +1148,3 @@ pub(crate) async fn prelabel_suggestions(
         vec![]
     }))
 }
-
-#[allow(dead_code)]
-fn _accepted_prelabels_are_persisted_as_annotations(_: AnnotationSource) {}
