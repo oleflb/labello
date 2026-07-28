@@ -40,7 +40,9 @@ not authorize an HTTP actor, acquire a lock, or write an event.
 `DatasetRepository` is the filesystem capability facade used by API and
 storage workflows. `repository/` owns layout, validated paths, config/index
 I/O, event append/load, replayed caches, snapshots, artifact migration, locks,
-and cache lifecycle.
+and cache lifecycle. Repository clones share one process-local parsed image
+index; `save_images_index` serializes durable publication with replacement of
+that cached value.
 
 Assignment modules own storage transaction policy:
 

@@ -8,6 +8,103 @@ use labello_domain::{
 use super::*;
 
 #[tokio::test]
+async fn image_record_lookups_share_one_cold_index_load_and_follow_saves() {
+    let temp = tempfile::tempdir().unwrap();
+    let writer = DatasetRepository::new(temp.path());
+    writer
+        .initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+    let first = image_record("img_first", "hash-first");
+    writer
+        .save_images_index(&ImagesIndex {
+            schema_version: SCHEMA_VERSION,
+            image_count: 1,
+            images_by_hash: BTreeMap::from([(first.blake3.clone(), first.clone())]),
+        })
+        .await
+        .unwrap();
+
+    let repository = DatasetRepository::new(temp.path());
+    let left = repository.clone();
+    let right = repository.clone();
+    let image_id = first.image_id.clone();
+    let (left_record, right_record) = tokio::join!(
+        left.load_image_record(&image_id),
+        right.load_image_record(&image_id)
+    );
+    assert_eq!(left_record.unwrap(), first);
+    assert_eq!(right_record.unwrap(), first);
+    assert_eq!(repository.images_index_load_count(), 1);
+
+    let second = image_record("img_second", "hash-second");
+    repository
+        .save_images_index(&ImagesIndex {
+            schema_version: SCHEMA_VERSION,
+            image_count: 1,
+            images_by_hash: BTreeMap::from([(second.blake3.clone(), second.clone())]),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .load_image_record(&second.image_id)
+            .await
+            .unwrap(),
+        second
+    );
+    assert!(repository.load_image_record(&image_id).await.is_err());
+    assert_eq!(
+        repository.images_index_load_count(),
+        1,
+        "publishing an index should replace the cached value without reloading it"
+    );
+
+    let restarted = DatasetRepository::new(temp.path());
+    assert_eq!(
+        restarted.load_image_record(&second.image_id).await.unwrap(),
+        second
+    );
+    assert_eq!(restarted.images_index_load_count(), 1);
+}
+
+#[tokio::test]
+async fn failed_image_index_save_clears_the_cached_value() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = DatasetRepository::new(temp.path());
+    repository
+        .initialize(DatasetMetadata::new(
+            DatasetId::from("ds"),
+            "Dataset",
+            now(),
+        ))
+        .await
+        .unwrap();
+    assert!(repository.images_index_cache.read().await.is_some());
+
+    tokio::fs::remove_file(repository.images_index_path())
+        .await
+        .unwrap();
+    tokio::fs::create_dir(repository.images_index_path())
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .save_images_index(&ImagesIndex::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        repository.images_index_cache.read().await.is_none(),
+        "a failed publication must not leave stale membership cached"
+    );
+}
+
+#[tokio::test]
 async fn appends_events_and_rebuilds_state() {
     let temp = tempfile::tempdir().unwrap();
     let repo = DatasetRepository::new(temp.path());
@@ -650,6 +747,22 @@ async fn prepare_v2_artifact_migration_fixture(root: &Path) -> (ImageId, Vec<u8>
     .await
     .unwrap();
     (image_id, event_bytes, user_id)
+}
+
+fn image_record(image_id: &str, hash: &str) -> ImageRecord {
+    ImageRecord {
+        image_id: ImageId::from(image_id),
+        blake3: hash.to_string(),
+        canonical_path: format!("images/{image_id}.png"),
+        known_paths: vec![format!("images/{image_id}.png")],
+        duplicate_paths: Vec::new(),
+        file_name: format!("{image_id}.png"),
+        byte_size: 1,
+        width: 10,
+        height: 10,
+        media_type: "image/png".to_string(),
+        source_memberships: None,
+    }
 }
 
 #[tokio::test]

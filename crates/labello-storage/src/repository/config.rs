@@ -69,14 +69,29 @@ impl DatasetRepository {
     }
 
     pub async fn load_images_index(&self) -> StorageResult<ImagesIndex> {
+        Ok(self.load_images_index_shared().await?.as_ref().clone())
+    }
+
+    async fn load_images_index_shared(&self) -> StorageResult<Arc<ImagesIndex>> {
         self.ensure_artifact_migration().await?;
-        if !tokio::fs::try_exists(self.images_index_path())
-            .await
-            .with_path(self.images_index_path())?
-        {
-            return Ok(ImagesIndex::default());
+        if let Some(index) = self.images_index_cache.read().await.as_ref() {
+            return Ok(index.clone());
         }
-        read_current_json(&self.images_index_path()).await
+        let mut cached = self.images_index_cache.write().await;
+        if let Some(index) = cached.as_ref() {
+            return Ok(index.clone());
+        }
+        let path = self.images_index_path();
+        let index = if tokio::fs::try_exists(&path).await.with_path(&path)? {
+            #[cfg(test)]
+            self.images_index_loads.fetch_add(1, Ordering::Relaxed);
+            read_current_json(&path).await?
+        } else {
+            ImagesIndex::default()
+        };
+        let index = Arc::new(index);
+        *cached = Some(index.clone());
+        Ok(index)
     }
 
     pub async fn image_count(&self) -> StorageResult<usize> {
@@ -93,11 +108,12 @@ impl DatasetRepository {
     }
 
     pub async fn load_image_record(&self, image_id: &ImageId) -> StorageResult<ImageRecord> {
-        self.load_images_index()
+        self.load_images_index_shared()
             .await?
             .images_by_hash
-            .into_values()
+            .values()
             .find(|record| &record.image_id == image_id)
+            .cloned()
             .ok_or_else(|| StorageError::NotFound(self.images_index_path()))
     }
 
@@ -106,10 +122,18 @@ impl DatasetRepository {
         labello_domain::validate_schema_version(index.schema_version)?;
         let mut index = index.clone();
         index.image_count = index.images_by_hash.len();
+        let mut cached = self.images_index_cache.write().await;
+        *cached = None;
         write_json_atomic(&self.images_index_path(), &index).await?;
+        *cached = Some(Arc::new(index));
         self.stats_cache.invalidate();
         self.assignment_availability_cache.invalidate();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn images_index_load_count(&self) -> u64 {
+        self.images_index_loads.load(Ordering::Relaxed)
     }
 
     async fn read_image_count_hint(&self) -> StorageResult<Option<usize>> {

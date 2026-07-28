@@ -19,7 +19,7 @@ use labello_domain::{
 use parking_lot::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::Mutex as AsyncMutex,
+    sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock},
 };
 
 use crate::{
@@ -52,12 +52,15 @@ pub struct DatasetRepository {
     locks: Arc<Mutex<BTreeMap<ImageId, Arc<AsyncMutex<()>>>>>,
     migration_lock: Arc<AsyncMutex<()>>,
     migration_complete: Arc<AtomicBool>,
+    images_index_cache: Arc<AsyncRwLock<Option<Arc<ImagesIndex>>>>,
     pub(crate) stats_cache: Arc<StatsCache>,
     pub(crate) assignment_availability_cache: Arc<AssignmentAvailabilityCache>,
     #[cfg(test)]
     migration_failure: Arc<Mutex<Option<ArtifactMigrationPhase>>>,
     #[cfg(test)]
     image_state_loads: Arc<AtomicU64>,
+    #[cfg(test)]
+    images_index_loads: Arc<AtomicU64>,
 }
 
 impl DatasetRepository {
@@ -67,12 +70,15 @@ impl DatasetRepository {
             locks: Arc::new(Mutex::new(BTreeMap::new())),
             migration_lock: Arc::new(AsyncMutex::new(())),
             migration_complete: Arc::new(AtomicBool::new(false)),
+            images_index_cache: Arc::new(AsyncRwLock::new(None)),
             stats_cache: Arc::new(StatsCache::default()),
             assignment_availability_cache: Arc::new(AssignmentAvailabilityCache::default()),
             #[cfg(test)]
             migration_failure: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             image_state_loads: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            images_index_loads: Arc::new(AtomicU64::new(0)),
         }
     }
 }

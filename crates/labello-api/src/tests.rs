@@ -605,7 +605,8 @@ struct ApiMigrationFixture {
 
 async fn api_migration_fixture() -> ApiMigrationFixture {
     let temp = tempfile::tempdir().unwrap();
-    let repository = labello_storage::DatasetRepository::new(temp.path().join("ds"));
+    let state = ApiState::new(temp.path());
+    let repository = state.repo(&DatasetId::from("ds")).unwrap().as_ref().clone();
     let image_id = ImageId::from("img_migration");
     let guide_task_id = TaskId::from("bounding_box:person");
     let task_id = TaskId::from("skeleton:person");
@@ -801,7 +802,7 @@ async fn api_migration_fixture() -> ApiMigrationFixture {
         )
         .await
         .unwrap();
-    let app = router(ApiState::new(temp.path()));
+    let app = router(state);
     ApiMigrationFixture {
         _temp: temp,
         app,

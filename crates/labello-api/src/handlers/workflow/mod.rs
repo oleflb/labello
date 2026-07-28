@@ -704,7 +704,6 @@ async fn migration_assignment(
     assignment_id.validate_path_segment()?;
     let metadata = repo.load_dataset_config().await?;
     ensure_dataset_role(&metadata, actor, required_role)?;
-    repo.load_image_record(image_id).await?;
     repo.load_image_state(image_id)
         .await?
         .assignments

@@ -2109,6 +2109,67 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
 }
 
 #[tokio::test]
+async fn migration_command_rejects_an_assignment_for_an_unindexed_image() {
+    let fixture = api_migration_fixture().await;
+    let assignment: Assignment = serde_json::from_value(
+        claim_assignment_for_task(
+            &fixture.app,
+            "annotator",
+            "annotation",
+            fixture.task_id.as_str(),
+        )
+        .await,
+    )
+    .unwrap();
+    let initial = migration_state(&fixture.app, &fixture.image_id, "annotator").await;
+    let sequence = initial.current_sequence;
+    let event_count = fixture
+        .repository
+        .load_events(&fixture.image_id)
+        .await
+        .unwrap()
+        .len();
+    fixture
+        .repository
+        .save_images_index(&ImagesIndex::default())
+        .await
+        .unwrap();
+
+    let response = migration_request(
+        &fixture,
+        "annotator",
+        "skeleton",
+        Some("unindexed-image"),
+        &labello_client::SaveMigrationSkeletonRequest {
+            assignment_id: assignment.assignment_id,
+            pass_id: None,
+            target: migration_expectation(&initial, &fixture.task_id, &fixture.targets[0]),
+            skeleton: migration_skeleton(0.4),
+        },
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        fixture
+            .repository
+            .load_image_state(&fixture.image_id)
+            .await
+            .unwrap()
+            .current_sequence,
+        sequence
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load_events(&fixture.image_id)
+            .await
+            .unwrap()
+            .len(),
+        event_count
+    );
+}
+
+#[tokio::test]
 async fn api_deleted_guide_can_only_be_resolved_by_canonical_exclusion() {
     let fixture = api_migration_fixture().await;
     let assignment: Assignment = serde_json::from_value(
