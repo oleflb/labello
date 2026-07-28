@@ -284,7 +284,7 @@ impl LabelloApp {
             .add_enabled_ui(enabled, |ui| {
                 ui.add_sized(
                     [44.0, 44.0],
-                    egui::Button::new(RichText::new(action.icon()).size(18.0)).selected(selected),
+                    egui::Button::new("").selected(selected),
                 )
             })
             .inner
@@ -292,6 +292,12 @@ impl LabelloApp {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.accessible_label())
         });
+        Self::paint_app_bar_action_icon(
+            ui,
+            response.rect,
+            action,
+            ui.style().interact(&response).fg_stroke.color,
+        );
         if response.clicked() {
             self.perform_app_bar_action(action);
         }
@@ -305,6 +311,104 @@ impl LabelloApp {
             }
             AppBarAction::Settings => self.open_shortcut_settings(),
             AppBarAction::SignOut => self.request_logout(),
+    }
+}
+
+    fn paint_app_bar_action_icon(
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        action: AppBarAction,
+        color: egui::Color32,
+    ) {
+        let center = rect.center();
+        let painter = ui.painter();
+        let stroke = egui::Stroke::new(1.7, color);
+
+        match action {
+            AppBarAction::Setup => {
+                let tooth_angle = std::f32::consts::TAU / 8.0;
+                let mut outline = Vec::with_capacity(32);
+                for index in 0..8 {
+                    let angle = index as f32 * tooth_angle;
+                    for (offset, radius) in [
+                        (-0.34, 6.1),
+                        (-0.18, 8.3),
+                        (0.18, 8.3),
+                        (0.34, 6.1),
+                    ] {
+                        let point_angle = angle + offset * tooth_angle;
+                        outline.push(
+                            center
+                                + egui::vec2(point_angle.cos(), point_angle.sin()) * radius,
+                        );
+                    }
+                }
+                painter.add(egui::Shape::closed_line(outline, stroke));
+                painter.circle_stroke(center, 2.6, stroke);
+            }
+            AppBarAction::Tutorial => {
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "?",
+                    egui::FontId::proportional(18.0),
+                    color,
+                );
+            }
+            AppBarAction::Settings => {
+                let keycap =
+                    egui::Rect::from_center_size(center, egui::vec2(17.0, 15.0));
+                painter.rect_stroke(
+                    keycap,
+                    egui::CornerRadius::same(3),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    center - egui::vec2(0.0, 1.0),
+                    egui::Align2::CENTER_CENTER,
+                    "K",
+                    egui::FontId::proportional(9.5),
+                    color,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(keycap.left() + 3.0, keycap.bottom() - 2.0),
+                        egui::pos2(keycap.right() - 3.0, keycap.bottom() - 2.0),
+                    ],
+                    egui::Stroke::new(1.2, color),
+                );
+            }
+            AppBarAction::SignOut => {
+                let door = egui::Rect::from_center_size(
+                    center - egui::vec2(3.5, 0.0),
+                    egui::vec2(8.0, 15.0),
+                );
+                painter.line_segment([door.right_top(), door.left_top()], stroke);
+                painter.line_segment([door.left_top(), door.left_bottom()], stroke);
+                painter.line_segment([door.left_bottom(), door.right_bottom()], stroke);
+                painter.line_segment(
+                    [
+                        center - egui::vec2(1.0, 0.0),
+                        center + egui::vec2(8.0, 0.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        center + egui::vec2(4.5, -3.5),
+                        center + egui::vec2(8.0, 0.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        center + egui::vec2(4.5, 3.5),
+                        center + egui::vec2(8.0, 0.0),
+                    ],
+                    stroke,
+                );
+            }
         }
     }
 

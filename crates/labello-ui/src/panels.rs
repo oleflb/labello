@@ -38,15 +38,6 @@ impl AppBarAction {
         }
     }
 
-    fn icon(self) -> &'static str {
-        match self {
-            Self::Setup => "#",
-            Self::Tutorial => "?",
-            Self::Settings => "⚙",
-            Self::SignOut => "↪",
-        }
-    }
-
     fn tooltip(self) -> &'static str {
         match self {
             Self::Setup => "Open dataset setup.",
