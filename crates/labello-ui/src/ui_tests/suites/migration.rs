@@ -381,12 +381,24 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     let canvas = object.get_by_label("Annotation canvas").rect();
     click_at(&mut object, canvas.center());
     object.step();
-    let undo = object.get_by_label("Undo last keypoint").rect();
-    let canvas = object.get_by_label("Annotation canvas").rect();
-    assert!(
-        canvas.bottom() <= undo.top(),
-        "canvas={canvas:?} undo={undo:?}"
-    );
+    for width in [400.0, 390.0, 360.0, 320.0] {
+        object.set_size(egui::vec2(width, 667.0));
+        object.step();
+        let canvas = object.get_by_label("Annotation canvas").rect();
+        for label in [
+            "Save & next Right",
+            "Undo last keypoint",
+            "More",
+            "Workflow",
+            "Inspector",
+        ] {
+            let action = object.get_by_label(label).rect();
+            assert!(
+                canvas.bottom() <= action.top(),
+                "width={width} canvas={canvas:?} {label}={action:?}"
+            );
+        }
+    }
     click_accesskit_button(&mut object, "Undo last keypoint");
     assert_eq!(object.state().work.migration.keypoint_index, 0);
     object.set_size(egui::vec2(320.0, 568.0));

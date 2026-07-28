@@ -26,6 +26,8 @@ impl eframe::App for LabelloApp {
         let viewport = ui.available_size();
         let layout = LayoutMode::for_width(ui.available_width());
         let workflow_panel_width = self.workflow_panel_width(ui.ctx());
+        let compact_action_height = (self.work_view() && layout != LayoutMode::Wide)
+            .then(|| self.workspace_actions_height(layout, viewport));
         egui::Panel::top("app_bar")
             .exact_size(56.0)
             .frame(theme::top_bar_frame().inner_margin(egui::Margin::symmetric(14, 6)))
@@ -40,9 +42,9 @@ impl eframe::App for LabelloApp {
                 )
                 .show(ui, |ui| self.workspace_context_bar(ui, layout));
         }
-        if self.work_view() && layout != LayoutMode::Wide {
+        if let Some(action_height) = compact_action_height {
             egui::Panel::bottom("compact_primary_actions")
-                .exact_size(self.workspace_actions_height(layout, viewport))
+                .exact_size(action_height)
                 .frame(theme::top_bar_frame())
                 .show(ui, |ui| {
                     if layout == LayoutMode::Compact {
@@ -104,9 +106,18 @@ impl eframe::App for LabelloApp {
         egui::CentralPanel::default()
             .frame(central_frame)
             .show(ui, |ui| {
+                let mut work_rect = ui.available_rect_before_wrap();
+                if let Some(action_height) = compact_action_height {
+                    let action_top = ui.ctx().content_rect().bottom() - action_height;
+                    work_rect.max.y = work_rect
+                        .max
+                        .y
+                        .min(action_top - theme::SPACE_2);
+                }
                 if let Some(inspector_left) = inspector_left {
-                    let mut work_rect = ui.available_rect_before_wrap();
                     work_rect.max.x = work_rect.max.x.min(inspector_left);
+                }
+                if work_rect != ui.available_rect_before_wrap() {
                     let mut work_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(work_rect)
