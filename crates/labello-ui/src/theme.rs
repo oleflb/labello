@@ -233,15 +233,16 @@ fn app_style() -> Style {
     style.spacing.icon_width_inner = 10.0;
     style.spacing.icon_spacing = SPACE_2;
     style.spacing.scroll = ScrollStyle {
-        bar_width: 8.0,
+        bar_width: 6.0,
         handle_min_length: 32.0,
-        floating_width: 3.0,
-        floating_allocated_width: 4.0,
-        dormant_handle_opacity: 0.35,
-        active_handle_opacity: 0.65,
-        interact_handle_opacity: 1.0,
-        active_background_opacity: 0.2,
-        interact_background_opacity: 0.35,
+        floating_width: 2.0,
+        floating_allocated_width: 0.0,
+        dormant_handle_opacity: 0.0,
+        active_handle_opacity: 0.45,
+        interact_handle_opacity: 0.75,
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
         ..ScrollStyle::floating()
     };
     style.animation_time = 0.12;

@@ -137,14 +137,8 @@ impl LabelloApp {
             None
         };
         let add_summary = |ui: &mut egui::Ui, filename_width: f32| {
-            ui.label(
-                RichText::new(view_label(view))
-                    .strong()
-                    .color(theme::ACCENT),
-            );
             if let Some(current) = current.as_ref() {
                 if filename_width > 0.0 {
-                    ui.separator();
                     ui.add_sized(
                         [filename_width, 44.0],
                         egui::Label::new(RichText::new(&current.image.file_name).strong())
@@ -179,7 +173,10 @@ impl LabelloApp {
                     && view != AppView::Annotate
                     && current.is_some()));
         let response = if short && current.is_some() {
-            ui.horizontal(|ui| self.canvas_controls(ui, layout))
+            ui.horizontal(|ui| {
+                self.canvas_controls(ui, layout);
+                self.assignment_availability_spinner(ui);
+            })
         } else if stack_controls {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -193,6 +190,7 @@ impl LabelloApp {
                             theme::bounded_badge(ui, workflow, theme::Intent::Accent, 90.0);
                         }
                     }
+                    self.assignment_availability_spinner(ui);
                 });
                 if current.is_some() {
                     self.canvas_controls(ui, layout);
@@ -247,11 +245,33 @@ impl LabelloApp {
                     ui.separator();
                     self.workspace_actions(ui, layout);
                 }
+                self.assignment_availability_spinner(ui);
             })
         };
         response.response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Workspace context bar")
         });
+    }
+
+    fn assignment_availability_spinner(&self, ui: &mut egui::Ui) {
+        if !self.work.availability.loading || !self.work.availability.tasks.is_empty() {
+            return;
+        }
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let spinner = ui
+                    .spinner()
+                    .on_hover_text("Checking assignment availability…");
+                spinner.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::ProgressIndicator,
+                        true,
+                        "Loading workflow assignment availability",
+                    )
+                });
+            },
+        );
     }
 
     fn canvas_controls(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {

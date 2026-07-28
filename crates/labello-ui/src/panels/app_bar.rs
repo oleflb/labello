@@ -48,11 +48,7 @@ impl LabelloApp {
         ));
         let dataset_response = theme::bounded_badge(
             &mut center_ui,
-            if layout == LayoutMode::Compact {
-                &dataset_name
-            } else {
-                &dataset_label
-            },
+            &dataset_name,
             theme::Intent::Info,
             dataset_width,
         )

@@ -352,23 +352,48 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
             .is_some(),
         "the initial availability check should retain its spinner"
     );
-    assert!(
-        harness
-            .query_by_label_contains("Checking assignment availability")
-            .is_some()
-    );
-    let availability_text = harness
-        .query_by_label_contains("Checking assignment availability")
-        .unwrap()
+    let availability_spinner = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::ProgressIndicator,
+            "Loading workflow assignment availability",
+        )
         .rect();
+    let context_bar = harness.get_by_label("Workspace context bar").rect();
     let workflow_pill = harness
         .get_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
         .rect();
     assert!(
-        availability_text.right() <= workflow_pill.right(),
-        "availability text should fit the workflow panel: \
-         text={availability_text:?} pill={workflow_pill:?}"
+        context_bar.contains_rect(availability_spinner),
+        "availability spinner should live in the workspace context bar: \
+         spinner={availability_spinner:?} context={context_bar:?}"
     );
+    assert!(
+        context_bar.right() - availability_spinner.right() <= 16.0,
+        "availability spinner should be right aligned: \
+         spinner={availability_spinner:?} context={context_bar:?}"
+    );
+    assert!(
+        availability_spinner.left() > workflow_pill.right(),
+        "availability spinner should no longer live in the workflow panel: \
+         spinner={availability_spinner:?} pill={workflow_pill:?}"
+    );
+    harness.set_size(egui::vec2(390.0, 844.0));
+    harness.step();
+    let compact_spinner = harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::ProgressIndicator,
+            "Loading workflow assignment availability",
+        )
+        .rect();
+    let compact_context = harness.get_by_label("Workspace context bar").rect();
+    assert!(compact_context.contains_rect(compact_spinner));
+    assert!(
+        compact_context.right() - compact_spinner.right() <= 16.0,
+        "compact availability spinner should be right aligned: \
+         spinner={compact_spinner:?} context={compact_context:?}"
+    );
+    harness.set_size(egui::vec2(1500.0, 780.0));
+    harness.step();
     harness
         .state_mut()
         .work
@@ -378,7 +403,10 @@ fn workflow_availability_disables_cards_skips_keyboard_cycles_and_retries_failur
     harness.step();
     assert!(
         harness
-            .query_by_label_contains("Checking assignment availability")
+            .query_by_role_and_label(
+                egui::accesskit::Role::ProgressIndicator,
+                "Loading workflow assignment availability",
+            )
             .is_none(),
         "background refreshes should keep the resolved workflow state stable"
     );

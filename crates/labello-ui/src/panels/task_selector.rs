@@ -1,5 +1,4 @@
 impl LabelloApp {
-    const AVAILABILITY_LOADING_TEXT: &'static str = "Checking assignment availability…";
     const WORKFLOW_ICON_SIZE: f32 = 28.0;
     const WORKFLOW_PILL_HEIGHT: f32 = 52.0;
 
@@ -7,11 +6,8 @@ impl LabelloApp {
         let workflows = self.workflow_choices();
         let style = ctx.style_of(ctx.theme());
         let label_font = egui::TextStyle::Button.resolve(&style);
-        let small_font = egui::TextStyle::Small.resolve(&style);
-        let show_availability_loading =
-            self.work.availability.loading && self.work.availability.tasks.is_empty();
         let widest_content = ctx.fonts_mut(|fonts| {
-            let widest_pill = workflows
+            workflows
                 .iter()
                 .map(|workflow| {
                     let label_width = fonts
@@ -23,22 +19,7 @@ impl LabelloApp {
                         + label_width
                         + 2.0 * theme::SPACE_3
                 })
-                .fold(0.0, f32::max);
-            let availability_row = if show_availability_loading {
-                style.spacing.interact_size.y
-                    + style.spacing.item_spacing.x
-                    + fonts
-                        .layout_no_wrap(
-                            Self::AVAILABILITY_LOADING_TEXT.to_string(),
-                            small_font,
-                            theme::MUTED,
-                        )
-                        .size()
-                        .x
-            } else {
-                0.0
-            };
-            widest_pill.max(availability_row)
+                .fold(0.0, f32::max)
         });
 
         let measured_width = widest_content + 2.0 * theme::SPACE_4 + 2.0;
@@ -180,19 +161,7 @@ impl LabelloApp {
                 self.request_transition(PendingTransition::Workflow(workflow.task_id.clone()));
             }
         }
-        if self.work.availability.loading && self.work.availability.tasks.is_empty() {
-            ui.horizontal(|ui| {
-                let spinner = ui.spinner();
-                spinner.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::ProgressIndicator,
-                        true,
-                        "Loading workflow assignment availability",
-                    )
-                });
-                ui.small(Self::AVAILABILITY_LOADING_TEXT);
-            });
-        } else if let Some(error) = self.work.availability.error.clone() {
+        if let Some(error) = self.work.availability.error.clone() {
             theme::inline_message(
                 ui,
                 theme::Intent::Warning,
@@ -238,14 +207,18 @@ fn paint_side_panel_toggle_icon(
         egui::Stroke::new(1.5, color),
         egui::StrokeKind::Inside,
     );
-    painter.rect_filled(
+    let panel_fill = if panel_on_right {
+        egui::Rect::from_min_max(
+            egui::pos2(panel.right() - 6.0, panel.top() + 2.5),
+            panel.max - egui::vec2(2.5, 2.5),
+        )
+    } else {
         egui::Rect::from_min_max(
             panel.min + egui::vec2(2.5, 2.5),
             egui::pos2(panel.left() + 6.0, panel.bottom() - 2.5),
-        ),
-        egui::CornerRadius::same(1),
-        color,
-    );
+        )
+    };
+    painter.rect_filled(panel_fill, egui::CornerRadius::same(1), color);
     let direction = if panel_at_left { 1.0 } else { -1.0 };
     for y in [-4.0, 4.0] {
         painter.line_segment(
