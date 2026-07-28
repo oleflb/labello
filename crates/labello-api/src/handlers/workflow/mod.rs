@@ -7,10 +7,11 @@ use axum::{
 };
 use labello_client::{
     AppendEventRequest, AssignNextRequest, AssignmentActionRequest, AssignmentAvailability,
-    AssignmentAvailabilityRequest, ConfirmMigrationRequest, CorrectionRequest,
-    ExcludeMigrationTargetRequest, KeepMigrationTargetRequest, ManualMigrationCommandResult,
-    OfflineBundleRequest, PrelabelSuggestionRequest, ReopenMigrationTargetRequest,
-    ReviewMigrationRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
+    AssignmentAvailabilityEntry, AssignmentAvailabilityRequest, ConfirmMigrationRequest,
+    CorrectionRequest, ExcludeMigrationTargetRequest, KeepMigrationTargetRequest,
+    ManualMigrationCommandResult, OfflineBundleRequest, PrelabelSuggestionRequest,
+    ReopenMigrationTargetRequest, ReviewMigrationRequest, SaveMigrationSkeletonRequest,
+    StartMigrationPassRequest,
 };
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationType, Assignment, AssignmentKind,
@@ -50,12 +51,21 @@ pub(crate) async fn assignment_availability(
 ) -> ApiResult<Json<AssignmentAvailability>> {
     let actor = actor_from_headers(&state, &headers)?;
     let repo = state.repo(&dataset_id)?;
-    let tasks = repo
-        .assignment_availability(&actor.user_id, request.kind.clone())
+    let mut availabilities = repo
+        .assignment_availabilities(&actor.user_id, request.kind.clone())
         .await?;
+    let requested = availabilities
+        .iter()
+        .position(|(kind, _)| kind == &request.kind)
+        .expect("the authorized requested kind must be included");
+    let (_, tasks) = availabilities.remove(requested);
     Ok(Json(AssignmentAvailability {
         kind: request.kind,
         tasks,
+        related: availabilities
+            .into_iter()
+            .map(|(kind, tasks)| AssignmentAvailabilityEntry { kind, tasks })
+            .collect(),
     }))
 }
 

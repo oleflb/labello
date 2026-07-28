@@ -196,6 +196,7 @@ fn assignment_availability_poll_is_scheduled_from_completion() {
             result: Ok(labello_client::AssignmentAvailability {
                 kind: AssignmentKind::Annotation,
                 tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), true)]),
+                related: Vec::new(),
             }),
         })
         .unwrap();
@@ -258,6 +259,7 @@ fn stale_availability_is_discarded_after_refresh_and_dataset_switch() {
             result: Ok(labello_client::AssignmentAvailability {
                 kind: AssignmentKind::Annotation,
                 tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), false)]),
+                related: Vec::new(),
             }),
         })
         .unwrap();
@@ -282,6 +284,7 @@ fn stale_availability_is_discarded_after_refresh_and_dataset_switch() {
             result: Ok(labello_client::AssignmentAvailability {
                 kind: AssignmentKind::Annotation,
                 tasks: BTreeMap::from([(TaskId::from("bounding_box:person"), false)]),
+                related: Vec::new(),
             }),
         })
         .unwrap();

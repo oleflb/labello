@@ -462,6 +462,13 @@ fn assignment_load_waits_for_availability_and_selects_the_next_available_workflo
                     (TaskId::from("bounding_box:person"), false),
                     (TaskId::from("bounding_box:vehicle"), true),
                 ]),
+                related: vec![labello_client::AssignmentAvailabilityEntry {
+                    kind: AssignmentKind::Adjudication,
+                    tasks: BTreeMap::from([
+                        (TaskId::from("bounding_box:person"), true),
+                        (TaskId::from("bounding_box:vehicle"), false),
+                    ]),
+                }],
             }),
         })
         .unwrap();
@@ -478,6 +485,23 @@ fn assignment_load_waits_for_availability_and_selects_the_next_available_workflo
         panic!("expected assignment claim after availability");
     };
     assert_eq!(task_id, TaskId::from("bounding_box:vehicle"));
+
+    app.execute_transition(crate::app::PendingTransition::View(
+        AppView::Adjudicate,
+    ));
+
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment {
+            kind: AssignmentKind::Adjudication,
+            task_id,
+            ..
+        } if task_id == &TaskId::from("bounding_box:person")
+    )));
+    assert!(app.runtime.commands.iter().all(|command| !matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
 }
 
 #[test]
@@ -549,6 +573,131 @@ fn fresh_cached_availability_survives_reload_without_another_check() {
             .iter()
             .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
     );
+}
+
+#[test]
+fn fresh_availability_survives_workflow_and_view_navigation() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Annotation);
+    app.work.availability.tasks = app
+        .work
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), true))
+        .collect();
+    app.work.availability.resolved = true;
+    app.work.availability.checked_at = Some(labello_domain::now());
+
+    app.execute_transition(crate::app::PendingTransition::Workflow(TaskId::from(
+        "bounding_box:vehicle",
+    )));
+
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { task_id, .. }
+            if task_id == &TaskId::from("bounding_box:vehicle")
+    )));
+    assert!(app.runtime.commands.iter().all(|command| !matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Stats));
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Annotate));
+
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { task_id, .. }
+            if task_id == &TaskId::from("bounding_box:vehicle")
+    )));
+    assert!(app.runtime.commands.iter().all(|command| !matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+}
+
+#[test]
+fn fresh_availability_is_cached_per_assignment_kind() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Annotation);
+    app.work.availability.tasks = app
+        .work
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), true))
+        .collect();
+    app.work.availability.resolved = true;
+    app.work.availability.checked_at = Some(labello_domain::now());
+
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Review));
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::AssignmentAvailability {
+            kind: AssignmentKind::Review,
+            ..
+        }
+    )));
+
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Review);
+    app.work.availability.tasks = app
+        .work
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), true))
+        .collect();
+    app.work.availability.resolved = true;
+    app.work.availability.checked_at = Some(labello_domain::now());
+    app.work.availability.loading = false;
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Stats));
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Annotate));
+
+    assert_eq!(
+        app.work.availability.kind,
+        Some(AssignmentKind::Annotation)
+    );
+    assert!(app.runtime.commands.iter().all(|command| !matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+
+    app.execute_transition(crate::app::PendingTransition::View(AppView::Review));
+
+    assert_eq!(app.work.availability.kind, Some(AssignmentKind::Review));
+    assert!(app.runtime.commands.iter().all(|command| !matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+}
+
+#[test]
+fn released_workflow_transition_reuses_fresh_availability() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 12, |app| {
+        app.work.current.is_some() && app.work.availability.resolved
+    });
+    let checks_before = api.counts().assignment_availability;
+    harness.state_mut().work.pending_transition =
+        Some(crate::app::PendingTransition::Workflow(TaskId::from(
+            "bounding_box:vehicle",
+        )));
+    harness.state_mut().release_pending_transition();
+
+    step_until(&mut harness, 12, |app| {
+        app.work.selected_task_id.as_ref() == Some(&TaskId::from("bounding_box:vehicle"))
+            && app.work.current.is_some()
+    });
+
+    assert_eq!(api.counts().assignment_availability, checks_before);
 }
 
 #[test]
@@ -654,6 +803,7 @@ fn failed_or_empty_availability_never_starts_an_assignment_load() {
                     (TaskId::from("bounding_box:person"), false),
                     (TaskId::from("bounding_box:vehicle"), false),
                 ]),
+                related: Vec::new(),
             }),
         })
         .unwrap();

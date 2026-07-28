@@ -202,6 +202,15 @@ pub(crate) struct AssignmentAvailabilityState {
     pub(crate) refresh_after_load: bool,
     pub(crate) error: Option<String>,
     pub(crate) last_attempt: Option<Instant>,
+    pub(crate) cache: Vec<CachedAssignmentAvailability>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedAssignmentAvailability {
+    pub(crate) dataset_id: DatasetId,
+    pub(crate) kind: AssignmentKind,
+    pub(crate) tasks: std::collections::BTreeMap<TaskId, bool>,
+    pub(crate) checked_at: Timestamp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

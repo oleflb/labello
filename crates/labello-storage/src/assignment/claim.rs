@@ -15,89 +15,150 @@ impl DatasetRepository {
         user_id: &UserId,
         kind: AssignmentKind,
     ) -> StorageResult<std::collections::BTreeMap<TaskId, bool>> {
+        Ok(self
+            .assignment_availabilities(user_id, kind.clone())
+            .await?
+            .into_iter()
+            .find_map(|(computed_kind, tasks)| (computed_kind == kind).then_some(tasks))
+            .expect("the required assignment kind must be included"))
+    }
+
+    pub async fn assignment_availabilities(
+        &self,
+        user_id: &UserId,
+        requested_kind: AssignmentKind,
+    ) -> StorageResult<Vec<(AssignmentKind, std::collections::BTreeMap<TaskId, bool>)>> {
         let config = self.load_dataset_config().await?;
         require_role(
             &config.role_assignments,
             &config.dataset_id,
             user_id,
-            role_for_kind(&kind),
+            role_for_kind(&requested_kind),
         )?;
-        let cache_key = (
-            user_id.clone(),
-            assignment_kind_cache_key(&kind).to_string(),
-        );
         let requested_generation = self.assignment_availability_cache.generation();
-        if let Some(tasks) = self
-            .assignment_availability_cache
-            .get(&cache_key, requested_generation)
+        let kinds = [
+            AssignmentKind::Annotation,
+            AssignmentKind::Review,
+            AssignmentKind::Adjudication,
+        ]
+        .into_iter()
+        .filter(|candidate| {
+            config.role_assignments.iter().any(|assignment| {
+                assignment.dataset_id == config.dataset_id
+                    && assignment.user_id == *user_id
+                    && assignment.roles.contains(&role_for_kind(candidate))
+            })
+        })
+        .collect::<Vec<_>>();
+        if let Some(cached) = self
+            .cached_assignment_availabilities(user_id, &kinds, requested_generation)
             .await
         {
-            return Ok(tasks);
+            return Ok(cached);
         }
 
         let _refresh = self.assignment_availability_cache.lock_refresh().await;
         let generation = self.assignment_availability_cache.generation();
-        if let Some(tasks) = self
-            .assignment_availability_cache
-            .get(&cache_key, generation)
+        if let Some(cached) = self
+            .cached_assignment_availabilities(user_id, &kinds, generation)
             .await
         {
-            return Ok(tasks);
+            return Ok(cached);
         }
 
         #[cfg(test)]
         self.assignment_availability_cache.record_scan();
-        let availability = self.compute_assignment_availability(user_id, &kind).await?;
-        self.assignment_availability_cache
-            .store(cache_key, generation, availability.clone())
-            .await;
-        Ok(availability)
+        let availabilities = self
+            .compute_assignment_availabilities(user_id, &kinds)
+            .await?;
+        for (kind, tasks) in &availabilities {
+            self.assignment_availability_cache
+                .store(
+                    (user_id.clone(), assignment_kind_cache_key(kind).to_string()),
+                    generation,
+                    tasks.clone(),
+                )
+                .await;
+        }
+        Ok(availabilities)
     }
 
-    async fn compute_assignment_availability(
+    async fn cached_assignment_availabilities(
         &self,
         user_id: &UserId,
-        kind: &AssignmentKind,
-    ) -> StorageResult<std::collections::BTreeMap<TaskId, bool>> {
+        kinds: &[AssignmentKind],
+        generation: u64,
+    ) -> Option<Vec<(AssignmentKind, std::collections::BTreeMap<TaskId, bool>)>> {
+        let mut cached = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let key = (user_id.clone(), assignment_kind_cache_key(kind).to_string());
+            cached.push((
+                kind.clone(),
+                self.assignment_availability_cache
+                    .get(&key, generation)
+                    .await?,
+            ));
+        }
+        Some(cached)
+    }
+
+    async fn compute_assignment_availabilities(
+        &self,
+        user_id: &UserId,
+        kinds: &[AssignmentKind],
+    ) -> StorageResult<Vec<(AssignmentKind, std::collections::BTreeMap<TaskId, bool>)>> {
         let metadata = self.load_dataset().await?;
 
-        let mut availability = std::collections::BTreeMap::new();
-        let mut unresolved = std::collections::BTreeSet::new();
-        for task in &metadata.tasks {
-            if self.task_accepts_assignment(&metadata, task, kind).await? {
-                unresolved.insert(task.task_id.clone());
+        let mut work = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let mut availability = std::collections::BTreeMap::new();
+            let mut unresolved = std::collections::BTreeSet::new();
+            for task in &metadata.tasks {
+                if self.task_accepts_assignment(&metadata, task, kind).await? {
+                    unresolved.insert(task.task_id.clone());
+                }
+                availability.insert(task.task_id.clone(), false);
             }
-            availability.insert(task.task_id.clone(), false);
+            work.push((kind.clone(), availability, unresolved));
         }
 
         for image_id in metadata.images.keys() {
-            if unresolved.is_empty() {
+            if work.iter().all(|(_, _, unresolved)| unresolved.is_empty()) {
                 break;
             }
             let lock = self.image_lock(image_id);
             let _guard = lock.lock().await;
             let state = self.load_image_state(image_id).await?;
             let now = labello_domain::now();
-            let mut available = Vec::new();
-            for task in metadata
-                .tasks
-                .iter()
-                .filter(|task| unresolved.contains(&task.task_id))
-            {
-                let status = effective_assignment_status(&state, &task.task_id, kind, now);
-                if self
-                    .image_accepts_assignment(image_id, &state, task, user_id, kind, &status, now)
-                    .await?
+            for (kind, availability, unresolved) in &mut work {
+                let kind = kind.clone();
+                let pending = unresolved.clone();
+                let mut available = Vec::new();
+                for task in metadata
+                    .tasks
+                    .iter()
+                    .filter(|task| pending.contains(&task.task_id))
                 {
-                    available.push(task.task_id.clone());
+                    let status = effective_assignment_status(&state, &task.task_id, &kind, now);
+                    if self
+                        .image_accepts_assignment(
+                            image_id, &state, task, user_id, &kind, &status, now,
+                        )
+                        .await?
+                    {
+                        available.push(task.task_id.clone());
+                    }
+                }
+                for task_id in available {
+                    unresolved.remove(&task_id);
+                    availability.insert(task_id, true);
                 }
             }
-            for task_id in available {
-                unresolved.remove(&task_id);
-                availability.insert(task_id, true);
-            }
         }
-        Ok(availability)
+        Ok(work
+            .into_iter()
+            .map(|(kind, availability, _)| (kind, availability))
+            .collect())
     }
 
     /// Return an exact still-active assignment without renewing it. Browser

@@ -1085,6 +1085,17 @@ async fn assignment_availability_is_batched_authenticated_and_advisory() {
         stale_available["tasks"]["bounding_box:pixel"],
         serde_json::Value::Bool(true)
     );
+    let related_kinds = stale_available["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|availability| availability["kind"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        related_kinds,
+        BTreeSet::from(["review", "adjudication"]),
+        "one scan should return the other authorized work-view caches"
+    );
 
     let competing = claim_assignment(&app, "other_annotator", "annotation").await;
     assert!(!competing.is_null());

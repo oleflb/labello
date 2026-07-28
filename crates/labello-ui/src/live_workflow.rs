@@ -412,9 +412,14 @@ impl LabelloApp {
         if self.loading.image || self.work.assignment.is_some() || self.runtime.api.is_none() {
             return;
         }
-        let availability_matches = self.work.availability.dataset_id.as_ref()
+        let mut availability_matches = self.work.availability.dataset_id.as_ref()
             == Some(&self.config.dataset_id)
             && self.work.availability.kind.as_ref() == Some(&kind);
+        if (!availability_matches || !self.work.availability.resolved)
+            && self.restore_cached_assignment_availability()
+        {
+            availability_matches = true;
+        }
         if !availability_matches || !self.work.availability.resolved {
             self.work.availability.load_after_resolution = true;
             if !self.work.availability.loading {
