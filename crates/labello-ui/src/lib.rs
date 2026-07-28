@@ -14,6 +14,7 @@ mod persistence;
 pub mod queue;
 mod review_sequence;
 pub mod setup;
+mod statistics;
 pub mod theme;
 mod workspace_canvas;
 
