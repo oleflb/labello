@@ -448,7 +448,7 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     );
 
     let mut medium = Harness::builder()
-        .with_size(egui::vec2(900.0, 667.0))
+        .with_size(egui::vec2(600.0, 667.0))
         .build_eframe(|ctx| {
             inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
         });
@@ -458,6 +458,17 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     assert!(medium.query_by_label("Migration controls").is_none());
     assert!(medium.get_by_label("Workflow").rect().width() > 80.0);
     assert!(medium.get_by_label("Inspector").rect().width() > 80.0);
+    let canvas = medium.get_by_label("Annotation canvas").rect();
+    let first_row = medium.get_by_label_contains("Save skeleton & advance").rect();
+    let second_row = medium.get_by_label("Inspector").rect();
+    assert!(
+        canvas.bottom() <= first_row.top(),
+        "canvas={canvas:?} first_row={first_row:?}"
+    );
+    assert!(
+        second_row.bottom() <= 667.0,
+        "wrapped action is clipped: {second_row:?}"
+    );
 
     click_accesskit_button(&mut object, "Inspector");
     assert_eq!(object.state().work.drawer, Some(Drawer::Inspector));

@@ -44,7 +44,7 @@ impl eframe::App for LabelloApp {
         }
         if let Some(action_height) = compact_action_height {
             egui::Panel::bottom("compact_primary_actions")
-                .exact_size(action_height)
+                .min_size(action_height)
                 .frame(theme::top_bar_frame())
                 .show(ui, |ui| {
                     if layout == LayoutMode::Compact {
