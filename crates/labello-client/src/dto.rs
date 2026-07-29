@@ -63,6 +63,42 @@ pub struct AssignNextRequest {
     pub kind: Option<AssignmentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_id: Option<AssignmentId>,
+    /// Images already displayed or held in the browser's preload queue.
+    ///
+    /// Older servers ignore this query parameter. Servers that support queue
+    /// preloading use it to avoid renewing and returning the same assignment.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_image_ids",
+        deserialize_with = "deserialize_image_ids"
+    )]
+    pub exclude_image_ids: Vec<ImageId>,
+}
+
+fn serialize_image_ids<S>(image_ids: &[ImageId], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(
+        &image_ids
+            .iter()
+            .map(ImageId::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn deserialize_image_ids<'de, D>(deserializer: D) -> Result<Vec<ImageId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let encoded = String::deserialize(deserializer)?;
+    Ok(encoded
+        .split(',')
+        .filter(|image_id| !image_id.is_empty())
+        .map(ImageId::from)
+        .collect())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

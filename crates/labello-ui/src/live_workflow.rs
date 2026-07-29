@@ -56,11 +56,13 @@ impl LabelloApp {
             UiCommand::ClaimAssignment {
                 request,
                 operation_id,
+                prefetch,
                 dataset_id,
                 task_id,
                 prelabel_config_ids,
                 kind,
                 reclaim_assignment_id,
+                exclude_image_ids,
             } => self.spawn_message(request.clone(), async move {
                 let assignment = match api
                     .assign_next_image(
@@ -69,6 +71,7 @@ impl LabelloApp {
                             task_id,
                             kind: Some(kind.clone()),
                             assignment_id: reclaim_assignment_id,
+                            exclude_image_ids,
                         },
                     )
                     .await
@@ -78,6 +81,7 @@ impl LabelloApp {
                         return UiMessage::ImageLoaded {
                             request,
                             operation_id,
+                            prefetch,
                             assignment: None,
                             result: Box::new(Err(error.to_string())),
                         };
@@ -87,6 +91,7 @@ impl LabelloApp {
                     return UiMessage::ImageLoaded {
                         request,
                         operation_id,
+                        prefetch,
                         assignment: None,
                         result: Box::new(Ok(None)),
                     };
@@ -104,6 +109,7 @@ impl LabelloApp {
                 UiMessage::ImageLoaded {
                     request,
                     operation_id,
+                    prefetch,
                     assignment: Some(assignment),
                     result: Box::new(result),
                 }
@@ -129,6 +135,7 @@ impl LabelloApp {
                 UiMessage::ImageLoaded {
                     request,
                     operation_id,
+                    prefetch: false,
                     assignment: Some(assignment),
                     result: Box::new(result),
                 }
@@ -281,6 +288,7 @@ impl LabelloApp {
         self.queue_command(UiCommand::ClaimAssignment {
             request,
             operation_id,
+            prefetch: false,
             dataset_id: self.config.dataset_id.clone(),
             task_id: task.task_id,
             prelabel_config_ids: if kind == AssignmentKind::Annotation {
@@ -290,6 +298,56 @@ impl LabelloApp {
             },
             kind,
             reclaim_assignment_id: self.runtime.persistence.expected_assignment.clone(),
+            exclude_image_ids: Vec::new(),
+        });
+    }
+
+    pub(crate) fn replenish_live_queue(&mut self) {
+        if self.runtime.api.is_none()
+            || self.current.is_none()
+            || self.active_prefetch_id.is_some()
+            || self.prefetched.len() >= self.queue.queue_size()
+            || self
+                .prefetch_retry_at
+                .is_some_and(|retry_at| retry_at > std::time::Instant::now())
+            || !self.ensure_valid_task_selection()
+        {
+            return;
+        }
+        let Some(kind) = self.assignment_kind() else {
+            return;
+        };
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let mut exclude_image_ids = Vec::with_capacity(self.prefetched.len() + 1);
+        if let Some(current) = self.current.as_ref() {
+            exclude_image_ids.push(current.image.image_id.clone());
+        }
+        exclude_image_ids.extend(
+            self.prefetched
+                .iter()
+                .map(|loaded| loaded.queued.image.image_id.clone()),
+        );
+        let operation_id = self.next_operation();
+        self.prefetch_retry_at = None;
+        self.active_prefetch_id = Some(operation_id);
+        self.queue.set_loading(true);
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        self.queue_command(UiCommand::ClaimAssignment {
+            request,
+            operation_id,
+            prefetch: true,
+            dataset_id: self.config.dataset_id.clone(),
+            task_id: task.task_id,
+            prelabel_config_ids: if kind == AssignmentKind::Annotation {
+                task.prelabel_config_ids
+            } else {
+                Vec::new()
+            },
+            kind,
+            reclaim_assignment_id: None,
+            exclude_image_ids,
         });
     }
 
@@ -597,31 +655,27 @@ async fn load_image(
     prelabel_config_ids: Vec<PrelabelConfigId>,
     fetch_prelabels: bool,
 ) -> labello_client::ClientResult<LoadedImage> {
-    let image = api
-        .get_image_record(&dataset_id, &assignment.image_id)
-        .await?;
-    let state = api
-        .get_image_state(&dataset_id, &assignment.image_id)
-        .await?;
-    let preview = api
-        .get_image_preview(&dataset_id, &assignment.image_id, 1600)
-        .await?;
+    let (image, state, preview) = futures::try_join!(
+        api.get_image_record(&dataset_id, &assignment.image_id),
+        api.get_image_state(&dataset_id, &assignment.image_id),
+        api.get_image_preview(&dataset_id, &assignment.image_id, 1600),
+    )?;
     let color_image = Some(egui::ColorImage::from_rgba_unmultiplied(
         [preview.width as usize, preview.height as usize],
         &preview.rgba,
     ));
     let mut prelabels = Vec::new();
     if fetch_prelabels {
-        for config_id in prelabel_config_ids {
-            let mut suggestions = api
-                .prelabel_suggestions(
-                    &dataset_id,
-                    PrelabelSuggestionRequest {
-                        config_id,
-                        task_id: assignment.task_id.clone(),
-                    },
-                )
-                .await?;
+        let requests = prelabel_config_ids.into_iter().map(|config_id| {
+            api.prelabel_suggestions(
+                &dataset_id,
+                PrelabelSuggestionRequest {
+                    config_id,
+                    task_id: assignment.task_id.clone(),
+                },
+            )
+        });
+        for mut suggestions in futures::future::try_join_all(requests).await? {
             prelabels.append(&mut suggestions);
         }
     }

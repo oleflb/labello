@@ -192,6 +192,7 @@ pub(crate) enum UiMessage {
     ImageLoaded {
         request: RequestIdentity,
         operation_id: u64,
+        prefetch: bool,
         assignment: Option<Assignment>,
         result: Box<Result<Option<LoadedImage>, String>>,
     },
@@ -332,11 +333,13 @@ pub(crate) enum UiCommand {
     ClaimAssignment {
         request: RequestIdentity,
         operation_id: u64,
+        prefetch: bool,
         dataset_id: DatasetId,
         task_id: TaskId,
         prelabel_config_ids: Vec<PrelabelConfigId>,
         kind: AssignmentKind,
         reclaim_assignment_id: Option<AssignmentId>,
+        exclude_image_ids: Vec<ImageId>,
     },
     ReloadAssignment {
         request: RequestIdentity,
@@ -648,6 +651,7 @@ pub struct WorkState {
     pub(crate) current_state: Option<ImageState>,
     pub(crate) current_texture: Option<TextureHandle>,
     pub(crate) queue: ImageQueue,
+    pub(crate) prefetched: VecDeque<LoadedImage>,
     pub(crate) annotations: Vec<labello_domain::AnnotationVersion>,
     pub(crate) persisted_annotations: BTreeSet<AnnotationId>,
     pub(crate) modified_annotations: BTreeSet<AnnotationId>,
@@ -673,6 +677,8 @@ pub struct WorkState {
     pub(crate) show_settings: bool,
     pub(crate) next_operation_id: u64,
     pub(crate) active_load_id: Option<u64>,
+    pub(crate) active_prefetch_id: Option<u64>,
+    pub(crate) prefetch_retry_at: Option<Instant>,
     pub(crate) active_operation_id: Option<u64>,
 }
 
@@ -782,8 +788,9 @@ impl LabelloApp {
             prelabel_config_ids: vec![],
             enabled: true,
         }];
-        let mut queue = ImageQueue::new(IMAGE_QUEUE_SIZE);
-        for index in 1..=IMAGE_QUEUE_SIZE {
+        let queue_size = config.queue_size.max(1);
+        let mut queue = ImageQueue::new(queue_size);
+        for index in 1..=queue_size {
             queue.push_if_room(demo_image(index));
         }
         let current = queue.pop_next();
@@ -803,6 +810,7 @@ impl LabelloApp {
             current_state: None,
             current_texture: None,
             queue,
+            prefetched: VecDeque::new(),
             annotations: Vec::new(),
             persisted_annotations: BTreeSet::new(),
             modified_annotations: BTreeSet::new(),
@@ -828,6 +836,8 @@ impl LabelloApp {
             show_settings: false,
             next_operation_id: 0,
             active_load_id: None,
+            active_prefetch_id: None,
+            prefetch_retry_at: None,
             active_operation_id: None,
         };
         Self {
@@ -1034,7 +1044,19 @@ impl LabelloApp {
             PendingTransition::NextAssignment => {
                 if self.runtime.api.is_some() {
                     self.clear_current_image();
-                    self.request_next_image();
+                    if !self.prefetched.is_empty()
+                        && let Some(ctx) = self.runtime.repaint_ctx.clone()
+                    {
+                        let loaded = self
+                            .prefetched
+                            .pop_front()
+                            .expect("prefetched queue was checked");
+                        self.queue.pop_next();
+                        self.apply_loaded_image(&ctx, loaded);
+                        self.replenish_live_queue();
+                    } else {
+                        self.request_next_image();
+                    }
                 } else {
                     self.advance_current_image();
                 }
@@ -1872,6 +1894,7 @@ impl eframe::App for LabelloApp {
         self.start_setup_load();
         self.refresh_stats_if_due();
         self.refresh_ingest_if_due();
+        self.refresh_prefetch_if_due();
         self.autosave_if_due();
         self.handle_shortcuts(ui.ctx());
         let layout = LayoutMode::for_width(ui.available_width());
@@ -1941,6 +1964,10 @@ impl eframe::App for LabelloApp {
         if self.loading.ingesting {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if let Some(retry_at) = self.prefetch_retry_at {
+            ui.ctx()
+                .request_repaint_after(retry_at.saturating_duration_since(Instant::now()));
         }
         if self.view == AppView::Stats && !self.loading.stats {
             let until_refresh = self

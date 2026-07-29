@@ -955,4 +955,27 @@ mod tests {
         assert_eq!(request.headers()["x-user-role"], "reviewer");
         assert_eq!(request.headers()["x-dev-token"], "secret");
     }
+
+    #[test]
+    fn assignment_queue_exclusions_are_encoded_as_one_query_value() {
+        let request = HttpLabelloApi::new("http://example.invalid")
+            .unwrap()
+            .request(Method::POST, "/datasets/ds/images/next")
+            .unwrap()
+            .query(&AssignNextRequest {
+                task_id: labello_domain::TaskId::from("bounding_box:pixel"),
+                kind: Some(labello_domain::AssignmentKind::Annotation),
+                assignment_id: None,
+                exclude_image_ids: vec![ImageId::from("img_1"), ImageId::from("img_2")],
+            })
+            .build()
+            .unwrap();
+        let exclusions = request
+            .url()
+            .query_pairs()
+            .find(|(key, _)| key == "excludeImageIds")
+            .map(|(_, value)| value.into_owned());
+
+        assert_eq!(exclusions.as_deref(), Some("img_1,img_2"));
+    }
 }

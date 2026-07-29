@@ -403,7 +403,7 @@ fn image_load_failure_shows_retry_and_loads_image() {
     click(&mut harness, "Retry image load");
     step_until(&mut harness, 12, |app| app.current.is_some());
     assert!(api.counts().get_image_preview >= 2);
-    assert_eq!(api.counts().assign_next_image, 1);
+    assert_eq!(api.counts().assign_next_image, 2);
 }
 
 #[test]
@@ -496,6 +496,26 @@ fn no_available_assignment_is_a_normal_empty_state() {
         harness.state().runtime.notice.as_deref(),
         Some("No annotation work is currently available.")
     );
+}
+
+#[test]
+fn live_queue_refill_excludes_the_image_on_screen() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    step_until(&mut harness, 10, |app| app.active_prefetch_id.is_none());
+
+    let current_image_id = harness
+        .state()
+        .current
+        .as_ref()
+        .unwrap()
+        .image
+        .image_id
+        .clone();
+    let requests = api.assign_requests();
+    assert!(requests.len() >= 2);
+    assert!(requests[0].exclude_image_ids.is_empty());
+    assert!(requests[1].exclude_image_ids.contains(&current_image_id));
 }
 
 #[test]
@@ -618,7 +638,7 @@ fn save_keeps_the_same_assignment_active() {
         Some(&assignment_id)
     );
     assert_eq!(api.counts().complete_assignment, 0);
-    assert_eq!(api.counts().assign_next_image, 1);
+    assert_eq!(api.counts().assign_next_image, 2);
 }
 
 #[test]
@@ -1029,7 +1049,7 @@ fn skip_releases_then_claims_another_assignment() {
 
     assert_eq!(api.counts().release_assignment, 1);
     assert_eq!(api.counts().complete_assignment, 0);
-    assert_eq!(api.counts().assign_next_image, 2);
+    assert!(api.counts().assign_next_image >= 2);
 }
 
 #[test]
@@ -1474,6 +1494,7 @@ fn work_workflow_draws_saves_submits_reviews_and_adjudicates() {
     step_until(&mut harness, 10, |app| !app.loading.saving);
     assert_eq!(api.counts().record_adjudication, 2);
 
+    step_until(&mut harness, 10, |app| app.active_prefetch_id.is_none());
     let claims_before_arrow = api.counts().assign_next_image;
     harness.key_press(egui::Key::ArrowRight);
     step_until(&mut harness, 10, |app| !app.loading.image);
@@ -2407,6 +2428,10 @@ impl SpyApi {
         self.state.borrow().last_oauth_return_to.clone()
     }
 
+    fn assign_requests(&self) -> Vec<AssignNextRequest> {
+        self.state.borrow().assign_requests.clone()
+    }
+
     fn fail_next_correction(&self) {
         self.state.borrow_mut().fail_next_correction = true;
     }
@@ -2455,6 +2480,7 @@ struct SpyState {
     states: BTreeMap<ImageId, ImageState>,
     counts: CallCounts,
     next_image: usize,
+    assign_requests: Vec<AssignNextRequest>,
     events: Vec<EventPayload>,
     fail_next_preview: bool,
     no_assignment: bool,
@@ -2553,6 +2579,7 @@ impl SpyState {
             states,
             counts: CallCounts::default(),
             next_image: 0,
+            assign_requests: Vec::new(),
             events: Vec::new(),
             fail_next_preview: false,
             no_assignment: false,
@@ -2799,6 +2826,7 @@ impl ImageApi for SpyApi {
     ) -> ApiFuture<'a, Option<Assignment>> {
         let mut state = self.state.borrow_mut();
         state.counts.assign_next_image += 1;
+        state.assign_requests.push(request.clone());
         if state.no_assignment {
             return ready(Ok(None));
         }

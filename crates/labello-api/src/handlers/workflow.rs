@@ -15,6 +15,7 @@ use labello_domain::{
     OfflineSyncRequest, PrelabelSuggestion, TaskOutcome, TaskState, TaskStatus,
 };
 use labello_storage::assignment::AssignmentContext;
+use std::collections::BTreeSet;
 
 use crate::{
     ApiState,
@@ -53,8 +54,13 @@ pub(crate) async fn assign_next(
         return Ok(Json(Some(assignment)));
     }
     Ok(Json(
-        repo.assign_next_image(&actor.user_id, &query.task_id, kind)
-            .await?,
+        repo.assign_next_image_excluding(
+            &actor.user_id,
+            &query.task_id,
+            kind,
+            &query.exclude_image_ids.into_iter().collect::<BTreeSet<_>>(),
+        )
+        .await?,
     ))
 }
 

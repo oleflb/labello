@@ -263,9 +263,54 @@ impl LabelloApp {
                 UiMessage::ImageLoaded {
                     request: _,
                     operation_id,
+                    prefetch,
                     assignment,
                     result,
                 } => {
+                    if prefetch {
+                        if self.active_prefetch_id != Some(operation_id) {
+                            continue;
+                        }
+                        self.active_prefetch_id = None;
+                        self.queue.set_loading(false);
+                        match *result {
+                            Ok(Some(loaded)) => {
+                                self.prefetch_retry_at = None;
+                                let image_id = &loaded.queued.image.image_id;
+                                let duplicate =
+                                    self.current
+                                        .as_ref()
+                                        .is_some_and(|current| current.image.image_id == *image_id)
+                                        || self.prefetched.iter().any(|queued| {
+                                            queued.queued.image.image_id == *image_id
+                                        });
+                                if duplicate {
+                                    self.prefetch_retry_at =
+                                        Some(Instant::now() + Duration::from_secs(3));
+                                    self.runtime.notice = Some(
+                                        "Queue preload returned a duplicate image; retrying."
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
+                                if self.queue.push_if_room(loaded.queued.clone()) {
+                                    self.prefetched.push_back(loaded);
+                                }
+                                self.replenish_live_queue();
+                            }
+                            Ok(None) => {
+                                self.prefetch_retry_at =
+                                    Some(Instant::now() + Duration::from_secs(15));
+                            }
+                            Err(error) => {
+                                self.prefetch_retry_at =
+                                    Some(Instant::now() + Duration::from_secs(3));
+                                self.runtime.notice =
+                                    Some(format!("Queue preload paused: {error}"));
+                            }
+                        }
+                        continue;
+                    }
                     if self.active_load_id != Some(operation_id) {
                         continue;
                     }
@@ -287,6 +332,7 @@ impl LabelloApp {
                                 self.request_previous_draft_status();
                             }
                             self.apply_loaded_image(ctx, loaded);
+                            self.replenish_live_queue();
                         }
                         Ok(None) => {
                             self.runtime.persistence.expected_assignment = None;
@@ -874,6 +920,16 @@ impl LabelloApp {
         }
     }
 
+    pub(crate) fn refresh_prefetch_if_due(&mut self) {
+        if self
+            .prefetch_retry_at
+            .is_some_and(|retry_at| retry_at <= Instant::now())
+        {
+            self.prefetch_retry_at = None;
+            self.replenish_live_queue();
+        }
+    }
+
     pub(crate) fn queue_command(&mut self, command: UiCommand) -> bool {
         if self.runtime.commands.len() < 64 {
             self.runtime
@@ -924,7 +980,21 @@ impl LabelloApp {
                 self.datasets.last_stats_completion = Some(Instant::now());
             }
             UiCommand::SaveKeybindings { .. } => self.loading.keybindings = false,
-            UiCommand::ClaimAssignment { operation_id, .. }
+            UiCommand::ClaimAssignment {
+                operation_id,
+                prefetch: true,
+                ..
+            } => {
+                if self.active_prefetch_id == Some(*operation_id) {
+                    self.active_prefetch_id = None;
+                    self.queue.set_loading(false);
+                }
+            }
+            UiCommand::ClaimAssignment {
+                operation_id,
+                prefetch: false,
+                ..
+            }
             | UiCommand::ReloadAssignment { operation_id, .. } => {
                 if self.active_load_id == Some(*operation_id) {
                     self.active_load_id = None;
@@ -1013,7 +1083,11 @@ impl LabelloApp {
         self.loading.creating_snapshot = false;
         self.loading.snapshot_file = None;
         self.active_load_id = None;
+        self.active_prefetch_id = None;
+        self.prefetch_retry_at = None;
         self.active_operation_id = None;
+        self.prefetched.clear();
+        self.queue.clear();
         self.queue.set_loading(false);
         if self.save_status == SaveStatus::Saving {
             self.save_status = SaveStatus::Retry;
@@ -1429,7 +1503,7 @@ impl LabelloApp {
         }
     }
 
-    fn apply_loaded_image(&mut self, ctx: &egui::Context, loaded: LoadedImage) {
+    pub(crate) fn apply_loaded_image(&mut self, ctx: &egui::Context, loaded: LoadedImage) {
         let image_id = loaded.queued.image.image_id.clone();
         self.assignment = Some(loaded.assignment);
         self.current = Some(loaded.queued);

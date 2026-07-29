@@ -27,6 +27,7 @@ use crate::{
 pub struct DatasetRepository {
     root: Arc<PathBuf>,
     locks: Arc<Mutex<BTreeMap<ImageId, Arc<AsyncMutex<()>>>>>,
+    pub(crate) assignment_cursors: Arc<Mutex<BTreeMap<String, usize>>>,
     pub(crate) stats_cache: Arc<StatsCache>,
 }
 
@@ -35,6 +36,7 @@ impl DatasetRepository {
         Self {
             root: Arc::new(root.into()),
             locks: Arc::new(Mutex::new(BTreeMap::new())),
+            assignment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             stats_cache: Arc::new(StatsCache::default()),
         }
     }

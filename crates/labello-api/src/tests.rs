@@ -1198,6 +1198,39 @@ async fn assign_next_uses_camel_case_query() {
 }
 
 #[tokio::test]
+async fn queue_claim_excludes_images_already_buffered_by_the_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "first.png", &png_bytes(2, 2)).await;
+    upload_test_image(&app, "second.png", &png_bytes(3, 2)).await;
+
+    let first = claim_assignment(&app, "admin", "annotation").await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/next?taskId=bounding_box%3Apixel&kind=annotation&excludeImageIds={}",
+                    urlencoding::encode(first["imageId"].as_str().unwrap())
+                ))
+                .header("x-user-id", "admin")
+                .header("x-user-role", "annotator")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let queued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(queued["imageId"], first["imageId"]);
+}
+
+#[tokio::test]
 async fn assignment_lifecycle_is_exact_owned_and_resumable() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

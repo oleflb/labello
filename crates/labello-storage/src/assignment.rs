@@ -5,6 +5,8 @@ use labello_domain::{
     ReviewerCorrectionRecord, TaskId, TaskOutcome, TaskState, TaskStatus, UserId, require_role,
 };
 
+use std::collections::BTreeSet;
+
 use crate::{DatasetRepository, StorageError, StorageResult};
 
 /// Assignments are renewed by claim retries and successful assignment-backed
@@ -78,6 +80,17 @@ impl DatasetRepository {
         task_id: &TaskId,
         kind: AssignmentKind,
     ) -> StorageResult<Option<Assignment>> {
+        self.assign_next_image_excluding(user_id, task_id, kind, &BTreeSet::new())
+            .await
+    }
+
+    pub async fn assign_next_image_excluding(
+        &self,
+        user_id: &UserId,
+        task_id: &TaskId,
+        kind: AssignmentKind,
+        excluded_image_ids: &BTreeSet<ImageId>,
+    ) -> StorageResult<Option<Assignment>> {
         let metadata = self.load_dataset().await?;
         let required_role = match kind {
             AssignmentKind::Annotation => DatasetRole::Annotator,
@@ -118,7 +131,25 @@ impl DatasetRepository {
             return Ok(None);
         }
 
-        for image_id in metadata.images.keys() {
+        let image_ids = metadata.images.keys().cloned().collect::<Vec<_>>();
+        if image_ids.is_empty() {
+            return Ok(None);
+        }
+        let cursor_key = format!("{user_id}\u{1f}{task_id}\u{1f}{kind:?}");
+        let start = self
+            .assignment_cursors
+            .lock()
+            .get(&cursor_key)
+            .copied()
+            .unwrap_or_default()
+            % image_ids.len();
+
+        for offset in 0..image_ids.len() {
+            let image_index = (start + offset) % image_ids.len();
+            let image_id = &image_ids[image_index];
+            if excluded_image_ids.contains(image_id) {
+                continue;
+            }
             let lock = self.image_lock(image_id);
             let _guard = lock.lock().await;
             let state = self.load_image_state(image_id).await?;
@@ -179,6 +210,9 @@ impl DatasetRepository {
                 });
                 self.append_payloads_unlocked(image_id, &actor, payloads)
                     .await?;
+                self.assignment_cursors
+                    .lock()
+                    .insert(cursor_key.clone(), image_index);
                 return Ok(Some(assignment));
             }
             if has_conflicting_assignment(&state.assignments, task_id, user_id, &kind, now) {
@@ -223,6 +257,9 @@ impl DatasetRepository {
             }
             self.append_payloads_unlocked(image_id, &actor, payloads)
                 .await?;
+            self.assignment_cursors
+                .lock()
+                .insert(cursor_key.clone(), image_index);
             return Ok(Some(assignment));
         }
         Ok(None)
@@ -1449,6 +1486,42 @@ mod tests {
                 .status,
             AssignmentStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn queue_claims_skip_assignments_already_held_by_the_browser() {
+        let (_temp, repo, task_id, users) = annotation_repo(3, &["annotator"]).await;
+        let user_id = &users[0];
+
+        let first = repo
+            .assign_next_image(user_id, &task_id, AssignmentKind::Annotation)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = repo
+            .assign_next_image_excluding(
+                user_id,
+                &task_id,
+                AssignmentKind::Annotation,
+                &BTreeSet::from([first.image_id.clone()]),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let third = repo
+            .assign_next_image_excluding(
+                user_id,
+                &task_id,
+                AssignmentKind::Annotation,
+                &BTreeSet::from([first.image_id.clone(), second.image_id.clone()]),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(second.image_id, first.image_id);
+        assert_ne!(third.image_id, first.image_id);
+        assert_ne!(third.image_id, second.image_id);
     }
 
     #[tokio::test]
