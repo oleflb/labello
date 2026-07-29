@@ -734,7 +734,11 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 height,
             );
         }
-        let (approve, reject) = ("Approve object", "Reject object & finish");
+        let (approve, reject) = if LayoutMode::for_width(width) == LayoutMode::Compact {
+            ("Accept", "Reject")
+        } else {
+            ("Approve object", "Reject object & finish")
+        };
         for label in [approve, reject] {
             assert_control_inside(
                 &harness,
@@ -742,6 +746,22 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 egui::accesskit::Role::Button,
                 width,
                 height,
+            );
+        }
+        if LayoutMode::for_width(width) == LayoutMode::Compact {
+            let approve_rect = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, approve)
+                .rect();
+            let reject_rect = harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, reject)
+                .rect();
+            assert!(
+                (approve_rect.center().y - reject_rect.center().y).abs() <= 1.0,
+                "review decisions are not in the same bar at {width}x{height}",
+            );
+            assert!(
+                approve_rect.right() <= reject_rect.left(),
+                "approve must be left of reject at {width}x{height}",
             );
         }
         if LayoutMode::for_width(width) != LayoutMode::Wide {
@@ -765,8 +785,8 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
         "Zoom out",
         "Zoom in",
         "Fit",
-        "Approve object",
-        "Reject object & finish",
+        "Accept",
+        "Reject",
         "More",
     ] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);

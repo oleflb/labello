@@ -126,7 +126,7 @@ impl LabelloApp {
             && !self.loading.saving
             && !self.loading.image
             && self.work.pending_transition.is_none();
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             if self.view == AppView::Annotate
                 && theme::primary_button(ui, ready, egui::Button::new("Submit & next")).clicked()
             {

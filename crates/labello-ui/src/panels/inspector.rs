@@ -263,7 +263,11 @@ impl LabelloApp {
 
     fn review_decision_buttons(&mut self, ui: &mut egui::Ui) {
         let ready = self.work.assignment.is_some() && !self.loading.saving;
-        let (approve, reject) = if self.current_review_annotation().is_none() {
+        let compact =
+            LayoutMode::for_width(ui.ctx().content_rect().width()) == LayoutMode::Compact;
+        let (approve, reject) = if compact {
+            ("Accept", "Reject")
+        } else if self.current_review_annotation().is_none() {
             ("Complete review", "Send back")
         } else {
             ("Approve object", "Reject object & finish")
