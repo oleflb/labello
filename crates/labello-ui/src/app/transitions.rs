@@ -143,18 +143,6 @@ impl LabelloApp {
         let Some(previous) = self.work.previous_annotation_assignment.clone() else {
             return;
         };
-        if previous.status == labello_domain::AssignmentStatus::Active
-            && previous
-                .expires_at
-                .is_some_and(|expires_at| expires_at <= labello_domain::now())
-        {
-            self.clear_previous_annotation_assignment();
-            self.runtime.error = Some(
-                "The previous assignment lease expired and can no longer be returned to."
-                    .to_string(),
-            );
-            return;
-        }
         if self.work.assignment.is_some()
             && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
                 || (self.manual_migration_active() && self.migration_has_unsaved_input()))

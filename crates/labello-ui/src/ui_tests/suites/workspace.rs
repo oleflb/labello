@@ -1389,26 +1389,27 @@ fn previous_assignment_reopens_the_exact_submitted_image() {
 }
 
 #[test]
-fn expired_locally_retained_previous_assignment_is_not_loaded() {
+fn locally_expired_previous_assignment_is_left_for_the_server_to_validate() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     let mut previous = harness.state().work.assignment.clone().unwrap();
     previous.assignment_id = AssignmentId::generate();
     previous.expires_at = Some(now() - chrono::Duration::seconds(1));
+    let previous_id = previous.assignment_id.clone();
     harness.state_mut().work.previous_annotation_assignment = Some(previous);
 
     harness.state_mut().return_to_previous_assignment();
+    step_until(&mut harness, 12, |app| {
+        app.work
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.assignment_id == previous_id)
+            && !app.loading.image
+    });
 
     assert!(harness.state().work.previous_annotation_assignment.is_none());
     assert_eq!(api.counts().reopen_assignment, 0);
-    assert!(
-        harness
-            .state()
-            .runtime
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("lease expired"))
-    );
+    assert!(harness.state().runtime.error.is_none());
 }
 
 #[test]

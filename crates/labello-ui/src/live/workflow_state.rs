@@ -248,12 +248,7 @@ impl LabelloApp {
         self.work.one_shot_excluded_image_id = released_image_id;
         if self.view == AppView::Annotate {
             while let Some(loaded) = self.work.queue.pop_prepared() {
-                if loaded.assignment.status == labello_domain::AssignmentStatus::Active
-                    && loaded
-                        .assignment
-                        .expires_at
-                        .is_none_or(|expires_at| expires_at > labello_domain::now())
-                {
+                if loaded.assignment.status == labello_domain::AssignmentStatus::Active {
                     self.apply_loaded_image(ctx, loaded);
                     return;
                 }

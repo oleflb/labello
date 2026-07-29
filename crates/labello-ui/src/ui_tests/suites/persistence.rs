@@ -922,6 +922,49 @@ fn stale_prefetch_response_cannot_enter_the_queue() {
 }
 
 #[test]
+fn fresh_prefetch_response_does_not_trust_the_local_wall_clock() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let mut loaded = harness.state_mut().work.queue.pop_prepared().unwrap();
+    harness.state_mut().work.queue.clear();
+    loaded.assignment.expires_at = Some(now() - chrono::Duration::seconds(1));
+    let loaded_image_id = loaded.assignment.image_id.clone();
+    let operation_id = 90_002;
+    let request = test_request(harness.state(), operation_id, Some("demo"));
+    harness.state_mut().work.active_prefetch_id = Some(operation_id);
+    harness.state_mut().work.queue.set_loading(true);
+    harness
+        .state_mut()
+        .runtime
+        .active_requests
+        .insert(operation_id);
+    harness
+        .state()
+        .runtime
+        .tx
+        .send(UiMessage::PrefetchLoaded {
+            request,
+            operation_id,
+            result: Box::new(Ok(Some(loaded))),
+        })
+        .unwrap();
+
+    harness
+        .state_mut()
+        .process_messages(&egui::Context::default());
+
+    assert!(
+        harness
+            .state()
+            .work
+            .queue
+            .prepared_image_ids()
+            .contains(&loaded_image_id)
+    );
+}
+
+#[test]
 fn stale_blocking_claim_releases_its_assignment() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());

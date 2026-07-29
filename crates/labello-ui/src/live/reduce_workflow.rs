@@ -78,25 +78,6 @@ impl LabelloApp {
                     self.loading.image = false;
                     match *result {
                         Ok(loaded) => {
-                            if loaded
-                                .assignment
-                                .expires_at
-                                .is_some_and(|expires_at| expires_at <= labello_domain::now())
-                            {
-                                self.work.previous_annotation_assignment = None;
-                                self.release_reservation(
-                                    self.config.dataset_id.clone(),
-                                    loaded.assignment,
-                                );
-                                self.runtime.error = Some(
-                                    "The previous assignment lease expired while loading."
-                                        .to_string(),
-                                );
-                                if self.work.assignment.is_none() {
-                                    self.request_next_image();
-                                }
-                                return None;
-                            }
                             let displaced = self.work.assignment.clone();
                             self.begin_workspace_epoch();
                             self.clear_current_image();
@@ -113,12 +94,9 @@ impl LabelloApp {
                             self.request_assignment_availability();
                         }
                         Err(error) => {
-                            let expired = assignment.as_ref().is_some_and(|assignment| {
-                                assignment.status == labello_domain::AssignmentStatus::Active
-                                    && assignment.expires_at.is_some_and(|expires_at| {
-                                        expires_at <= labello_domain::now()
-                                    })
-                            });
+                            let normalized_error = error.to_ascii_lowercase();
+                            let expired = normalized_error.contains("lease")
+                                && normalized_error.contains("expired");
                             if expired {
                                 self.clear_previous_annotation_assignment();
                             } else if let Some(assignment) = assignment {
@@ -147,9 +125,6 @@ impl LabelloApp {
                                 == labello_domain::AssignmentKind::Annotation
                                 && loaded.assignment.status
                                     == labello_domain::AssignmentStatus::Active
-                                && loaded.assignment.expires_at.is_none_or(|expires_at| {
-                                    expires_at > labello_domain::now()
-                                })
                                 && self.work.assignment.as_ref().is_some_and(|current| {
                                     current.task_id == loaded.assignment.task_id
                                         && current.image_id != loaded.assignment.image_id

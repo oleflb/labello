@@ -131,18 +131,6 @@ impl ImageQueue {
             .collect()
     }
 
-    pub(crate) fn remove_expired(&mut self) -> bool {
-        let before = self.prepared.len();
-        let now = labello_domain::now();
-        self.prepared.retain(|loaded| {
-            loaded
-                .assignment
-                .expires_at
-                .is_none_or(|expires_at| expires_at > now)
-        });
-        before != self.prepared.len()
-    }
-
     pub fn clear(&mut self) {
         self.items.clear();
         self.prepared.clear();

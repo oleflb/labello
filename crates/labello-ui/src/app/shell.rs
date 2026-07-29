@@ -10,9 +10,6 @@ impl eframe::App for LabelloApp {
             .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::APP_BG);
         self.process_messages(ui.ctx());
         self.retry_prefetch_if_due(ui.ctx());
-        if self.work.queue.remove_expired() {
-            self.request_prefetch();
-        }
         self.sync_review_selection();
         self.sync_manual_migration();
         self.start_next_persistence_command();

@@ -223,19 +223,6 @@ impl LabelloApp {
                 prelabel_config_ids,
             } => self.spawn_message(request.clone(), async move {
                 let assignment = if assignment.status == labello_domain::AssignmentStatus::Active {
-                    if assignment
-                        .expires_at
-                        .is_some_and(|expires_at| expires_at <= labello_domain::now())
-                    {
-                        return UiMessage::PreviousAssignmentLoaded {
-                            request,
-                            operation_id,
-                            assignment: Some(assignment),
-                            result: Box::new(Err(
-                                "the previous assignment lease expired".to_string()
-                            )),
-                        };
-                    }
                     assignment
                 } else {
                     match api
