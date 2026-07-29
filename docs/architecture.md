@@ -63,7 +63,7 @@ derived caches.
 job limits and recovery, source registration/sealing, profile parsing,
 intermediate representation, semantic validation, planning, build,
 verification, no-replace publication, and durable API control records. See
-[`import-ownership.md`](import-ownership.md).
+the [dataset import documentation](import.md).
 
 ## Client and API
 
@@ -116,6 +116,6 @@ demonstrated need.
 ## Detailed ownership references
 
 - [`structural-refactor-policy-ownership.md`](plans/structural-refactor-policy-ownership.md)
-- [`import-ownership.md`](import-ownership.md)
+- [`import.md`](import.md)
 - [`ui-ownership.md`](ui-ownership.md)
 - [`structural-refactor-result.md`](history/structural-refactor-result.md)

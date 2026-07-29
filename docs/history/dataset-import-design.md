@@ -1,5 +1,9 @@
 # Dataset Import Feature Design
 
+> Historical implementation design completed on 2026-07-25. See the current
+> [dataset import documentation](../import.md) for supported behavior and code
+> ownership.
+
 Status: Implemented through Phase 3
 
 Research date: 2026-07-25
@@ -97,19 +101,19 @@ The existing code provides useful building blocks but does not implement an
 external annotation import:
 
 - Dataset creation in
-  [`crates/labello-api/src/handlers.rs`](../crates/labello-api/src/handlers.rs)
+  [`crates/labello-api/src/handlers.rs`](../../crates/labello-api/src/handlers.rs)
   is bootstrap-admin-only and grants the initial administrator all dataset
   roles.
 - Browser folder upload writes files into an existing dataset and then starts
   image ingestion. It is not transactional and does not interpret annotation
   files.
 - Image ingestion in
-  [`crates/labello-storage/src/ingest.rs`](../crates/labello-storage/src/ingest.rs)
+  [`crates/labello-storage/src/ingest.rs`](../../crates/labello-storage/src/ingest.rs)
   hashes image bytes with BLAKE3, derives the image ID, reads dimensions, and
   deduplicates identical content.
 - `events.jsonl` is the authoritative per-image history. `state.json` is only a
-  cache, as documented in the [README](../README.md) and implemented in
-  [`repository.rs`](../crates/labello-storage/src/repository.rs).
+  cache, as documented in the [README](../../README.md) and implemented in
+  [`repository.rs`](../../crates/labello-storage/src/repository.rs).
 - Labello stores normalized top-left bounding boxes and ordered skeleton
   keypoints. Geometry validation rejects non-finite, non-positive, or
   out-of-bounds values.
@@ -1532,7 +1536,7 @@ All source content is untrusted even when the actor is an administrator.
 
 ### Authorization And Redaction
 
-The logging rules in [operations.md](operations.md) apply unchanged. Logs may
+The logging rules in [operations.md](../operations.md) apply unchanged. Logs may
 contain import ID, destination dataset ID, actor ID, profile ID, phase,
 aggregate counts, duration, and safe error category. They must not contain:
 
@@ -2094,9 +2098,9 @@ human-readable format plus reference API rather than an official JSON Schema.
 - [CWE-409: Improper Handling of Highly Compressed Data](https://cwe.mitre.org/data/definitions/409.html)
 
 Repository sources of truth reviewed for this proposal include
-[`README.md`](../README.md), [`labello.md`](../labello.md),
-[`AGENTS.md`](../AGENTS.md), [operations](operations.md),
-[configuration](configuration.md), domain geometry/annotation/task/event/state
+[`README.md`](../../README.md), [`labello.md`](../../labello.md),
+[`AGENTS.md`](../../AGENTS.md), [operations](../operations.md),
+[configuration](../configuration.md), domain geometry/annotation/task/event/state
 types, storage ingestion/repository/assignment/statistics code, API
 authentication/routes/jobs/uploads, client contracts, setup/admin UI flows,
 and their existing tests.

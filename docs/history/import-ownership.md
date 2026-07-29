@@ -1,5 +1,8 @@
 # Import ownership and adapters
 
+> Historical detailed ownership snapshot. Its current guidance is consolidated
+> in the [dataset import documentation](../import.md).
+
 Labello intentionally has separate import representations at its domain,
 storage, client, API, and UI boundaries. They are not interchangeable models:
 each one either persists an invariant, crosses a wire boundary, or supports an

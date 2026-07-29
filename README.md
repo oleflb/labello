@@ -246,7 +246,7 @@ commands and responses. `DatasetRepository`, `ImportService`, and `LabelloApi`
 are intentional capability facades, not generic abstraction layers.
 
 See the current [architecture and ownership map](docs/architecture.md), plus
-the detailed [import](docs/import-ownership.md) and
+the detailed [import](docs/import.md) and
 [UI](docs/ui-ownership.md) ownership references.
 
 The API server does not serve the browser distribution. Build and deploy

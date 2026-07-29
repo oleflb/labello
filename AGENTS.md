@@ -45,8 +45,8 @@ Within those crates:
 - UI feature state is explicit, live request ownership is centralized, and
   browser persistence is never authoritative workflow state.
 
-See `docs/architecture.md`, `docs/structural-refactor-policy-ownership.md`,
-`docs/import-ownership.md`, and `docs/ui-ownership.md` before moving behavior
+See `docs/architecture.md`, `docs/plans/structural-refactor-policy-ownership.md`,
+`docs/import.md`, and `docs/ui-ownership.md` before moving behavior
 across these boundaries.
 
 ## Working Approach

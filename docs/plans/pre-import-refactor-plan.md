@@ -10,7 +10,7 @@ Scope: Behavior-preserving preparation for the dataset import feature
 
 Related documents:
 
-- [Dataset import feature design](../dataset-import-design.md)
+- [Dataset import feature design](../history/dataset-import-design.md)
 - [Labello UI and design guidelines](../ui-design-guidelines.md)
 - [Operations and redaction rules](../operations.md)
 
