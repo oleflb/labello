@@ -4,10 +4,10 @@ impl LabelloApp {
             return;
         }
         if self.manual_migration_active() {
-            let icon_only = ui.available_width() < 432.0;
-            self.migration_workspace_actions(ui, false);
-            if layout != LayoutMode::Wide {
-                self.drawer_panel_buttons(ui, icon_only);
+            if self.view == AppView::Review && layout != LayoutMode::Wide {
+                self.responsive_migration_review_actions(ui);
+            } else {
+                self.migration_workspace_actions(ui, false);
             }
             return;
         }
@@ -53,7 +53,16 @@ impl LabelloApp {
             && self.view == AppView::Review
             && self.work.correction_draft.is_none()
         {
-            self.review_decision_buttons(ui);
+            let review_layout = self.compact_review_row_layout(ui);
+            let add_contents = |ui: &mut egui::Ui| {
+                self.review_decision_buttons(ui, review_layout.shortcut_decisions, true);
+            };
+            if review_layout.allow_wrap {
+                ui.horizontal_wrapped(add_contents);
+            } else {
+                ui.horizontal(add_contents);
+            }
+            return;
         }
         if layout != LayoutMode::Wide && self.view == AppView::Adjudicate {
             self.adjudication_decision_buttons(ui, false);
@@ -114,26 +123,36 @@ impl LabelloApp {
 
     pub(crate) fn compact_workspace_actions(&mut self, ui: &mut egui::Ui) {
         if self.manual_migration_active() {
-            let available_width = ui.available_width();
-            let icon_only = available_width < 432.0;
+            if self.view == AppView::Review {
+                self.responsive_migration_review_actions(ui);
+                return;
+            }
             ui.horizontal_wrapped(|ui| {
                 self.migration_workspace_actions(ui, true);
-                self.drawer_panel_buttons(ui, icon_only);
             });
+            return;
+        }
+        if self.view == AppView::Review && self.work.correction_draft.is_none() {
+            let review_layout = self.compact_review_row_layout(ui);
+            let add_contents = |ui: &mut egui::Ui| {
+                self.review_decision_buttons(ui, review_layout.shortcut_decisions, true);
+            };
+            if review_layout.allow_wrap {
+                ui.horizontal_wrapped(add_contents);
+            } else {
+                ui.horizontal(add_contents);
+            }
             return;
         }
         let ready = (self.work.assignment.is_some() || self.runtime.api.is_none())
             && !self.loading.saving
             && !self.loading.image
             && self.work.pending_transition.is_none();
-        ui.horizontal(|ui| {
+        let add_contents = |ui: &mut egui::Ui| {
             if self.view == AppView::Annotate
                 && theme::primary_button(ui, ready, egui::Button::new("Submit & next")).clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::NextImage);
-            }
-            if self.view == AppView::Review && self.work.correction_draft.is_none() {
-                self.review_decision_buttons(ui);
             }
             if self.view == AppView::Adjudicate {
                 self.adjudication_decision_buttons(ui, true);
@@ -228,7 +247,66 @@ impl LabelloApp {
                     }
                 },
             );
-        });
+        };
+        ui.horizontal(add_contents);
+    }
+
+    fn responsive_migration_review_actions(&mut self, ui: &mut egui::Ui) {
+        let layout = self.compact_review_row_layout(ui);
+        let target = self.current_migration_review_target();
+        let add_contents = |ui: &mut egui::Ui| {
+            if let Some((task_id, target)) = target {
+                self.migration_review_buttons(
+                    ui,
+                    task_id,
+                    target,
+                    true,
+                    layout.shortcut_decisions,
+                );
+            }
+        };
+        if layout.allow_wrap {
+            ui.horizontal_wrapped(add_contents);
+        } else {
+            ui.horizontal(add_contents);
+        }
+    }
+
+    fn compact_review_row_layout(&self, ui: &egui::Ui) -> CompactReviewRowLayout {
+        let full_decisions = [
+            text_button_width(ui, "Accept"),
+            text_button_width(ui, "Reject"),
+        ];
+        let shortcut_decisions = [
+            text_button_width(
+                ui,
+                &shortcut_button_label(
+                    &self.shortcut_text(
+                        ui.ctx(),
+                        labello_domain::UserAction::AcceptReviewObject,
+                    ),
+                    "Accept",
+                ),
+            ),
+            text_button_width(
+                ui,
+                &shortcut_button_label(
+                    &self.shortcut_text(
+                        ui.ctx(),
+                        labello_domain::UserAction::RejectReviewObject,
+                    ),
+                    "Reject",
+                ),
+            ),
+        ];
+        if review_row_fits(ui, &full_decisions) {
+            CompactReviewRowLayout::default()
+        } else {
+            CompactReviewRowLayout {
+                shortcut_decisions: true,
+                allow_wrap: !review_row_fits(ui, &shortcut_decisions),
+            }
+        }
     }
 
     fn drawer_panel_buttons(&mut self, ui: &mut egui::Ui, icon_only: bool) {
@@ -245,6 +323,11 @@ impl LabelloApp {
         icon_only: bool,
     ) {
         let selected = self.work.drawer == Some(drawer);
+        let action = match drawer {
+            Drawer::Workflow => labello_domain::UserAction::ToggleWorkflowPanel,
+            Drawer::Inspector => labello_domain::UserAction::ToggleInspectorPanel,
+        };
+        let shortcut = self.shortcut_text(ui.ctx(), action);
         let icon_id = ui.id().with(("drawer-panel-icon", label));
         let icon_width = if icon_only { 20.0 } else { 25.0 };
         let icon = egui::Atom::custom(icon_id, egui::vec2(icon_width, 16.0));
@@ -254,19 +337,14 @@ impl LabelloApp {
             egui::Atoms::new((icon, RichText::new(label)))
         };
         let choice = egui::Button::new(content)
-        .selected(selected)
-        .min_size(egui::vec2(if icon_only { 44.0 } else { 0.0 }, 44.0))
-        .gap(theme::SPACE_2)
-        .atom_ui(ui);
+            .selected(selected)
+            .min_size(egui::vec2(if icon_only { 44.0 } else { 0.0 }, 44.0))
+            .gap(theme::SPACE_2)
+            .atom_ui(ui);
         let icon_rect = choice.rect(icon_id);
-        let action = match drawer {
-            Drawer::Workflow => labello_domain::UserAction::ToggleWorkflowPanel,
-            Drawer::Inspector => labello_domain::UserAction::ToggleInspectorPanel,
-        };
-        let response = choice.response.on_hover_text(format!(
-            "{label} ({})",
-            self.shortcut_text(ui.ctx(), action)
-        ));
+        let response = choice
+            .response
+            .on_hover_text(format!("{label} ({shortcut})"));
         response.widget_info(|| {
             egui::WidgetInfo::selected(
                 egui::WidgetType::Button,
@@ -288,5 +366,37 @@ impl LabelloApp {
             self.trigger_user_action(action);
         }
     }
+}
 
+#[derive(Clone, Copy, Default)]
+struct CompactReviewRowLayout {
+    shortcut_decisions: bool,
+    allow_wrap: bool,
+}
+
+fn drawer_panel_labels_fit(ui: &egui::Ui) -> bool {
+    let spacing = ui.spacing().item_spacing.x;
+    panel_label_button_width(ui, "Workflow")
+        + panel_label_button_width(ui, "Inspector")
+        + spacing
+        <= ui.available_width() + 0.5
+}
+
+fn panel_label_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    25.0 + theme::SPACE_2 + text_button_width(ui, label)
+}
+
+fn review_row_fits(ui: &egui::Ui, decisions: &[f32; 2]) -> bool {
+    decisions.iter().sum::<f32>() + ui.spacing().item_spacing.x <= ui.available_width() + 0.5
+}
+
+fn text_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(label.to_owned(), font_id, theme::TEXT)
+            .size()
+            .x
+    });
+    (text_width + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x)
 }

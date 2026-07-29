@@ -111,8 +111,8 @@ impl LabelloApp {
             && right_remaining >= 96.0 + spacing;
         let hidden_account = account.is_some() && !show_account;
         let hidden_actions = actions[visible_action_count..].to_vec();
-        let panel_actions_in_overflow =
-            layout != LayoutMode::Wide && self.work_view() && !self.manual_migration_active();
+        let review_actions_in_overflow =
+            layout != LayoutMode::Wide && self.view == AppView::Review;
 
         let destinations = self.primary_navigation_destinations();
         let navigation_width = |label: &str| 30.0 + label.chars().count() as f32 * 7.5;
@@ -123,7 +123,7 @@ impl LabelloApp {
             + spacing * destinations.len().saturating_sub(1) as f32;
         let mut overflow_needed = !hidden_actions.is_empty()
             || hidden_account
-            || panel_actions_in_overflow
+            || review_actions_in_overflow
             || total_navigation_width > left_rect.width();
         let available_navigation_width =
             (left_rect.width() - if overflow_needed { 44.0 + spacing } else { 0.0 }).max(0.0);
@@ -157,7 +157,7 @@ impl LabelloApp {
                             ui,
                             &hidden_destinations,
                             &hidden_actions,
-                            panel_actions_in_overflow,
+                            review_actions_in_overflow,
                             hidden_account.then_some(account.as_deref()).flatten(),
                         );
                     });
@@ -203,7 +203,7 @@ impl LabelloApp {
         ui: &mut egui::Ui,
         hidden_destinations: &[(AppView, &'static str)],
         hidden_actions: &[AppBarAction],
-        include_panel_actions: bool,
+        include_review_actions: bool,
         hidden_account: Option<&str>,
     ) {
         ui.set_min_width(theme::MENU_WIDTH);
@@ -219,8 +219,24 @@ impl LabelloApp {
                 ui.close();
             }
         }
-        if include_panel_actions {
-            self.workspace_overflow_actions(ui);
+        if include_review_actions
+            && ui
+                .add_enabled(
+                    self.work.assignment.is_some()
+                        && !self.loading.saving
+                        && !self.loading.image
+                        && self.work.pending_transition.is_none(),
+                    egui::Button::new("Skip assignment")
+                        .shortcut_text(self.shortcut_text(
+                            ui.ctx(),
+                            labello_domain::UserAction::SkipAssignment,
+                        ))
+                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
+                )
+                .clicked()
+        {
+            self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
+            ui.close();
         }
         for action in hidden_actions {
             if ui
@@ -240,35 +256,6 @@ impl LabelloApp {
                 [theme::MENU_WIDTH, 44.0],
                 egui::Label::new(RichText::new(account).strong()).truncate(),
             );
-        }
-    }
-
-    fn workspace_overflow_actions(&mut self, ui: &mut egui::Ui) {
-        let panel_actions = [
-            (
-                "Workflow panel",
-                labello_domain::UserAction::ToggleWorkflowPanel,
-                self.work.drawer == Some(Drawer::Workflow),
-            ),
-            (
-                "Inspector panel",
-                labello_domain::UserAction::ToggleInspectorPanel,
-                self.work.drawer == Some(Drawer::Inspector),
-            ),
-        ];
-        for (label, action, selected) in panel_actions {
-            if ui
-                .add(
-                    egui::Button::new(label)
-                        .selected(selected)
-                        .shortcut_text(self.shortcut_text(ui.ctx(), action))
-                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
-                )
-                .clicked()
-            {
-                self.trigger_user_action(action);
-                ui.close();
-            }
         }
     }
 

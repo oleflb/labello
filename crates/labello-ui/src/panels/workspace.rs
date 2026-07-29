@@ -171,17 +171,13 @@ impl LabelloApp {
                 ui.label(RichText::new("No active assignment").color(theme::TEXT_MUTED));
             }
         };
-        let stack_controls = !short
-            && (layout == LayoutMode::Compact
-                || (layout == LayoutMode::Medium
-                    && view != AppView::Annotate
-                    && current.is_some()));
-        let response = if short && current.is_some() {
-            ui.horizontal(|ui| {
-                self.canvas_controls(ui, layout);
-                self.assignment_availability_spinner(ui);
-            })
-        } else if stack_controls {
+        let stack_controls = layout == LayoutMode::Compact
+            || (layout == LayoutMode::Medium
+                && view != AppView::Annotate
+                && current.is_some());
+        let show_panel_buttons =
+            layout != LayoutMode::Wide && matches!(view, AppView::Annotate | AppView::Review);
+        let response = if stack_controls {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.horizontal(|ui| {
@@ -194,11 +190,22 @@ impl LabelloApp {
                             theme::bounded_badge(ui, workflow, theme::Intent::Accent, 90.0);
                         }
                     }
+                    if show_panel_buttons {
+                        self.context_panel_buttons(ui);
+                    }
                     self.assignment_availability_spinner(ui);
                 });
                 if current.is_some() {
                     self.canvas_controls(ui, layout);
                 }
+            })
+        } else if short && current.is_some() {
+            ui.horizontal(|ui| {
+                self.canvas_controls(ui, layout);
+                if show_panel_buttons {
+                    self.context_panel_buttons(ui);
+                }
+                self.assignment_availability_spinner(ui);
             })
         } else {
             ui.horizontal(|ui| {
@@ -245,6 +252,9 @@ impl LabelloApp {
                 if current.is_some() {
                     self.canvas_controls(ui, layout);
                 }
+                if show_panel_buttons {
+                    self.context_panel_buttons(ui);
+                }
                 if layout == LayoutMode::Wide && !self.manual_migration_active() {
                     ui.separator();
                     self.workspace_actions(ui, layout);
@@ -255,6 +265,11 @@ impl LabelloApp {
         response.response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Workspace context bar")
         });
+    }
+
+    fn context_panel_buttons(&mut self, ui: &mut egui::Ui) {
+        let icon_only = !drawer_panel_labels_fit(ui);
+        self.drawer_panel_buttons(ui, icon_only);
     }
 
     fn assignment_availability_spinner(&self, ui: &mut egui::Ui) {

@@ -257,25 +257,68 @@ impl LabelloApp {
             }
         }
         if show_primary_actions {
-            ui.horizontal_wrapped(|ui| self.review_decision_buttons(ui));
+            ui.horizontal_wrapped(|ui| self.review_decision_buttons(ui, false, false));
         }
     }
 
-    fn review_decision_buttons(&mut self, ui: &mut egui::Ui) {
+    fn review_decision_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        shortcut_only: bool,
+        fill_width: bool,
+    ) {
         let ready = self.work.assignment.is_some() && !self.loading.saving;
         let compact =
             LayoutMode::for_width(ui.ctx().content_rect().width()) == LayoutMode::Compact;
-        let (approve, reject) = if compact {
-            ("Accept", "Reject")
+        let approve_shortcut = self.shortcut_text(
+            ui.ctx(),
+            labello_domain::UserAction::AcceptReviewObject,
+        );
+        let reject_shortcut = self.shortcut_text(
+            ui.ctx(),
+            labello_domain::UserAction::RejectReviewObject,
+        );
+        let (approve, reject) = if shortcut_only {
+            (
+                shortcut_button_label(&approve_shortcut, "Accept"),
+                shortcut_button_label(&reject_shortcut, "Reject"),
+            )
+        } else if compact || fill_width {
+            ("Accept".to_string(), "Reject".to_string())
         } else if self.current_review_annotation().is_none() {
-            ("Complete review", "Send back")
+            ("Complete review".to_string(), "Send back".to_string())
         } else {
-            ("Approve object", "Reject object & finish")
+            (
+                "Approve object".to_string(),
+                "Reject object & finish".to_string(),
+            )
         };
-        if theme::primary_button(ui, ready, egui::Button::new(approve)).clicked() {
+        let button_width = fill_width
+            .then(|| ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(44.0));
+        let approve_button = egui::Button::new(&approve).min_size(egui::vec2(
+            button_width.unwrap_or_default(),
+            if fill_width { 44.0 } else { 0.0 },
+        ));
+        let reject_button = egui::Button::new(&reject).min_size(egui::vec2(
+            button_width.unwrap_or_default(),
+            if fill_width { 44.0 } else { 0.0 },
+        ));
+        if theme::primary_button(ui, ready, approve_button)
+            .on_hover_text(format!(
+                "Accept review object ({})",
+                shortcut_button_label(&approve_shortcut, "Accept")
+            ))
+            .clicked()
+        {
             self.request_review(ReviewDecision::Approved);
         }
-        if theme::danger_button(ui, ready, egui::Button::new(reject)).clicked() {
+        if theme::danger_button(ui, ready, reject_button)
+            .on_hover_text(format!(
+                "Reject review object ({})",
+                shortcut_button_label(&reject_shortcut, "Reject")
+            ))
+            .clicked()
+        {
             self.request_review(ReviewDecision::Rejected);
         }
     }
@@ -473,4 +516,12 @@ impl LabelloApp {
         }
     }
 
+}
+
+pub(crate) fn shortcut_button_label(shortcut: &str, fallback: &str) -> String {
+    if shortcut.is_empty() {
+        fallback.to_string()
+    } else {
+        shortcut.to_string()
+    }
 }

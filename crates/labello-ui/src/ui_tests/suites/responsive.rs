@@ -538,7 +538,10 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     harness.set_size(egui::vec2(320.0, 320.0));
     harness.step();
     let canvas = harness.get_by_label("Annotation canvas").rect();
-    assert!(canvas.top() >= 0.0 && canvas.bottom() <= 320.0 && canvas.height() >= 100.0);
+    assert!(
+        canvas.top() >= 0.0 && canvas.bottom() <= 320.0 && canvas.height() >= 80.0,
+        "short compact canvas must remain usable below the two-row context bar: {canvas:?}",
+    );
     for label in [
         "Pan",
         "Zoom out",
@@ -734,7 +737,8 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 height,
             );
         }
-        let (approve, reject) = if LayoutMode::for_width(width) == LayoutMode::Compact {
+        let layout = LayoutMode::for_width(width);
+        let (approve, reject) = if layout != LayoutMode::Wide {
             ("Accept", "Reject")
         } else {
             ("Approve object", "Reject object & finish")
@@ -748,7 +752,7 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 height,
             );
         }
-        if LayoutMode::for_width(width) == LayoutMode::Compact {
+        if layout != LayoutMode::Wide {
             let approve_rect = harness
                 .get_by_role_and_label(egui::accesskit::Role::Button, approve)
                 .rect();
@@ -763,8 +767,29 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 approve_rect.right() <= reject_rect.left(),
                 "approve must be left of reject at {width}x{height}",
             );
+            assert!(
+                (approve_rect.width() - reject_rect.width()).abs() <= 1.0,
+                "review decisions must split the bottom bar evenly at {width}x{height}: \
+                 approve={approve_rect:?} reject={reject_rect:?}",
+            );
+            assert!(
+                approve_rect.left() <= 16.0 && reject_rect.right() >= width - 16.0,
+                "review decisions must fill the bottom bar at {width}x{height}: \
+                 approve={approve_rect:?} reject={reject_rect:?}",
+            );
+            let context = harness.get_by_label("Workspace context bar").rect();
+            for label in ["Workflow", "Inspector"] {
+                let panel = harness
+                    .get_by_role_and_label(egui::accesskit::Role::Button, label)
+                    .rect();
+                assert!(
+                    panel.top() >= context.top() && panel.bottom() <= context.bottom(),
+                    "{label} must be in the second top bar at {width}x{height}: \
+                     panel={panel:?} context={context:?}",
+                );
+            }
         }
-        if LayoutMode::for_width(width) != LayoutMode::Wide {
+        if layout != LayoutMode::Wide {
             harness.state_mut().work.drawer = Some(Drawer::Inspector);
             harness.step();
             assert_eq!(
@@ -780,16 +805,40 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
 
     harness.set_size(egui::vec2(320.0, 320.0));
     harness.step();
-    for label in [
-        "Pan",
-        "Zoom out",
-        "Zoom in",
-        "Fit",
-        "Accept",
-        "Reject",
-        "More",
-    ] {
+    for label in ["Pan", "Zoom out", "Zoom in", "Fit", "Accept", "Reject"] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
+    }
+
+    harness.state_mut().work.keybindings.bindings.insert(
+        labello_domain::UserAction::AcceptReviewObject,
+        labello_domain::KeyChord::new("U"),
+    );
+    harness.state_mut().work.keybindings.bindings.insert(
+        labello_domain::UserAction::RejectReviewObject,
+        labello_domain::KeyChord::new("J"),
+    );
+    harness.set_size(egui::vec2(150.0, 568.0));
+    harness.step();
+    let accept_shortcut = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "U")
+        .rect();
+    let reject_shortcut = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "J")
+        .rect();
+    assert!(
+        (accept_shortcut.center().y - reject_shortcut.center().y).abs() <= 1.0,
+        "shortcut review decisions must stay in the same bar",
+    );
+    assert!(accept_shortcut.right() <= reject_shortcut.left());
+    assert!((accept_shortcut.width() - reject_shortcut.width()).abs() <= 1.0);
+    for label in ["U", "J"] {
+        assert_control_inside(
+            &harness,
+            label,
+            egui::accesskit::Role::Button,
+            150.0,
+            568.0,
+        );
     }
 
     harness.state_mut().work.review_index = 1;

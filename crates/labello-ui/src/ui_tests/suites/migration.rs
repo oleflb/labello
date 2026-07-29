@@ -805,13 +805,14 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     let primary = object.get_by_label_contains("Save & next").rect();
     let workflow = object.get_by_label("Workflow").rect();
     let inspector = object.get_by_label("Inspector").rect();
+    let context = object.get_by_label("Workspace context bar").rect();
     assert!(workflow.width() <= 44.5, "{workflow:?}");
     assert!(inspector.width() <= 44.5, "{inspector:?}");
     assert!(
-        (primary.top() - workflow.top()).abs() <= 1.0,
-        "primary={primary:?} workflow={workflow:?}"
+        workflow.top() >= context.top() && workflow.bottom() <= context.bottom(),
+        "context={context:?} workflow={workflow:?}"
     );
-    assert!((primary.top() - inspector.top()).abs() <= 1.0);
+    assert!(inspector.top() >= context.top() && inspector.bottom() <= context.bottom());
     assert!(
         object.get_by_label("Annotation canvas").rect().bottom() <= primary.top(),
         "the canvas must stop above the compact migration action bar"
@@ -829,11 +830,19 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
             canvas.bottom() <= primary.top(),
             "width={width} canvas={canvas:?} primary={primary:?}"
         );
-        for label in ["Undo last keypoint", "More", "Workflow", "Inspector"] {
+        for label in ["Undo last keypoint", "More"] {
             let action = object.get_by_label(label).rect();
             assert!(
                 canvas.bottom() <= action.top(),
                 "width={width} canvas={canvas:?} {label}={action:?}"
+            );
+        }
+        let context = object.get_by_label("Workspace context bar").rect();
+        for label in ["Workflow", "Inspector"] {
+            let action = object.get_by_label(label).rect();
+            assert!(
+                action.top() >= context.top() && action.bottom() <= context.bottom(),
+                "width={width} context={context:?} {label}={action:?}"
             );
         }
     }
@@ -868,13 +877,15 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
             inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
         });
     roomy_compact.step();
-    let primary = roomy_compact.get_by_label_contains("Save & next").rect();
     let workflow = roomy_compact.get_by_label("Workflow").rect();
     let inspector = roomy_compact.get_by_label("Inspector").rect();
+    let context = roomy_compact
+        .get_by_label("Workspace context bar")
+        .rect();
     assert!(workflow.width() > 80.0, "{workflow:?}");
     assert!(inspector.width() > 80.0, "{inspector:?}");
-    assert!((primary.top() - workflow.top()).abs() <= 1.0);
-    assert!((primary.top() - inspector.top()).abs() <= 1.0);
+    assert!(workflow.top() >= context.top() && workflow.bottom() <= context.bottom());
+    assert!(inspector.top() >= context.top() && inspector.bottom() <= context.bottom());
     let canvas = roomy_compact.get_by_label("Annotation canvas").rect();
     click_at(&mut roomy_compact, canvas.center());
     roomy_compact.step();
@@ -894,18 +905,19 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     assert!(medium.query_by_label("Workflow").is_some());
     assert!(medium.query_by_label("Inspector").is_some());
     assert!(medium.query_by_label("Migration controls").is_none());
-    assert!(medium.get_by_label("Workflow").rect().width() > 80.0);
-    assert!(medium.get_by_label("Inspector").rect().width() > 80.0);
+    assert!(medium.get_by_label("Workflow").rect().width() <= 44.5);
+    assert!(medium.get_by_label("Inspector").rect().width() <= 44.5);
     let canvas = medium.get_by_label("Annotation canvas").rect();
     let first_row = medium.get_by_label_contains("Save skeleton & advance").rect();
-    let second_row = medium.get_by_label("Inspector").rect();
+    let inspector = medium.get_by_label("Inspector").rect();
+    let context = medium.get_by_label("Workspace context bar").rect();
     assert!(
         canvas.bottom() <= first_row.top(),
         "canvas={canvas:?} first_row={first_row:?}"
     );
     assert!(
-        second_row.bottom() <= 667.0,
-        "wrapped action is clipped: {second_row:?}"
+        inspector.top() >= context.top() && inspector.bottom() <= context.bottom(),
+        "context control is clipped: context={context:?} inspector={inspector:?}"
     );
 
     click_accesskit_button(&mut object, "Inspector");
@@ -933,12 +945,16 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     object.step();
     let workflow = object.get_by_label("Workflow").rect();
     let inspector = object.get_by_label("Inspector").rect();
+    let context = object.get_by_label("Workspace context bar").rect();
     assert!(workflow.width() <= 44.5, "{workflow:?}");
     assert!(inspector.width() <= 44.5, "{inspector:?}");
     assert!((workflow.top() - inspector.top()).abs() <= 1.0);
     assert!(
-        workflow.top() > object.get_by_label_contains("Save & next").rect().top(),
-        "the controls should wrap only after becoming icon-only"
+        workflow.top() >= context.top()
+            && workflow.bottom() <= context.bottom()
+            && inspector.bottom() <= context.bottom(),
+        "collapsed panel controls must remain in the context bar: \
+         context={context:?} workflow={workflow:?} inspector={inspector:?}"
     );
 
     let mut full_image = Harness::builder()
@@ -1052,20 +1068,58 @@ fn migration_review_decisions_are_visible_and_keep_their_shortcuts_on_mobile() {
         .build_eframe(|_| app);
     harness.step();
 
+    let assert_review_layout =
+        |harness: &Harness<'static, LabelloApp>, accept: &str, reject: &str| {
+            let accept = harness.get_by_label(accept).rect();
+            let reject = harness.get_by_label(reject).rect();
+            let width = harness.ctx.content_rect().width();
+            let workflow = harness.get_by_label("Workflow").rect();
+            let inspector = harness.get_by_label("Inspector").rect();
+            let context = harness.get_by_label("Workspace context bar").rect();
+            assert!((accept.center().y - reject.center().y).abs() <= 1.0);
+            assert!(accept.right() <= reject.left());
+            assert!((accept.width() - reject.width()).abs() <= 1.0);
+            assert!(accept.left() <= 16.0 && reject.right() >= width - 16.0);
+            assert!(workflow.top() >= context.top() && workflow.bottom() <= context.bottom());
+            assert!(inspector.top() >= context.top() && inspector.bottom() <= context.bottom());
+        };
+
+    harness.set_size(egui::vec2(570.0, 667.0));
+    harness.step();
+    assert_review_layout(&harness, "Accept", "Reject");
+    assert!(harness.get_by_label("Workflow").rect().width() > 80.0);
+    assert!(harness.get_by_label("Inspector").rect().width() > 80.0);
+
+    harness.set_size(egui::vec2(390.0, 667.0));
+    harness.step();
+    assert_review_layout(&harness, "Accept", "Reject");
+    assert!(harness.get_by_label("Workflow").rect().width() <= 44.5);
+    assert!(harness.get_by_label("Inspector").rect().width() <= 44.5);
+
+    harness.set_size(egui::vec2(260.0, 667.0));
+    harness.step();
+    assert_review_layout(&harness, "Accept", "Reject");
+    assert!(harness.get_by_label("Workflow").rect().width() <= 44.5);
+    assert!(harness.get_by_label("Inspector").rect().width() <= 44.5);
+
+    harness.set_size(egui::vec2(150.0, 667.0));
+    harness.step();
+    let accept = harness.get_by_label("Y").rect();
+    let reject = harness.get_by_label("N").rect();
+    assert!((accept.center().y - reject.center().y).abs() <= 1.0);
+    assert!((accept.width() - reject.width()).abs() <= 1.0);
+
+    harness.set_size(egui::vec2(90.0, 667.0));
+    harness.step();
+    let row_positions = ["Y", "N"].map(|label| harness.get_by_label(label).rect().center().y);
     assert!(
-        harness
-            .query_by_label_contains("Approve migration item")
-            .is_some()
+        (row_positions[0] - row_positions[1]).abs() > 1.0,
+        "review controls may reflow only after both decisions use their shortcuts",
     );
-    assert!(
-        harness
-            .query_by_label_contains("Reject migration item")
-            .is_some()
-    );
-    assert!(harness.query_by_label("Workflow").is_some());
-    assert!(harness.query_by_label("Inspector").is_some());
     assert!(harness.query_by_label("Controls").is_none());
 
+    harness.set_size(egui::vec2(390.0, 667.0));
+    harness.step();
     harness.key_press(egui::Key::Y);
     harness.step();
     step_until(&mut harness, 8, |app| !app.work.migration.busy);

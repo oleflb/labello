@@ -9,6 +9,7 @@ use eframe::egui::{self, RichText};
 use crate::{
     app::{AppView, LabelloApp, MigrationAction, UiCommand},
     canvas::{CanvasAction, CanvasAnnotationStyle, CanvasInteraction, show_canvas_colored},
+    panels::shortcut_button_label,
     theme,
 };
 
@@ -992,7 +993,7 @@ impl LabelloApp {
             });
             match review_target {
                 Some(review_target) if show_primary_actions => {
-                    self.migration_review_buttons(ui, task_id, review_target);
+                    self.migration_review_buttons(ui, task_id, review_target, false, false);
                 }
                 Some(_) => {}
                 None => {
@@ -1015,6 +1016,8 @@ impl LabelloApp {
                     labello_client::MigrationReviewTarget::Confirmation {
                         confirmation_hash: confirmation.confirmation_hash,
                     },
+                    false,
+                    false,
                 );
             }
         } else {
@@ -1026,50 +1029,67 @@ impl LabelloApp {
         }
     }
 
-    fn migration_review_buttons(
+    pub(crate) fn migration_review_buttons(
         &mut self,
         ui: &mut egui::Ui,
         task_id: labello_domain::TaskId,
         target: labello_client::MigrationReviewTarget,
+        compact: bool,
+        shortcut_only: bool,
     ) {
-        ui.horizontal_wrapped(|ui| {
-            if theme::primary_button(
-                ui,
-                !self.work.migration.busy,
-                egui::Button::new("Approve migration item").shortcut_text(
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::AcceptReviewObject),
-                ),
+        let approve_shortcut =
+            self.shortcut_text(ui.ctx(), labello_domain::UserAction::AcceptReviewObject);
+        let reject_shortcut =
+            self.shortcut_text(ui.ctx(), labello_domain::UserAction::RejectReviewObject);
+        let (approve, reject) = if shortcut_only {
+            (
+                shortcut_button_label(&approve_shortcut, "Accept"),
+                shortcut_button_label(&reject_shortcut, "Reject"),
             )
-            .clicked()
-            {
-                self.request_review_migration(
-                    task_id.clone(),
-                    target.clone(),
-                    labello_domain::ReviewDecision::Approved,
-                );
-            }
-            if theme::danger_button(
-                ui,
-                !self.work.migration.busy,
-                egui::Button::new("Reject migration item").shortcut_text(
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::RejectReviewObject),
-                ),
+        } else if compact {
+            ("Accept".to_string(), "Reject".to_string())
+        } else {
+            (
+                "Approve migration item".to_string(),
+                "Reject migration item".to_string(),
             )
+        };
+        let button_width =
+            compact.then(|| ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(44.0));
+        let approve_button = egui::Button::new(approve).min_size(egui::vec2(
+            button_width.unwrap_or_default(),
+            if compact { 44.0 } else { 0.0 },
+        ));
+        let reject_button = egui::Button::new(reject).min_size(egui::vec2(
+            button_width.unwrap_or_default(),
+            if compact { 44.0 } else { 0.0 },
+        ));
+        if theme::primary_button(ui, !self.work.migration.busy, approve_button)
+            .on_hover_text(format!("Accept migration item ({approve_shortcut})"))
             .clicked()
-            {
-                self.request_review_migration(
-                    task_id,
-                    target,
-                    labello_domain::ReviewDecision::Rejected,
-                );
-            }
-        });
+        {
+            self.request_review_migration(
+                task_id.clone(),
+                target.clone(),
+                labello_domain::ReviewDecision::Approved,
+            );
+        }
+        if theme::danger_button(ui, !self.work.migration.busy, reject_button)
+            .on_hover_text(format!("Reject migration item ({reject_shortcut})"))
+            .clicked()
+        {
+            self.request_review_migration(
+                task_id,
+                target,
+                labello_domain::ReviewDecision::Rejected,
+            );
+        }
     }
 
     pub(crate) fn migration_workspace_actions(&mut self, ui: &mut egui::Ui, compact: bool) {
         if self.view == AppView::Review {
             if let Some((task_id, target)) = self.current_migration_review_target() {
-                self.migration_review_buttons(ui, task_id, target);
+                self.migration_review_buttons(ui, task_id, target, false, false);
             }
             return;
         }
@@ -1388,7 +1408,7 @@ impl LabelloApp {
         self.request_review_migration(task_id, target, decision);
     }
 
-    fn current_migration_review_target(
+    pub(crate) fn current_migration_review_target(
         &self,
     ) -> Option<(
         labello_domain::TaskId,
