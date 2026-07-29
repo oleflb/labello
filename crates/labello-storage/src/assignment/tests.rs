@@ -1126,6 +1126,28 @@ async fn claim_retry_renews_the_same_assignment() {
 }
 
 #[tokio::test]
+async fn claim_retry_resumes_at_the_previous_assignment_cursor() {
+    let (_temp, repo, task_id, users) = annotation_repo(4, &["worker"]).await;
+    let metadata = repo.load_dataset().await.unwrap();
+    let excluded = metadata.images.keys().take(3).cloned().collect::<Vec<_>>();
+    let first = repo
+        .assign_next_image_excluding(&users[0], &task_id, AssignmentKind::Annotation, &excluded)
+        .await
+        .unwrap()
+        .unwrap();
+
+    repo.reset_image_state_load_count();
+    let retry = repo
+        .assign_next_image(&users[0], &task_id, AssignmentKind::Annotation)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retry.assignment_id, first.assignment_id);
+    assert_eq!(repo.image_state_load_count(), 2);
+}
+
+#[tokio::test]
 async fn expired_annotation_is_cancelled_and_atomically_reclaimed() {
     let (_temp, repo, task_id, users) = annotation_repo(1, &["owner", "next", "other"]).await;
     let first = repo

@@ -16,6 +16,7 @@ pub struct ImageQueue {
     queue_size: usize,
     loading: bool,
     failed_at: Option<Instant>,
+    retry_delay: Duration,
     items: VecDeque<QueuedImage>,
     prepared: VecDeque<LoadedImage>,
 }
@@ -26,6 +27,7 @@ impl ImageQueue {
             queue_size: queue_size.clamp(1, crate::app::IMAGE_QUEUE_SIZE),
             loading: false,
             failed_at: None,
+            retry_delay: Duration::from_secs(1),
             items: VecDeque::new(),
             prepared: VecDeque::new(),
         }
@@ -54,21 +56,27 @@ impl ImageQueue {
     }
 
     pub(crate) fn mark_failed(&mut self) {
+        self.mark_failed_after(Duration::from_secs(1));
+    }
+
+    pub(crate) fn mark_failed_after(&mut self, delay: Duration) {
         self.failed_at = Some(Instant::now());
+        self.retry_delay = delay;
     }
 
     pub(crate) fn clear_failure(&mut self) {
         self.failed_at = None;
+        self.retry_delay = Duration::from_secs(1);
     }
 
     pub(crate) fn retry_due(&self) -> bool {
         self.failed_at
-            .is_some_and(|failed| failed.elapsed() >= Duration::from_secs(1))
+            .is_some_and(|failed| failed.elapsed() >= self.retry_delay)
     }
 
     pub(crate) fn retry_after(&self) -> Option<Duration> {
         self.failed_at
-            .map(|failed| Duration::from_secs(1).saturating_sub(failed.elapsed()))
+            .map(|failed| self.retry_delay.saturating_sub(failed.elapsed()))
     }
 
     pub(crate) fn failed(&self) -> bool {
@@ -139,6 +147,7 @@ impl ImageQueue {
         self.items.clear();
         self.prepared.clear();
         self.failed_at = None;
+        self.retry_delay = Duration::from_secs(1);
     }
 }
 
@@ -171,6 +180,21 @@ mod tests {
         assert!(queue.retry_due());
         queue.clear_failure();
         assert!(!queue.failed());
+    }
+
+    #[test]
+    fn empty_refills_can_use_a_longer_retry_delay() {
+        let mut queue = ImageQueue::new(2);
+        queue.mark_failed_after(Duration::from_secs(15));
+        assert!(!queue.retry_due());
+        assert!(
+            queue
+                .retry_after()
+                .is_some_and(|delay| delay > Duration::from_secs(14))
+        );
+
+        queue.failed_at = Some(Instant::now() - Duration::from_secs(15));
+        assert!(queue.retry_due());
     }
 
     fn queued(id: &str) -> QueuedImage {

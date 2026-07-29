@@ -12,6 +12,7 @@ inspector-presets = []
 blake3.workspace = true
 eframe.workspace = true
 egui.workspace = true
+futures.workspace = true
 labello-client = { path = "../labello-client" }
 labello-domain = { path = "../labello-domain" }
 serde.workspace = true

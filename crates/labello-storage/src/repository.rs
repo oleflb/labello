@@ -53,6 +53,7 @@ pub struct DatasetRepository {
     migration_lock: Arc<AsyncMutex<()>>,
     migration_complete: Arc<AtomicBool>,
     images_index_cache: Arc<AsyncRwLock<Option<Arc<ImagesIndex>>>>,
+    pub(crate) assignment_cursors: Arc<Mutex<BTreeMap<String, usize>>>,
     pub(crate) stats_cache: Arc<StatsCache>,
     pub(crate) assignment_availability_cache: Arc<AssignmentAvailabilityCache>,
     #[cfg(test)]
@@ -73,6 +74,7 @@ impl DatasetRepository {
             migration_lock: Arc::new(AsyncMutex::new(())),
             migration_complete: Arc::new(AtomicBool::new(false)),
             images_index_cache: Arc::new(AsyncRwLock::new(None)),
+            assignment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             stats_cache: Arc::new(StatsCache::default()),
             assignment_availability_cache: Arc::new(AssignmentAvailabilityCache::default()),
             #[cfg(test)]

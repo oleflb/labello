@@ -171,10 +171,15 @@ impl LabelloApp {
                                 self.config.dataset_id.clone(),
                                 loaded.assignment,
                             );
+                            let retry_delay = Duration::from_secs(3);
+                            self.work.queue.mark_failed_after(retry_delay);
+                            ctx.request_repaint_after(retry_delay);
                         }
                         Ok(None) => {
                             self.work.one_shot_excluded_image_id = None;
-                            self.work.queue.clear_failure();
+                            let retry_delay = Duration::from_secs(15);
+                            self.work.queue.mark_failed_after(retry_delay);
+                            ctx.request_repaint_after(retry_delay);
                         }
                         Err(_) => {
                             self.work.queue.mark_failed();

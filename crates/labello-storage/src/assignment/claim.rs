@@ -320,7 +320,25 @@ impl DatasetRepository {
             return Ok(None);
         }
 
-        for image_id in metadata.images.keys() {
+        let image_ids = metadata.images.keys().cloned().collect::<Vec<_>>();
+        if image_ids.is_empty() {
+            return Ok(None);
+        }
+        let cursor_key = format!(
+            "{user_id}\u{1f}{task_id}\u{1f}{}",
+            assignment_kind_cache_key(&kind)
+        );
+        let start = self
+            .assignment_cursors
+            .lock()
+            .get(&cursor_key)
+            .copied()
+            .unwrap_or_default()
+            % image_ids.len();
+
+        for offset in 0..image_ids.len() {
+            let image_index = (start + offset) % image_ids.len();
+            let image_id = &image_ids[image_index];
             if excluded_image_ids.contains(image_id) {
                 continue;
             }
@@ -373,6 +391,9 @@ impl DatasetRepository {
                 });
                 self.append_payloads_unlocked(image_id, &actor, payloads)
                     .await?;
+                self.assignment_cursors
+                    .lock()
+                    .insert(cursor_key.clone(), image_index);
                 return Ok(Some(assignment));
             }
             let assignment = Assignment {
@@ -403,6 +424,9 @@ impl DatasetRepository {
             }
             self.append_payloads_unlocked(image_id, &actor, payloads)
                 .await?;
+            self.assignment_cursors
+                .lock()
+                .insert(cursor_key.clone(), image_index);
             return Ok(Some(assignment));
         }
         Ok(None)

@@ -915,31 +915,27 @@ async fn load_image(
     prelabel_config_ids: Vec<PrelabelConfigId>,
     fetch_prelabels: bool,
 ) -> labello_client::ClientResult<LoadedImage> {
-    let image = api
-        .get_image_record(&dataset_id, &assignment.image_id)
-        .await?;
-    let state = api
-        .get_image_state(&dataset_id, &assignment.image_id)
-        .await?;
-    let preview = api
-        .get_image_preview(&dataset_id, &assignment.image_id, 1600)
-        .await?;
+    let (image, state, preview) = futures::try_join!(
+        api.get_image_record(&dataset_id, &assignment.image_id),
+        api.get_image_state(&dataset_id, &assignment.image_id),
+        api.get_image_preview(&dataset_id, &assignment.image_id, 1600),
+    )?;
     let color_image = Some(egui::ColorImage::from_rgba_unmultiplied(
         [preview.width as usize, preview.height as usize],
         &preview.rgba,
     ));
     let mut prelabels = Vec::new();
     if fetch_prelabels {
-        for config_id in prelabel_config_ids {
-            let mut suggestions = api
-                .prelabel_suggestions(
-                    &dataset_id,
-                    PrelabelSuggestionRequest {
-                        config_id,
-                        task_id: assignment.task_id.clone(),
-                    },
-                )
-                .await?;
+        let requests = prelabel_config_ids.into_iter().map(|config_id| {
+            api.prelabel_suggestions(
+                &dataset_id,
+                PrelabelSuggestionRequest {
+                    config_id,
+                    task_id: assignment.task_id.clone(),
+                },
+            )
+        });
+        for mut suggestions in futures::future::try_join_all(requests).await? {
             prelabels.append(&mut suggestions);
         }
     }
