@@ -972,7 +972,7 @@ fn invalid_dataset_ids_are_rejected_before_an_api_request() {
 }
 
 #[test]
-fn right_arrow_submits_and_claims_a_different_image() {
+fn space_submits_and_claims_a_different_image() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
     let original = harness
@@ -986,7 +986,7 @@ fn right_arrow_submits_and_claims_a_different_image() {
     step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
     let next = harness.state().work.queue.prepared_image_ids()[0].clone();
     let previews_before = api.counts().get_image_preview;
-    harness.key_press(egui::Key::ArrowRight);
+    harness.key_press(egui::Key::Space);
     step_until(&mut harness, 16, |app| {
         app.work.assignment
             .as_ref()
@@ -1789,10 +1789,10 @@ fn work_workflow_draws_saves_submits_and_reviews() {
             .is_some_and(|assignment| api.has_active_assignment(&assignment.assignment_id))
     });
 
-    let claims_before_arrow = api.counts().assign_next_image;
-    harness.key_press(egui::Key::ArrowRight);
+    let claims_before_space = api.counts().assign_next_image;
+    harness.key_press(egui::Key::Space);
     step_until(&mut harness, 10, |app| !app.loading.image);
-    assert_eq!(api.counts().assign_next_image, claims_before_arrow);
+    assert_eq!(api.counts().assign_next_image, claims_before_space);
 }
 
 #[test]

@@ -237,7 +237,7 @@ pub struct KeybindingSet {
 impl KeybindingSet {
     pub fn defaults_for(user_id: UserId) -> Self {
         let mut bindings = BTreeMap::new();
-        bindings.insert(UserAction::NextImage, KeyChord::new("ArrowRight"));
+        bindings.insert(UserAction::NextImage, KeyChord::new("Space"));
         bindings.insert(UserAction::PreviousImage, KeyChord::new("ArrowLeft"));
         bindings.insert(UserAction::UndoEdit, KeyChord::primary("Z"));
         let mut redo = KeyChord::primary("Z");
@@ -450,6 +450,10 @@ mod tests {
     #[test]
     fn detects_conflicts_and_resets() {
         let mut bindings = KeybindingSet::defaults_for(UserId::from("user_1"));
+        assert_eq!(
+            bindings.bindings[&UserAction::NextImage],
+            KeyChord::new("Space")
+        );
         let next = bindings.bindings[&UserAction::NextImage].clone();
         bindings.bindings.insert(UserAction::SaveAnnotations, next);
         assert!(bindings.validate_conflicts().is_err());
