@@ -193,7 +193,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::SaveFinished {
-                    request: _,
+                    request,
                     operation_id,
                     assignment_id,
                     edit_generation,
@@ -235,8 +235,26 @@ impl LabelloApp {
                                     assignment.status = labello_domain::AssignmentStatus::Completed;
                                     self.remember_previous_annotation_assignment(assignment);
                                 }
+                                let load_after_resolution = matches!(
+                                    self.work.pending_transition.as_ref(),
+                                    Some(
+                                        crate::app::PendingTransition::NextAssignment
+                                            | crate::app::PendingTransition::Workflow(_)
+                                            | crate::app::PendingTransition::View(
+                                                AppView::Annotate
+                                                    | AppView::Review
+                                                    | AppView::Adjudicate
+                                            )
+                                    )
+                                );
                                 self.finish_annotation_transition(ctx, None);
-                                self.request_assignment_availability();
+                                self.assignment_availability_mutation_completed(
+                                    request
+                                        .dataset_id
+                                        .as_ref()
+                                        .expect("annotation mutations are dataset-scoped"),
+                                    load_after_resolution,
+                                );
                             }
                         }
                         Err(error) => {
@@ -248,6 +266,13 @@ impl LabelloApp {
                             };
                             if completed {
                                 self.work.pending_transition = None;
+                                self.assignment_availability_mutation_completed(
+                                    request
+                                        .dataset_id
+                                        .as_ref()
+                                        .expect("annotation mutations are dataset-scoped"),
+                                    false,
+                                );
                             }
                             self.runtime.error = Some(error);
                         }
@@ -290,7 +315,7 @@ impl LabelloApp {
                     }
                 }
                 UiMessage::ReviewFinished {
-                    request: _,
+                    request,
                     operation_id,
                     assignment_id,
                     phase,
@@ -341,21 +366,31 @@ impl LabelloApp {
                                 crate::app::ReviewPhase::FullImage => {
                                     self.request_stats();
                                     self.clear_current_image();
-                                    self.execute_transition(
-                                        crate::app::PendingTransition::NextAssignment,
-                                    );
-                                    self.request_assignment_availability();
                                 }
                             }
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("review mutations are dataset-scoped"),
+                                phase == crate::app::ReviewPhase::FullImage,
+                            );
                         }
                         Err(error) => {
                             self.work.pending_transition = None;
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("review mutations are dataset-scoped"),
+                                false,
+                            );
                             self.runtime.error = Some(error);
                         }
                     }
                 }
                 UiMessage::CorrectionFinished {
-                    request: _,
+                    request,
                     operation_id,
                     assignment_id,
                     result,
@@ -373,17 +408,29 @@ impl LabelloApp {
                             self.runtime.error = None;
                             self.request_stats();
                             self.clear_current_image();
-                            self.execute_transition(crate::app::PendingTransition::NextAssignment);
-                            self.request_assignment_availability();
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("correction mutations are dataset-scoped"),
+                                true,
+                            );
                         }
                         Err(error) => {
                             self.work.pending_transition = None;
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("correction mutations are dataset-scoped"),
+                                false,
+                            );
                             self.runtime.error = Some(error);
                         }
                     }
                 }
                 UiMessage::AdjudicationFinished {
-                    request: _,
+                    request,
                     operation_id,
                     assignment_id,
                     result,
@@ -398,11 +445,23 @@ impl LabelloApp {
                             self.runtime.error = None;
                             self.request_stats();
                             self.clear_current_image();
-                            self.execute_transition(crate::app::PendingTransition::NextAssignment);
-                            self.request_assignment_availability();
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("adjudication mutations are dataset-scoped"),
+                                true,
+                            );
                         }
                         Err(error) => {
                             self.work.pending_transition = None;
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("adjudication mutations are dataset-scoped"),
+                                false,
+                            );
                             self.runtime.error = Some(error);
                         }
                     }

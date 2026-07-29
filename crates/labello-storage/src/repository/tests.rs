@@ -882,10 +882,16 @@ async fn artifact_migration_finishes_a_preexisting_hybrid_dataset() {
     .unwrap();
 
     let restarted = DatasetRepository::new(temp.path());
+    let availability_generation = restarted.assignment_availability_cache.generation();
     let dataset = restarted.load_dataset().await.unwrap();
 
     assert_eq!(dataset.schema_version, SCHEMA_VERSION);
     assert_eq!(dataset.migration_history.len(), 1);
+    assert_eq!(
+        restarted.assignment_availability_cache.generation(),
+        availability_generation + 1,
+        "artifact migration completion must invalidate assignment availability"
+    );
     assert_eq!(
         read_schema_version(&restarted.images_index_path())
             .await

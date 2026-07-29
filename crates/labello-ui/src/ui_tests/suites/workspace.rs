@@ -1044,10 +1044,10 @@ fn empty_prepared_queue_falls_back_to_blocking_load() {
 
     click(&mut harness, "Submit & next");
     harness.step();
-    assert!(harness.state().loading.image);
+    assert!(harness.state().work.availability.loading);
+    assert!(!harness.state().loading.image);
     assert!(harness.state().work.current.is_none());
-    harness.step();
-    assert!(harness.state().work.current.is_some());
+    step_until(&mut harness, 8, |app| app.work.current.is_some());
 }
 
 #[test]

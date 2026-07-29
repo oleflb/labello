@@ -73,15 +73,20 @@ impl DatasetRepository {
         let availabilities = self
             .compute_assignment_availabilities(user_id, &kinds)
             .await?;
-        for (kind, tasks) in &availabilities {
-            self.assignment_availability_cache
-                .store(
-                    (user_id.clone(), assignment_kind_cache_key(kind).to_string()),
-                    generation,
-                    tasks.clone(),
-                )
-                .await;
-        }
+        self.assignment_availability_cache
+            .store_batch_if_current(
+                generation,
+                availabilities
+                    .iter()
+                    .map(|(kind, tasks)| {
+                        (
+                            (user_id.clone(), assignment_kind_cache_key(kind).to_string()),
+                            tasks.clone(),
+                        )
+                    })
+                    .collect(),
+            )
+            .await;
         Ok(availabilities)
     }
 
@@ -91,17 +96,14 @@ impl DatasetRepository {
         kinds: &[AssignmentKind],
         generation: u64,
     ) -> Option<Vec<(AssignmentKind, std::collections::BTreeMap<TaskId, bool>)>> {
-        let mut cached = Vec::with_capacity(kinds.len());
-        for kind in kinds {
-            let key = (user_id.clone(), assignment_kind_cache_key(kind).to_string());
-            cached.push((
-                kind.clone(),
-                self.assignment_availability_cache
-                    .get(&key, generation)
-                    .await?,
-            ));
-        }
-        Some(cached)
+        let keys = kinds
+            .iter()
+            .map(|kind| (user_id.clone(), assignment_kind_cache_key(kind).to_string()))
+            .collect::<Vec<_>>();
+        self.assignment_availability_cache
+            .lookup_batch(&keys, generation)
+            .await
+            .map(|tasks| kinds.iter().cloned().zip(tasks).collect())
     }
 
     async fn compute_assignment_availabilities(

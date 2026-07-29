@@ -1,5 +1,53 @@
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn active_migration_discards_stale_availability_without_rechecking() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api);
+
+    app.request_assignment_availability();
+    let availability_request = take_assignment_availability_request(&mut app);
+    app.request_exclude_migration_target(labello_domain::ObjectGroupId::from("group-left"));
+    assert!(app.work.migration.busy);
+    assert!(app.work.availability.refresh_after_load);
+
+    deliver_assignment_availability(&mut app, availability_request, true);
+
+    assert!(!app.work.availability.loading);
+    assert!(!app.work.availability.resolved);
+    assert!(
+        app.runtime
+            .commands
+            .iter()
+            .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+
+    app.work.availability.last_attempt = Some(Instant::now() - Duration::from_secs(31));
+    app.refresh_assignment_availability_if_due();
+    assert!(
+        app.runtime
+            .commands
+            .iter()
+            .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+
+    app.work.migration.busy = false;
+    assert!(app.manual_migration_active());
+    app.refresh_assignment_availability_if_due();
+    assert!(
+        app.runtime
+            .commands
+            .iter()
+            .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
     use crate::inspector_presets::{self, InspectorPreset};
 

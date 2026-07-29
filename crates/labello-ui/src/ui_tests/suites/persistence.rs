@@ -215,7 +215,7 @@ fn assignment_availability_poll_is_scheduled_from_completion() {
 }
 
 #[test]
-fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
+fn assignment_availability_mutations_invalidate_current_and_persisted_state() {
     let api = Rc::new(SpyApi::new());
     let mut app = base_live_app(api.clone());
     app.sync_work_config(api.metadata());
@@ -229,6 +229,32 @@ fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
         .collect();
     app.work.availability.resolved = true;
     app.work.availability.checked_at = Some(labello_domain::now());
+    app.work.availability.load_after_resolution = true;
+    app.runtime.persistence.preference = Some(WorkspacePreference {
+        version: 2,
+        dataset_id: app.config.dataset_id.clone(),
+        view: StoredView::Annotate,
+        task_id: app.work.selected_task_id.clone(),
+        assignment_id: None,
+        assignment_image_id: None,
+        assignment_kind: None,
+        drawer: None,
+        workflow_panel_collapsed: false,
+        inspector_panel_collapsed: false,
+        show_settings: false,
+        show_tutorial: false,
+        selected_annotation: None,
+        canvas: StoredCanvasTransform {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        },
+        availability: Some(StoredAssignmentAvailability {
+            kind: AssignmentKind::Annotation,
+            tasks: app.work.availability.tasks.clone(),
+            checked_at: labello_domain::now(),
+        }),
+    });
     let request = test_request(&app, 42, Some("demo"));
 
     app.queue_command(UiCommand::Ingest {
@@ -237,6 +263,258 @@ fn assignment_affecting_mutations_invalidate_the_persisted_availability() {
     });
 
     assert!(app.work.availability.checked_at.is_none());
+    assert!(!app.work.availability.resolved);
+    assert!(!app.work.availability.load_after_resolution);
+    assert!(
+        app.runtime
+            .persistence
+            .preference
+            .as_ref()
+            .is_some_and(|preference| preference.availability.is_none())
+    );
+}
+
+#[test]
+fn assignment_availability_waits_for_post_mutation_result_before_claiming() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+
+    app.request_next_image();
+    let request_a = take_assignment_availability_request(&mut app);
+    assert!(app.work.availability.load_after_resolution);
+
+    let mutation_request = test_request(&app, 42_000, Some("demo"));
+    app.queue_command(UiCommand::Ingest {
+        request: mutation_request,
+        dataset_id: app.config.dataset_id.clone(),
+    });
+    assert!(!app.work.availability.load_after_resolution);
+    assert!(app.work.availability.refresh_after_load);
+
+    deliver_assignment_availability(&mut app, request_a, true);
+    let request_b = take_assignment_availability_request(&mut app);
+    deliver_assignment_availability(&mut app, request_b, true);
+    assert!(app.work.availability.resolved);
+    assert!(!app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+
+    app.assignment_availability_mutation_completed(&app.config.dataset_id.clone(), true);
+    let request_c = take_assignment_availability_request(&mut app);
+    assert!(!app.work.availability.resolved);
+    assert!(!app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+
+    deliver_assignment_availability(&mut app, request_c, true);
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+}
+
+#[test]
+fn assignment_availability_completion_supersedes_an_in_flight_interim_result() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+
+    app.request_next_image();
+    let request_a = take_assignment_availability_request(&mut app);
+    app.queue_command(UiCommand::Ingest {
+        request: test_request(&app, 42_001, Some("demo")),
+        dataset_id: app.config.dataset_id.clone(),
+    });
+    deliver_assignment_availability(&mut app, request_a, true);
+    let request_b = take_assignment_availability_request(&mut app);
+
+    app.assignment_availability_mutation_completed(&app.config.dataset_id.clone(), true);
+    assert!(app.work.availability.refresh_after_load);
+    deliver_assignment_availability(&mut app, request_b, true);
+    let request_c = take_assignment_availability_request(&mut app);
+    assert!(!app.work.availability.resolved);
+    assert!(!app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+
+    deliver_assignment_availability(&mut app, request_c, true);
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+}
+
+#[test]
+fn assignment_availability_ingest_completion_waits_and_failure_does_not_loop() {
+    let api = Rc::new(SpyApi::new());
+    let mut app = base_live_app(api.clone());
+    app.sync_work_config(api.metadata());
+    app.view = AppView::Annotate;
+    let dataset_id = app.config.dataset_id.clone();
+
+    let completed_request = test_request(&app, 42_100, Some("demo"));
+    app.queue_command(UiCommand::Ingest {
+        request: completed_request.clone(),
+        dataset_id: dataset_id.clone(),
+    });
+    app.runtime.commands.pop_back();
+    app.runtime
+        .tx
+        .send(UiMessage::IngestJobLoaded {
+            request: completed_request,
+            result: Ok(IngestJob {
+                job_id: "completed".to_string(),
+                dataset_id: dataset_id.clone(),
+                status: IngestJobStatus::Completed,
+                report: Some(IngestReport {
+                    discovered_files: 1,
+                    new_images: 1,
+                    ..Default::default()
+                }),
+                error: None,
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(app.work.availability.load_after_resolution);
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+    assert!(!app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::ClaimAssignment { .. }
+    )));
+
+    app.runtime.commands.clear();
+    app.runtime.active_requests.clear();
+    app.work.availability.loading = false;
+    let failed_request = test_request(&app, 42_101, Some("demo"));
+    app.queue_command(UiCommand::Ingest {
+        request: failed_request.clone(),
+        dataset_id,
+    });
+    app.runtime.commands.pop_back();
+    app.runtime
+        .tx
+        .send(UiMessage::IngestJobLoaded {
+            request: failed_request,
+            result: Err("ingest failed".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+    assert!(!app.work.availability.load_after_resolution);
+    let refresh = take_assignment_availability_request(&mut app);
+    deliver_assignment_availability_error(&mut app, refresh);
+    assert!(!app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+}
+
+#[test]
+fn assignment_availability_invalidated_persisted_state_cannot_be_restored() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    step_until(&mut harness, 8, |app| {
+        app.runtime
+            .persistence
+            .preference
+            .as_ref()
+            .is_some_and(|preference| preference.availability.is_some())
+    });
+    let app = harness.state_mut();
+    let persisted = app.runtime.persistence.preference.clone().unwrap();
+    app.work.availability = Default::default();
+    app.runtime.persistence.preference = Some(persisted);
+    assert!(app.restore_cached_assignment_availability());
+
+    app.queue_command(UiCommand::Ingest {
+        request: test_request(app, 42_200, Some("demo")),
+        dataset_id: app.config.dataset_id.clone(),
+    });
+    assert!(!app.work.availability.resolved);
+    assert!(
+        app.runtime
+            .persistence
+            .preference
+            .as_ref()
+            .is_some_and(|preference| preference.availability.is_none())
+    );
+
+    app.begin_workspace_epoch();
+    app.clear_current_image();
+    assert!(!app.restore_cached_assignment_availability());
+    app.request_next_image();
+    assert!(app.runtime.commands.iter().any(|command| matches!(
+        command,
+        UiCommand::AssignmentAvailability { .. }
+    )));
+    app.persist_workspace_preference();
+    assert!(
+        app.runtime
+            .persistence
+            .preference
+            .as_ref()
+            .is_some_and(|preference| preference.availability.is_none())
+    );
+}
+
+fn take_assignment_availability_request(app: &mut LabelloApp) -> RequestIdentity {
+    let index = app
+        .runtime
+        .commands
+        .iter()
+        .position(|command| matches!(command, UiCommand::AssignmentAvailability { .. }))
+        .expect("expected an assignment availability request");
+    let UiCommand::AssignmentAvailability { request, .. } =
+        app.runtime.commands.remove(index).unwrap()
+    else {
+        unreachable!()
+    };
+    request
+}
+
+fn deliver_assignment_availability(
+    app: &mut LabelloApp,
+    request: RequestIdentity,
+    available: bool,
+) {
+    let tasks = app
+        .work
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), available))
+        .collect();
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Ok(labello_client::AssignmentAvailability {
+                kind: AssignmentKind::Annotation,
+                tasks,
+                related: Vec::new(),
+            }),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
+}
+
+fn deliver_assignment_availability_error(app: &mut LabelloApp, request: RequestIdentity) {
+    app.runtime
+        .tx
+        .send(UiMessage::AssignmentAvailabilityLoaded {
+            request,
+            result: Err("availability failed".to_string()),
+        })
+        .unwrap();
+    app.process_messages(&egui::Context::default());
 }
 
 #[test]

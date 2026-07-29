@@ -5,7 +5,7 @@ impl LabelloApp {
         message: UiMessage,
     ) -> Option<UiMessage> {
         match message {
-                UiMessage::MigrationFinished { result, .. } => {
+                UiMessage::MigrationFinished { request, result } => {
                     self.work.migration.busy = false;
                     let pending_activate_target =
                         self.work.migration.pending_activate_target.take();
@@ -49,15 +49,24 @@ impl LabelloApp {
                                 self.work.migration.review_index =
                                     self.canonical_migration_review_index();
                             }
+                            let migration_completed = completed_assignment.is_some();
                             if let Some(assignment) = completed_assignment {
                                 self.remember_previous_annotation_assignment(assignment);
                                 self.open_next_annotation_assignment(ctx, None);
-                                self.request_assignment_availability();
                             }
                             if let Some(target) = pending_activate_target {
                                 self.work.migration.pending_activate_target =
                                     Some(target.clone());
                                 self.request_revisit_migration_target(target);
+                            }
+                            if migration_completed {
+                                self.assignment_availability_mutation_completed(
+                                    request
+                                        .dataset_id
+                                        .as_ref()
+                                        .expect("migration mutations are dataset-scoped"),
+                                    true,
+                                );
                             }
                         }
                         Err(error) => {
@@ -65,6 +74,13 @@ impl LabelloApp {
                                 self.work.migration.inspected_group_id = None;
                             }
                             self.work.migration.error = Some(error);
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("migration mutations are dataset-scoped"),
+                                false,
+                            );
                         }
                     }
                 }
@@ -223,7 +239,7 @@ impl LabelloApp {
                         }
                     }
                 }
-                UiMessage::AdminSaved { result, .. } => match *result {
+                UiMessage::AdminSaved { request, result } => match *result {
                     Ok(metadata) => {
                         self.loading.admin = false;
                         self.sync_work_config(metadata.clone());
@@ -233,14 +249,28 @@ impl LabelloApp {
                         self.clear_admin_draft();
                         self.runtime.error = None;
                         self.request_next_admin_role_save();
+                        self.assignment_availability_mutation_completed(
+                            request
+                                .dataset_id
+                                .as_ref()
+                                .expect("admin mutations are dataset-scoped"),
+                            false,
+                        );
                     }
                     Err(error) => {
                         self.loading.admin = false;
                         self.admin.pending_role_saves.clear();
                         self.runtime.error = Some(error);
+                        self.assignment_availability_mutation_completed(
+                            request
+                                .dataset_id
+                                .as_ref()
+                                .expect("admin mutations are dataset-scoped"),
+                            false,
+                        );
                     }
                 },
-                UiMessage::DatasetRolesSaved { result, .. } => {
+                UiMessage::DatasetRolesSaved { request, result } => {
                     self.loading.roles_user = None;
                     match result {
                         Ok(user) => {
@@ -249,10 +279,24 @@ impl LabelloApp {
                             self.sync_role_assignment(&user);
                             self.runtime.error = None;
                             self.request_next_admin_role_save();
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("role mutations are dataset-scoped"),
+                                false,
+                            );
                         }
                         Err(error) => {
                             self.admin.pending_role_saves.clear();
                             self.runtime.error = Some(error);
+                            self.assignment_availability_mutation_completed(
+                                request
+                                    .dataset_id
+                                    .as_ref()
+                                    .expect("role mutations are dataset-scoped"),
+                                false,
+                            );
                         }
                     }
                 }

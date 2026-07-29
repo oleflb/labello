@@ -35,8 +35,10 @@ impl LabelloApp {
                         self.work.availability.resolved = false;
                         self.work.availability.checked_at = None;
                         self.work.availability.error = None;
-                        self.work.availability.last_attempt = None;
-                        self.request_assignment_availability();
+                        if !self.work.migration.busy && !self.manual_migration_active() {
+                            self.work.availability.last_attempt = None;
+                            self.request_assignment_availability();
+                        }
                         return None;
                     }
                     match result {

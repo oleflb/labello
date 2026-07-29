@@ -79,9 +79,11 @@ impl LabelloApp {
                     if self.view == AppView::Admin {
                         self.request_admin_dataset();
                     }
-                    if self.work_view() && self.work.current.is_none() {
-                        self.request_next_image();
-                    }
+                    let load_after_resolution = self.work_view() && self.work.current.is_none();
+                    self.assignment_availability_mutation_completed(
+                        &self.config.dataset_id.clone(),
+                        load_after_resolution,
+                    );
                 }
                 IngestJobStatus::Failed => {
                     self.loading.ingesting = false;
@@ -89,6 +91,10 @@ impl LabelloApp {
                     self.loading.last_ingest_poll = None;
                     self.runtime.error =
                         Some(job.error.unwrap_or_else(|| "ingest failed".to_string()));
+                    self.assignment_availability_mutation_completed(
+                        &self.config.dataset_id.clone(),
+                        false,
+                    );
                 }
             },
             Err(error) => {
@@ -96,6 +102,10 @@ impl LabelloApp {
                 self.loading.ingest_job_id = None;
                 self.loading.last_ingest_poll = None;
                 self.runtime.error = Some(error);
+                self.assignment_availability_mutation_completed(
+                    &self.config.dataset_id.clone(),
+                    false,
+                );
             }
         }
     }

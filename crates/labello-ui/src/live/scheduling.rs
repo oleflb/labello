@@ -59,10 +59,46 @@ impl LabelloApp {
                 .retain(|cached| &cached.dataset_id != dataset_id);
             if self.work.availability.dataset_id.as_ref() == Some(dataset_id) {
                 self.work.availability.checked_at = None;
+                self.work.availability.resolved = false;
+                self.work.availability.load_after_resolution = false;
+                if self.work.availability.loading {
+                    self.work.availability.refresh_after_load = true;
+                }
+            }
+            if let Some(preference) = self.runtime.persistence.preference.as_mut()
+                && &preference.dataset_id == dataset_id
+            {
+                preference.availability = None;
             }
         } else {
             self.work.availability.cache.clear();
             self.work.availability.checked_at = None;
+            self.work.availability.resolved = false;
+            self.work.availability.load_after_resolution = false;
+            if self.work.availability.loading {
+                self.work.availability.refresh_after_load = true;
+            }
+            if let Some(preference) = self.runtime.persistence.preference.as_mut() {
+                preference.availability = None;
+            }
+        }
+    }
+
+    pub(crate) fn assignment_availability_mutation_completed(
+        &mut self,
+        dataset_id: &labello_domain::DatasetId,
+        load_after_resolution: bool,
+    ) {
+        self.invalidate_assignment_availability(Some(dataset_id));
+        if &self.config.dataset_id != dataset_id
+            || !self.work_view()
+            || self.assignment_kind().is_none()
+        {
+            return;
+        }
+        self.work.availability.load_after_resolution = load_after_resolution;
+        if !self.work.availability.loading {
+            self.request_assignment_availability();
         }
     }
 
@@ -123,7 +159,10 @@ impl LabelloApp {
     }
 
     pub(crate) fn refresh_assignment_availability_if_due(&mut self) {
-        if self.work.availability.loading {
+        if self.work.availability.loading
+            || self.work.migration.busy
+            || self.manual_migration_active()
+        {
             return;
         }
         let Some(kind) = self.assignment_kind() else {
