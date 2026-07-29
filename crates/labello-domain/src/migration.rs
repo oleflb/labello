@@ -326,7 +326,10 @@ pub struct MigrationHashStateTarget<'a> {
 /// Targets are sorted by sequence index before encoding.
 mod digest;
 
-pub use digest::{migration_confirmation_hash, migration_state_hash, migration_target_set_hash};
+pub use digest::{
+    migration_confirmation_hash, migration_state_hash, migration_state_hash_with_discovered,
+    migration_target_set_hash,
+};
 
 pub trait SequentialMigration<T> {
     fn source_version(&self) -> u32;

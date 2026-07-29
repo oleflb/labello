@@ -27,6 +27,7 @@ pub enum UserAction {
     DiscardPrelabel,
     ToggleKeypointHidden,
     MarkKeypointAbsent,
+    AddMissingObject,
     RetryImageLoad,
     TogglePanMode,
     ZoomIn,
@@ -55,7 +56,7 @@ pub enum ActionContext {
 }
 
 impl UserAction {
-    pub const ACTIVE: [Self; 28] = [
+    pub const ACTIVE: [Self; 29] = [
         Self::NextImage,
         Self::PreviousImage,
         Self::UndoEdit,
@@ -77,6 +78,7 @@ impl UserAction {
         Self::DiscardPrelabel,
         Self::ToggleKeypointHidden,
         Self::MarkKeypointAbsent,
+        Self::AddMissingObject,
         Self::RetryImageLoad,
         Self::TogglePanMode,
         Self::ZoomIn,
@@ -117,7 +119,8 @@ impl UserAction {
             | Self::AcceptPrelabel
             | Self::DiscardPrelabel
             | Self::ToggleKeypointHidden
-            | Self::MarkKeypointAbsent => ActionContext::AnnotateImage,
+            | Self::MarkKeypointAbsent
+            | Self::AddMissingObject => ActionContext::AnnotateImage,
             Self::AcceptReviewObject | Self::RejectReviewObject => ActionContext::Review,
             Self::SelectBoundingBoxTool | Self::SelectKeypointTool | Self::ToggleOfflineMode => {
                 ActionContext::Legacy
@@ -264,6 +267,7 @@ impl KeybindingSet {
         bindings.insert(UserAction::DiscardPrelabel, KeyChord::new("D"));
         bindings.insert(UserAction::ToggleKeypointHidden, KeyChord::new("H"));
         bindings.insert(UserAction::MarkKeypointAbsent, KeyChord::new("N"));
+        bindings.insert(UserAction::AddMissingObject, KeyChord::new("M"));
         bindings.insert(UserAction::RetryImageLoad, KeyChord::new("R"));
         bindings.insert(UserAction::TogglePanMode, KeyChord::new("P"));
         bindings.insert(UserAction::ZoomIn, KeyChord::new("+"));
@@ -469,6 +473,10 @@ mod tests {
         assert_eq!(
             bindings.bindings[&UserAction::MarkKeypointAbsent].normalized(),
             bindings.bindings[&UserAction::RejectReviewObject].normalized()
+        );
+        assert_eq!(
+            bindings.bindings[&UserAction::AddMissingObject],
+            KeyChord::new("M")
         );
     }
 

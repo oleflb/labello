@@ -30,6 +30,104 @@ struct MigrationPair {
 }
 
 #[tokio::test]
+async fn full_image_migration_accepts_and_binds_a_discovered_skeleton() {
+    let fixture = fixture(ReviewWorkflow::None, 0).await;
+    let assignment = fixture
+        .repository
+        .assign_next_image(
+            &fixture.annotator,
+            &fixture.task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let initial = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    assert_eq!(initial.cursor, MigrationCursor::FullImage);
+    let initial_hash = initial
+        .image_state
+        .current_migration_state_hash(&fixture.task_id)
+        .unwrap();
+
+    let added = fixture
+        .repository
+        .add_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            skeleton(0.7),
+            "add-discovered",
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.cursor, MigrationCursor::FullImage);
+    let annotation_id = added.annotation_id.clone().unwrap();
+    let annotation = added
+        .image_state
+        .current_annotation(&annotation_id)
+        .unwrap();
+    assert!(annotation.object_group_id.is_none());
+    assert!(matches!(
+        annotation.origin,
+        AnnotationOrigin::Native { legacy_v2: false }
+    ));
+    let state_hash = added
+        .image_state
+        .current_migration_state_hash(&fixture.task_id)
+        .unwrap();
+    assert_ne!(state_hash, initial_hash);
+
+    let retried = fixture
+        .repository
+        .add_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            skeleton(0.7),
+            "add-discovered",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retried.image_state.current_sequence,
+        added.image_state.current_sequence
+    );
+
+    let target_hash = added.image_state.migration_target_sets[&fixture.task_id]
+        .target_set_hash
+        .clone();
+    let confirmation_hash = migration_confirmation_hash(&target_hash, &state_hash).unwrap();
+    let completed = fixture
+        .repository
+        .confirm_and_submit_migration(
+            &fixture.annotator,
+            context(&assignment),
+            &target_hash,
+            &state_hash,
+            &confirmation_hash,
+            "confirm-discovered",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.image_state.task_states[&fixture.task_id].status,
+        TaskStatus::Completed
+    );
+    assert_eq!(
+        completed
+            .image_state
+            .current_annotation(&annotation_id)
+            .unwrap()
+            .geometry,
+        AnnotationGeometry::Skeleton(skeleton(0.7))
+    );
+}
+
+#[tokio::test]
 async fn migration_commands_are_canonical_idempotent_atomic_and_replayable() {
     let fixture = fixture(ReviewWorkflow::None, 2).await;
     let assignment = fixture

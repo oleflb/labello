@@ -18,6 +18,7 @@ impl LabelloApp {
                             self.work.migration.cursor = result.cursor;
                             self.work.migration.inspected_group_id = None;
                             self.work.migration.pending_revisit_target = None;
+                            self.work.migration.adding_missing_object = false;
                             self.work.migration.progress = Some(result.progress);
                             self.work.migration.active_pass_id =
                                 result.active_pass.map(|pass| pass.pass_id);

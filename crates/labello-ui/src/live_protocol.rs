@@ -23,6 +23,7 @@ pub(crate) enum ReviewPhase {
 #[derive(Debug)]
 pub(crate) enum MigrationAction {
     SaveSkeleton(labello_client::SaveMigrationSkeletonRequest),
+    AddSkeleton(labello_client::AddMigrationSkeletonRequest),
     Exclude(labello_client::ExcludeMigrationTargetRequest),
     Reopen(labello_client::ReopenMigrationTargetRequest),
     Revisit(labello_client::RevisitMigrationTargetRequest),

@@ -1849,7 +1849,7 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
 
     let correction_exclude = labello_client::ExcludeMigrationTargetRequest {
         assignment_id: assignment.assignment_id.clone(),
-        pass_id: Some(pass_id),
+        pass_id: Some(pass_id.clone()),
         target: migration_expectation(&reopened.image_state, &fixture.task_id, &fixture.targets[1]),
         reason: labello_domain::MigrationExclusionReason::NoValidSkeleton,
         note: None,
@@ -1881,10 +1881,52 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
     );
     assert_eq!(retry.image_state.current_sequence, sequence);
 
-    let target_hash = corrected.image_state.migration_target_sets[&fixture.task_id]
+    let add_missing = labello_client::AddMigrationSkeletonRequest {
+        assignment_id: assignment.assignment_id.clone(),
+        pass_id: Some(pass_id),
+        task_id: fixture.task_id.clone(),
+        skeleton: migration_skeleton(0.8),
+    };
+    let discovered = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons",
+            Some("add-missing"),
+            &add_missing,
+        )
+        .await,
+    );
+    assert_eq!(
+        discovered.cursor,
+        Some(labello_domain::MigrationCursor::FullImage)
+    );
+    let discovered_id = discovered.annotation_id.clone().unwrap();
+    assert!(
+        discovered
+            .image_state
+            .current_annotation(&discovered_id)
+            .unwrap()
+            .object_group_id
+            .is_none()
+    );
+    let sequence = discovered.image_state.current_sequence;
+    let retry = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons",
+            Some("add-missing"),
+            &add_missing,
+        )
+        .await,
+    );
+    assert_eq!(retry.image_state.current_sequence, sequence);
+
+    let target_hash = discovered.image_state.migration_target_sets[&fixture.task_id]
         .target_set_hash
         .clone();
-    let state_hash = corrected
+    let state_hash = discovered
         .image_state
         .current_migration_state_hash(&fixture.task_id)
         .unwrap();

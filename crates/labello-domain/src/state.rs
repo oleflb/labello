@@ -4,14 +4,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdjudicationRecord, AnnotationId, AnnotationOrigin, AnnotationVersion, Assignment,
-    AssignmentKind, AssignmentStatus, DomainError, DomainResult, EventLogEntry, EventPayload,
-    HumanRevisionKind, ImageId, ImportCoverage, ImportId, MigrationConfirmation,
+    AdjudicationRecord, AnnotationId, AnnotationOrigin, AnnotationType, AnnotationVersion,
+    Assignment, AssignmentKind, AssignmentStatus, DomainError, DomainResult, EventLogEntry,
+    EventPayload, HumanRevisionKind, ImageId, ImportCoverage, ImportId, MigrationConfirmation,
     MigrationDependencyKind, MigrationDependencyMarker, MigrationDisposition,
     MigrationDispositionStatus, MigrationHashContext, MigrationHashStateTarget, MigrationPass,
     MigrationPassId, MigrationTargetSetInitialization, ObjectGroupId, ReviewDecision, ReviewRecord,
     ReviewTarget, ReviewerCorrectionRecord, RevisionSource, SCHEMA_VERSION, TaskId, TaskOutcome,
-    TaskState, TaskStatus, migration_confirmation_hash, migration_state_hash,
+    TaskState, TaskStatus, migration_confirmation_hash, migration_state_hash_with_discovered,
     migration_target_set_hash,
 };
 

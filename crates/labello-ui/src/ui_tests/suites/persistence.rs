@@ -429,6 +429,8 @@ fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
 fn shortcut_settings_cancel_discards_the_draft() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
+    let baseline =
+        harness.state().work.keybindings.bindings[&labello_domain::UserAction::NextImage].clone();
     click_application_menu_item(&mut harness, "Settings");
     click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     harness.key_press(egui::Key::Escape);
@@ -450,8 +452,8 @@ fn shortcut_settings_cancel_discards_the_draft() {
 
     assert!(!harness.state().work.show_settings);
     assert_eq!(
-        harness.state().work.keybindings.bindings[&labello_domain::UserAction::NextImage].key,
-        "ArrowRight"
+        harness.state().work.keybindings.bindings[&labello_domain::UserAction::NextImage],
+        baseline
     );
 }
 

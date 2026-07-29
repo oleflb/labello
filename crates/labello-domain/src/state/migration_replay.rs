@@ -355,7 +355,7 @@ impl ImageState {
                         MigrationDispositionStatus::Annotated { .. }
                     )
             });
-            if !expected {
+            if !expected && !is_discovered_migration_skeleton(annotation) {
                 return Err(DomainError::InvalidMigration(format!(
                     "task {task_id} contains an unexpected migration skeleton {}",
                     annotation.annotation_id
@@ -414,6 +414,27 @@ impl ImageState {
                 disposition: &dispositions[&target.object_group_id],
             });
         }
-        migration_state_hash(&set.target_set_hash, &values)
+        let discovered = self
+            .active_annotations()
+            .filter(|annotation| {
+                annotation.task_id == *task_id && is_discovered_migration_skeleton(annotation)
+            })
+            .collect::<Vec<_>>();
+        migration_state_hash_with_discovered(&set.target_set_hash, &values, &discovered)
     }
+}
+
+fn is_discovered_migration_skeleton(annotation: &AnnotationVersion) -> bool {
+    annotation.object_group_id.is_none()
+        && annotation.annotation_type == AnnotationType::Skeleton
+        && matches!(
+            annotation.origin,
+            AnnotationOrigin::Native { legacy_v2: false }
+        )
+        && matches!(
+            annotation.revision_source,
+            RevisionSource::Human {
+                action: HumanRevisionKind::Authored | HumanRevisionKind::Edited
+            }
+        )
 }

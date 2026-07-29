@@ -132,6 +132,110 @@ fn migration_previous_objects_are_read_only_until_explicitly_revisited() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_full_image_can_add_an_object_missing_from_the_import() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    app.work.inspector_panel_collapsed = true;
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+
+    let add_action = harness.get_by_label("Add missing object M").rect();
+    harness.key_press(egui::Key::M);
+    harness.step();
+    assert!(harness.state().work.migration.adding_missing_object);
+    let cancel_action = harness.get_by_label("Cancel adding object M").rect();
+    assert!(
+        (add_action.left() - cancel_action.left()).abs() <= 1.0
+            && (add_action.top() - cancel_action.top()).abs() <= 1.0,
+        "add={add_action:?} cancel={cancel_action:?}"
+    );
+    click_accesskit_button(&mut harness, "Cancel adding object");
+    harness.step();
+    assert!(!harness.state().work.migration.adding_missing_object);
+    assert!(harness.query_by_label("Add missing object M").is_some());
+
+    harness.key_press(egui::Key::M);
+    harness.step();
+    assert!(harness.state().work.migration.adding_missing_object);
+    harness.key_press(egui::Key::M);
+    harness.step();
+    assert!(!harness.state().work.migration.adding_missing_object);
+    assert!(harness.query_by_label("Add missing object M").is_some());
+    harness.key_press(egui::Key::M);
+    harness.step();
+    assert!(harness.state().work.migration.adding_missing_object);
+    assert!(
+        harness
+            .query_by_label_contains("Save missing object")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    let keypoint_count = {
+        let draft = harness.state_mut().work.migration.draft.as_mut().unwrap();
+        for keypoint in &mut draft.keypoints {
+            keypoint.point = Some(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
+            keypoint.state = labello_domain::KeypointState::Visible;
+        }
+        draft.keypoints.len()
+    };
+    harness.state_mut().work.migration.keypoint_index = keypoint_count;
+    harness.state_mut().work.migration.draft_dirty = true;
+    harness.step();
+    assert!(
+        !harness
+            .query_by_label_contains("Save missing object")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    click_accesskit_button(&mut harness, "Save missing object");
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(!harness.state().work.migration.adding_missing_object);
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::FullImage)
+    ));
+    let task_id = harness.state().work.selected_task_id.as_ref().unwrap();
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .current_state
+            .as_ref()
+            .unwrap()
+            .active_annotations()
+            .filter(|annotation| {
+                annotation.task_id == *task_id
+                    && annotation.object_group_id.is_none()
+                    && annotation.annotation_type == labello_domain::AnnotationType::Skeleton
+            })
+            .count(),
+        1
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Add missing object")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn migration_skip_requires_confirmation_before_discarding_a_local_draft() {
     use crate::inspector_presets::{self, InspectorPreset};
 
@@ -322,7 +426,7 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
     harness.step();
     let previews_before = api.counts().get_image_preview;
 
-    harness.key_press(egui::Key::ArrowRight);
+    harness.key_press(egui::Key::Space);
     harness.step();
     step_until(&mut harness, 8, |app| {
         !app.work.migration.busy
@@ -356,7 +460,7 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
         .with_size(egui::vec2(390.0, 667.0))
         .build_eframe(|ctx| {
             inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
-    });
+        });
     object.step();
     assert!(object.query_by_label_contains("Save & next").is_some());
     assert!(object.query_by_label("Workflow").is_some());
@@ -385,13 +489,12 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
         object.set_size(egui::vec2(width, 667.0));
         object.step();
         let canvas = object.get_by_label("Annotation canvas").rect();
-        for label in [
-            "Save & next Right",
-            "Undo last keypoint",
-            "More",
-            "Workflow",
-            "Inspector",
-        ] {
+        let primary = object.get_by_label_contains("Save & next").rect();
+        assert!(
+            canvas.bottom() <= primary.top(),
+            "width={width} canvas={canvas:?} primary={primary:?}"
+        );
+        for label in ["Undo last keypoint", "More", "Workflow", "Inspector"] {
             let action = object.get_by_label(label).rect();
             assert!(
                 canvas.bottom() <= action.top(),
@@ -514,10 +617,32 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
             .query_by_label_contains("Confirm & finish")
             .is_some()
     );
+    assert!(
+        full_image
+            .query_by_label_contains("Add missing object")
+            .is_some()
+    );
     assert!(full_image.query_by_label("Workflow").is_some());
     assert!(full_image.query_by_label("Inspector").is_some());
     assert!(full_image.query_by_label("Controls").is_none());
     assert!(full_image.state().work.drawer.is_none());
+
+    let mut wide_full_image = Harness::builder()
+        .with_size(egui::vec2(1318.0, 900.0))
+        .build_eframe(|ctx| {
+            let mut app =
+                inspector_presets::build(InspectorPreset::MigrationFullImage, &ctx.egui_ctx);
+            app.work.inspector_panel_collapsed = true;
+            app
+        });
+    wide_full_image.step();
+    for label in ["Add missing object", "Confirm all guides & finish"] {
+        let action = wide_full_image.get_by_label_contains(label).rect();
+        assert!(
+            action.right() <= 1318.0 && action.bottom() <= 900.0,
+            "{label} must remain fully visible at the narrowest wide desktop size: {action:?}"
+        );
+    }
 }
 
 #[cfg(feature = "inspector-presets")]
@@ -529,6 +654,10 @@ fn migration_save_uses_the_contextual_submit_shortcut() {
     let api = Rc::new(SpyApi::new());
     let mut app =
         inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    app.work.keybindings.bindings.insert(
+        labello_domain::UserAction::NextImage,
+        labello_domain::KeyChord::new("ArrowRight"),
+    );
     let task = app.selected_task().unwrap().clone();
     let group_id = match app.work.migration.cursor.as_ref().unwrap() {
         labello_domain::MigrationCursor::Object {

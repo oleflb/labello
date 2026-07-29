@@ -6,12 +6,12 @@ use axum::{
     response::IntoResponse,
 };
 use labello_client::{
-    AppendEventRequest, AssignNextRequest, AssignmentActionRequest, AssignmentAvailability,
-    AssignmentAvailabilityEntry, AssignmentAvailabilityRequest, ConfirmMigrationRequest,
-    CorrectionRequest, ExcludeMigrationTargetRequest, KeepMigrationTargetRequest,
-    ManualMigrationCommandResult, OfflineBundleRequest, PrelabelSuggestionRequest,
-    ReopenMigrationTargetRequest, ReviewMigrationRequest, RevisitMigrationTargetRequest,
-    SaveMigrationSkeletonRequest, StartMigrationPassRequest,
+    AddMigrationSkeletonRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
+    AssignmentAvailability, AssignmentAvailabilityEntry, AssignmentAvailabilityRequest,
+    ConfirmMigrationRequest, CorrectionRequest, ExcludeMigrationTargetRequest,
+    KeepMigrationTargetRequest, ManualMigrationCommandResult, OfflineBundleRequest,
+    PrelabelSuggestionRequest, ReopenMigrationTargetRequest, ReviewMigrationRequest,
+    RevisitMigrationTargetRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
 };
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationType, Assignment, AssignmentKind,
@@ -491,6 +491,40 @@ pub(crate) async fn save_migration_skeleton(
             migration_context(&assignment, &image_id),
             request.pass_id.as_ref(),
             &expected,
+            request.skeleton,
+            key,
+        )
+        .await?;
+    Ok(Json(client_migration_result(result)))
+}
+
+pub(crate) async fn add_migration_skeleton(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<AddMigrationSkeletonRequest>,
+) -> ApiResult<Json<ManualMigrationCommandResult>> {
+    let key = migration_idempotency_key(&headers)?;
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let assignment = migration_assignment(
+        &repo,
+        &image_id,
+        &request.assignment_id,
+        &actor,
+        DatasetRole::Annotator,
+    )
+    .await?;
+    let result = repo
+        .add_migration_skeleton(
+            &actor.user_id,
+            AssignmentContext {
+                assignment_id: &assignment.assignment_id,
+                image_id: &image_id,
+                task_id: &request.task_id,
+                kind: AssignmentKind::Annotation,
+            },
+            request.pass_id.as_ref(),
             request.skeleton,
             key,
         )

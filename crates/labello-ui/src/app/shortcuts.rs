@@ -169,6 +169,10 @@ impl LabelloApp {
                     }
                     return;
                 }
+                UserAction::AddMissingObject => {
+                    self.trigger_missing_migration_object_action();
+                    return;
+                }
                 UserAction::UndoEdit | UserAction::DeleteAnnotation => {
                     if self.work.migration.inspected_group_id.is_none() {
                         self.remove_last_migration_keypoint();
@@ -339,6 +343,7 @@ impl LabelloApp {
             }
             UserAction::SelectBoundingBoxTool
             | UserAction::SelectKeypointTool
+            | UserAction::AddMissingObject
             | UserAction::ToggleOfflineMode => {}
             _ => {}
         }

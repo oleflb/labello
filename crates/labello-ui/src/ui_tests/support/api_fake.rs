@@ -631,6 +631,43 @@ impl ImportApi for SpyApi {
         self.migration_result(dataset_id, image_id)
     }
 
+    fn add_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: labello_client::AddMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        let annotation_id = labello_domain::AnnotationId::from("spy-discovered");
+        let image_state = state.states.get_mut(image_id).unwrap();
+        image_state.annotations.insert(
+            annotation_id.clone(),
+            vec![labello_domain::AnnotationVersion::native(
+                annotation_id.clone(),
+                request.task_id.clone(),
+                labello_domain::ClassId::from("person"),
+                labello_domain::AnnotationType::Skeleton,
+                labello_domain::AnnotationGeometry::Skeleton(request.skeleton),
+                labello_domain::UserId::from("admin"),
+                labello_domain::now(),
+            )],
+        );
+        let image_state = image_state.clone();
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            progress: migration_progress(&image_state, &request.task_id),
+            image_state,
+            cursor: Some(labello_domain::MigrationCursor::FullImage),
+            active_pass: request
+                .pass_id
+                .and_then(|pass_id| state.states[image_id].migration_passes.get(&pass_id).cloned()),
+            confirmation: None,
+            assignment: None,
+            annotation_id: Some(annotation_id),
+        }))
+    }
+
     fn exclude_migration_target<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

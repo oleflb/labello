@@ -26,8 +26,9 @@ impl eframe::App for LabelloApp {
         let viewport = ui.available_size();
         let layout = LayoutMode::for_width(ui.available_width());
         let workflow_panel_width = self.workflow_panel_width(ui.ctx());
-        let compact_action_height = (self.work_view() && layout != LayoutMode::Wide)
-            .then(|| self.workspace_actions_height(layout, viewport));
+        let compact_action_height = (self.work_view()
+            && (layout != LayoutMode::Wide || self.manual_migration_active()))
+        .then(|| self.workspace_actions_height(layout, viewport));
         egui::Panel::top("app_bar")
             .exact_size(56.0)
             .frame(theme::top_bar_frame().inner_margin(egui::Margin::symmetric(14, 6)))

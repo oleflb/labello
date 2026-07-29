@@ -1002,10 +1002,21 @@ unresolved dependency or correction-required marker, and no unhandled item in
 an active correction pass. The canvas automatically fits the complete image at
 zoom `1.0` with zero pan and shows all boxes, grouped skeletons, and excluded
 boxes with non-color-only status styling. Summary counts show expected,
-annotated, excluded, and pending groups. The overview is non-selecting: `Review
-items again` starts a sequential correction pass in the same canonical order,
-while `Confirm and submit` records the full-image confirmation and submits the
-task. No task can be submitted directly from an object phase.
+annotated, excluded, and pending groups. The overview does not permit selecting
+or changing imported-guide dispositions, but `Add missing object` can create a
+human-authored skeleton for an object omitted by the imported labels without
+requiring a guide box. `Review items again` starts a sequential correction pass
+in the same canonical order, while `Confirm and submit` records the full-image
+confirmation and submits the task. No task can be submitted directly from an
+object phase.
+
+A skeleton discovered during full-image review has native human provenance and
+no imported object-group ID. It is created only through the assigned migration
+command while the authoritative cursor is `FullImage`; ordinary annotation,
+offline-sync, and admin-repair paths remain unavailable for migration tasks.
+Discovered annotation IDs and versions are included in the migration state
+digest, so adding or changing one invalidates a prior confirmation. With no
+discovered skeletons, the historical version-1 state digest remains unchanged.
 
 The correction pass starts at the first sequence index regardless of current
 disposition. It automatically focuses each guide and offers `Keep`, edit or
@@ -1952,6 +1963,8 @@ out of scope.
 - The last resolved guide triggers a fitted non-selecting full-image phase;
   stale disposition changes invalidate confirmation, and `Review items again`
   starts the canonical sequential correction pass.
+- Full-image annotation can add a human skeleton for an object missing from the
+  imported guide set, and the resulting annotation is bound into confirmation.
 - A correction pass advances through replayed exact-version `Keep` or mutation
   actions, survives reload, and keeps a reopened exclusion focused until it is
   annotated or excluded again.
@@ -1995,7 +2008,8 @@ out of scope.
 - In manual box-guide migration, each expected imported box has exactly one
   active human skeleton or one current audited exclusion before submission;
   excluding a box never deletes or changes it and never creates an all-absent
-  skeleton.
+  skeleton. The final overview may additionally contain human-authored
+  skeletons for objects that were absent from the imported guide set.
 - Exact-one manual migration cannot be configured over incomplete or derived
   bounding-box coverage, direct source skeletons, independent-agreement review,
   or reviewer-correction mode.

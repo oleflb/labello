@@ -91,6 +91,7 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
         UserAction::DiscardPrelabel => "Discard active prelabel",
         UserAction::ToggleKeypointHidden => "Toggle keypoint hidden",
         UserAction::MarkKeypointAbsent => "Mark keypoint absent",
+        UserAction::AddMissingObject => "Add or cancel missing migration object",
         UserAction::RetryImageLoad => "Retry image load",
         UserAction::TogglePanMode => "Toggle Pan mode",
         UserAction::ZoomIn => "Zoom in",
@@ -123,7 +124,8 @@ fn action_category(action: labello_domain::UserAction) -> &'static str {
         | UserAction::SelectNextObject
         | UserAction::DeleteAnnotation
         | UserAction::ToggleKeypointHidden
-        | UserAction::MarkKeypointAbsent => "Annotation",
+        | UserAction::MarkKeypointAbsent
+        | UserAction::AddMissingObject => "Annotation",
         UserAction::SelectPreviousPrelabel
         | UserAction::SelectNextPrelabel
         | UserAction::AcceptPrelabel
@@ -167,6 +169,9 @@ fn action_description(action: labello_domain::UserAction) -> &'static str {
         UserAction::DiscardPrelabel => "Hide the active suggestion.",
         UserAction::ToggleKeypointHidden => "Toggle visibility for the next keypoint.",
         UserAction::MarkKeypointAbsent => "Skip an allowed optional keypoint.",
+        UserAction::AddMissingObject => {
+            "Begin or cancel a skeleton for an object missing from the imported data."
+        }
         UserAction::RetryImageLoad => "Try to claim and load an image again.",
         UserAction::TogglePanMode => "Use primary drag to move a zoomed image.",
         UserAction::ZoomIn => "Increase canvas magnification.",

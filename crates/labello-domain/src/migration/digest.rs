@@ -1,4 +1,5 @@
 use super::*;
+use crate::AnnotationVersion;
 
 pub fn migration_target_set_hash(
     context: &MigrationHashContext<'_>,
@@ -82,6 +83,42 @@ pub fn migration_state_hash(
                 encoder.string(exclusion.event_id.as_str())?;
             }
         }
+    }
+    Ok(encoder.finish())
+}
+
+/// Extends the canonical migration state digest with human-discovered
+/// skeletons that do not have an imported guide. The original v1 digest is
+/// retained byte-for-byte when there are no discovered skeletons.
+pub fn migration_state_hash_with_discovered(
+    target_set_hash: &MigrationHash,
+    targets: &[MigrationHashStateTarget<'_>],
+    discovered: &[&AnnotationVersion],
+) -> DomainResult<MigrationHash> {
+    let base = migration_state_hash(target_set_hash, targets)?;
+    if discovered.is_empty() {
+        return Ok(base);
+    }
+
+    let mut ordered = discovered.to_vec();
+    ordered.sort_by(|left, right| left.annotation_id.cmp(&right.annotation_id));
+    if ordered
+        .windows(2)
+        .any(|pair| pair[0].annotation_id == pair[1].annotation_id)
+    {
+        return Err(DomainError::InvalidMigration(
+            "duplicate discovered migration skeleton".to_string(),
+        ));
+    }
+
+    let mut encoder = CanonicalHashEncoder::new(b"labello:migration-state-discovered:v1\0");
+    encoder.raw(&base.bytes()?);
+    encoder.u32(ordered.len().try_into().map_err(|_| {
+        DomainError::InvalidMigration("too many discovered migration skeletons".to_string())
+    })?);
+    for annotation in ordered {
+        encoder.string(annotation.annotation_id.as_str())?;
+        encoder.u32(annotation.version);
     }
     Ok(encoder.finish())
 }

@@ -242,6 +242,22 @@ impl ImportApi for HttpLabelloApi {
         self.migration_json(dataset_id, image_id, "skeleton", request, idempotency_key)
     }
 
+    fn add_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::AddMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        self.migration_json(
+            dataset_id,
+            image_id,
+            "skeletons",
+            request,
+            idempotency_key,
+        )
+    }
+
     fn exclude_migration_target<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

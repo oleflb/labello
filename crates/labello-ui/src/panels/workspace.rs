@@ -245,7 +245,7 @@ impl LabelloApp {
                 if current.is_some() {
                     self.canvas_controls(ui, layout);
                 }
-                if layout == LayoutMode::Wide {
+                if layout == LayoutMode::Wide && !self.manual_migration_active() {
                     ui.separator();
                     self.workspace_actions(ui, layout);
                 }

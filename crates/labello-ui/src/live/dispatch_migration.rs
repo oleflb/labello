@@ -17,6 +17,10 @@ impl LabelloApp {
                         api.save_migration_skeleton(&dataset_id, &image_id, body, &idempotency_key)
                             .await
                     }
+                    crate::app::MigrationAction::AddSkeleton(body) => {
+                        api.add_migration_skeleton(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
                     crate::app::MigrationAction::Exclude(body) => {
                         api.exclude_migration_target(&dataset_id, &image_id, body, &idempotency_key)
                             .await

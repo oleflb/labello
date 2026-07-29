@@ -1100,6 +1100,28 @@ impl fmt::Debug for SaveMigrationSkeletonRequest {
     }
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddMigrationSkeletonRequest {
+    pub assignment_id: AssignmentId,
+    #[serde(default)]
+    pub pass_id: Option<MigrationPassId>,
+    pub task_id: TaskId,
+    pub skeleton: SkeletonGeometry,
+}
+
+impl fmt::Debug for AddMigrationSkeletonRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AddMigrationSkeletonRequest")
+            .field("assignment_id", &self.assignment_id)
+            .field("pass_id", &self.pass_id)
+            .field("task_id", &self.task_id)
+            .field("skeleton", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExcludeMigrationTargetRequest {

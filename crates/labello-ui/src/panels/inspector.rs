@@ -28,7 +28,9 @@ impl LabelloApp {
     pub(crate) fn right_panel(&mut self, ui: &mut egui::Ui, show_primary_actions: bool) {
         ui.heading(RichText::new("Inspector").color(theme::TEXT));
         if self.manual_migration_active() {
-            self.manual_migration_actions(ui, show_primary_actions);
+            // Migration commands live in the persistent workspace action bar so
+            // collapsing this optional panel never hides the current action.
+            self.manual_migration_actions(ui, false);
             return;
         }
         let active_count = self

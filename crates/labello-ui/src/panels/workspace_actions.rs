@@ -5,8 +5,8 @@ impl LabelloApp {
         }
         if self.manual_migration_active() {
             let icon_only = ui.available_width() < 432.0;
+            self.migration_workspace_actions(ui, false);
             if layout != LayoutMode::Wide {
-                self.migration_workspace_actions(ui, false);
                 self.drawer_panel_buttons(ui, icon_only);
             }
             return;

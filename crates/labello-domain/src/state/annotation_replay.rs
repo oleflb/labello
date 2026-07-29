@@ -226,7 +226,7 @@ impl ImageState {
     }
 
     pub(super) fn invalidate_migration_target_annotation(&mut self, annotation_id: &AnnotationId) {
-        let affected = self
+        let mut affected = self
             .migration_target_sets
             .iter()
             .filter(|(_, set)| {
@@ -237,6 +237,13 @@ impl ImageState {
             })
             .map(|(task_id, _)| task_id.clone())
             .collect::<Vec<_>>();
+        if let Some(annotation) = self.current_annotation(annotation_id)
+            && self.migration_target_sets.contains_key(&annotation.task_id)
+        {
+            affected.push(annotation.task_id.clone());
+        }
+        affected.sort();
+        affected.dedup();
         for task_id in affected {
             self.migration_confirmations.remove(&task_id);
         }
@@ -262,6 +269,18 @@ impl ImageState {
                 })
             })
             .collect::<Vec<_>>();
+        if let Some(task_id) = self
+            .current_annotation(annotation_id)
+            .map(|annotation| annotation.task_id.clone())
+            && self.migration_target_sets.contains_key(&task_id)
+            && !affected
+                .iter()
+                .any(|(affected_task_id, _, _)| affected_task_id == &task_id)
+        {
+            // Discovered skeletons have no migration disposition to update,
+            // but their removal still invalidates a prior full-image digest.
+            self.migration_confirmations.remove(&task_id);
+        }
         for (task_id, group_id, guide) in affected {
             if guide {
                 let version = self
