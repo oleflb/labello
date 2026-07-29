@@ -1,6 +1,7 @@
 //! Filesystem-backed persistence for Labello datasets.
 
 pub mod assignment;
+mod completion_projection;
 pub mod error;
 pub mod fsjson;
 pub mod fstoml;

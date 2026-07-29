@@ -17,12 +17,15 @@ use labello_domain::{
     rebuild_state,
 };
 use parking_lot::Mutex;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock},
 };
 
 use crate::{
+    completion_projection::TaskCompletionCache,
     error::{PathIo, PathJson, PathTomlEncode, StorageError, StorageResult},
     fsjson::{
         create_dir_all_synced, read_current_json, read_json, read_schema_version,
@@ -52,9 +55,10 @@ pub struct DatasetRepository {
     locks: Arc<Mutex<BTreeMap<ImageId, Arc<AsyncMutex<()>>>>>,
     migration_lock: Arc<AsyncMutex<()>>,
     migration_complete: Arc<AtomicBool>,
-    images_index_cache: Arc<AsyncRwLock<Option<Arc<ImagesIndex>>>>,
+    pub(crate) images_index_cache: Arc<AsyncRwLock<Option<Arc<ImagesIndex>>>>,
     pub(crate) assignment_cursors: Arc<Mutex<BTreeMap<String, usize>>>,
     pub(crate) stats_cache: Arc<StatsCache>,
+    pub(crate) task_completion_cache: Arc<TaskCompletionCache>,
     pub(crate) assignment_availability_cache: Arc<AssignmentAvailabilityCache>,
     #[cfg(test)]
     migration_failure: Arc<Mutex<Option<ArtifactMigrationPhase>>>,
@@ -64,6 +68,17 @@ pub struct DatasetRepository {
     event_loads: Arc<AtomicU64>,
     #[cfg(test)]
     images_index_loads: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) completion_commit_pause: Arc<AsyncMutex<Option<Arc<CompletionCommitPause>>>>,
+    #[cfg(test)]
+    pub(crate) fail_state_cache_write_after_completion: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct CompletionCommitPause {
+    pub(crate) started: Notify,
+    pub(crate) resume: Notify,
 }
 
 impl DatasetRepository {
@@ -76,6 +91,7 @@ impl DatasetRepository {
             images_index_cache: Arc::new(AsyncRwLock::new(None)),
             assignment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             stats_cache: Arc::new(StatsCache::default()),
+            task_completion_cache: Arc::new(TaskCompletionCache::default()),
             assignment_availability_cache: Arc::new(AssignmentAvailabilityCache::default()),
             #[cfg(test)]
             migration_failure: Arc::new(Mutex::new(None)),
@@ -85,6 +101,10 @@ impl DatasetRepository {
             event_loads: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             images_index_loads: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            completion_commit_pause: Arc::new(AsyncMutex::new(None)),
+            #[cfg(test)]
+            fail_state_cache_write_after_completion: Arc::new(AtomicBool::new(false)),
         }
     }
 }

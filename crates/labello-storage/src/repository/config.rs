@@ -2,6 +2,9 @@ use super::*;
 
 impl DatasetRepository {
     pub async fn initialize(&self, mut metadata: DatasetMetadata) -> StorageResult<()> {
+        if let Some(config) = metadata.imbalance.as_ref() {
+            crate::completion_projection::validated_max_ratio(config)?;
+        }
         self.ensure_layout().await?;
         metadata.schema_version = SCHEMA_VERSION;
         metadata.updated_at = now();
@@ -58,6 +61,9 @@ impl DatasetRepository {
     pub async fn save_dataset(&self, metadata: &DatasetMetadata) -> StorageResult<()> {
         self.ensure_artifact_migration().await?;
         labello_domain::validate_schema_version(metadata.schema_version)?;
+        if let Some(config) = metadata.imbalance.as_ref() {
+            crate::completion_projection::validated_max_ratio(config)?;
+        }
         write_toml_atomic(
             &self.dataset_path(),
             &DatasetConfig::from_metadata(metadata),
@@ -72,7 +78,7 @@ impl DatasetRepository {
         Ok(self.load_images_index_shared().await?.as_ref().clone())
     }
 
-    async fn load_images_index_shared(&self) -> StorageResult<Arc<ImagesIndex>> {
+    pub(crate) async fn load_images_index_shared(&self) -> StorageResult<Arc<ImagesIndex>> {
         self.ensure_artifact_migration().await?;
         if let Some(index) = self.images_index_cache.read().await.as_ref() {
             return Ok(index.clone());
@@ -123,9 +129,33 @@ impl DatasetRepository {
         let mut index = index.clone();
         index.image_count = index.images_by_hash.len();
         let mut cached = self.images_index_cache.write().await;
+        let previous = if let Some(previous) = cached.as_ref() {
+            previous.clone()
+        } else {
+            let path = self.images_index_path();
+            Arc::new(if tokio::fs::try_exists(&path).await.with_path(&path)? {
+                read_current_json(&path).await?
+            } else {
+                ImagesIndex::default()
+            })
+        };
+        let previous_image_ids = previous
+            .images_by_hash
+            .values()
+            .map(|record| record.image_id.clone())
+            .collect::<BTreeSet<_>>();
+        let next_image_ids = index
+            .images_by_hash
+            .values()
+            .map(|record| record.image_id.clone())
+            .collect::<BTreeSet<_>>();
         *cached = None;
         write_json_atomic(&self.images_index_path(), &index).await?;
         *cached = Some(Arc::new(index));
+        if previous_image_ids != next_image_ids {
+            self.task_completion_cache
+                .invalidate_membership("image_index_membership_changed");
+        }
         self.stats_cache.invalidate();
         self.assignment_availability_cache.invalidate();
         Ok(())

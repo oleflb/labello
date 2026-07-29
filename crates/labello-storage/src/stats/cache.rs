@@ -104,7 +104,7 @@ impl DatasetRepository {
     }
 
     #[cfg(test)]
-    pub(super) fn stats_scan_count(&self) -> u64 {
+    pub(crate) fn stats_scan_count(&self) -> u64 {
         self.stats_cache.scans.load(Ordering::Relaxed)
     }
 }

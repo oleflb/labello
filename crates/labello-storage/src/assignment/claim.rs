@@ -463,7 +463,9 @@ impl DatasetRepository {
             .imbalance
             .as_ref()
             .is_some_and(|config| config.enforce)
-            && self.task_is_overrepresented(&task.task_id).await?
+            && self
+                .task_is_overrepresented(metadata, &task.task_id, kind)
+                .await?
         {
             return Ok(false);
         }
@@ -515,34 +517,37 @@ impl DatasetRepository {
         Ok(true)
     }
 
-    async fn task_is_overrepresented(&self, selected_task_id: &TaskId) -> StorageResult<bool> {
-        let metadata = self.load_dataset().await?;
+    async fn task_is_overrepresented(
+        &self,
+        metadata: &DatasetMetadata,
+        selected_task_id: &TaskId,
+        kind: &AssignmentKind,
+    ) -> StorageResult<bool> {
         let Some(config) = metadata.imbalance.as_ref() else {
             return Ok(false);
         };
-        let stats = self.dataset_stats().await?;
-        let selected = stats
-            .per_task
-            .get(selected_task_id)
-            .map(|task| task.completed)
-            .unwrap_or_default();
-        let min_other = metadata
+        let max_ratio = crate::completion_projection::validated_max_ratio(config)?;
+        let counts = if *kind == AssignmentKind::Annotation {
+            self.task_annotation_counts().await?
+        } else {
+            self.task_completion_counts().await?
+        };
+        let selected = counts.get(selected_task_id).copied().unwrap_or_default();
+        let mut other_counts = metadata
             .tasks
             .iter()
-            .filter(|task| &task.task_id != selected_task_id)
-            .map(|task| {
-                stats
-                    .per_task
-                    .get(&task.task_id)
-                    .map(|stats| stats.completed)
-                    .unwrap_or_default()
-            })
-            .min()
-            .unwrap_or(0);
+            .filter(|task| task.enabled && &task.task_id != selected_task_id)
+            .map(|task| counts.get(&task.task_id).copied().unwrap_or_default());
+        let Some(min_other) = other_counts
+            .next()
+            .map(|first| other_counts.fold(first, usize::min))
+        else {
+            return Ok(false);
+        };
         if min_other == 0 {
-            Ok(selected > 0 && config.max_ratio <= 1.0)
+            Ok(selected > 0)
         } else {
-            Ok((selected as f32 / min_other as f32) > config.max_ratio)
+            Ok((selected as f64 / min_other as f64) > max_ratio)
         }
     }
 }

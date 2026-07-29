@@ -40,6 +40,7 @@ impl DatasetRepository {
     ) -> StorageResult<(Vec<EventLogEntry>, ImageState)> {
         // 1. Load the replay-validated cache base from the authoritative event log.
         let mut next_state = self.load_image_state(image_id).await?;
+        let previous_completion = self.completion_observation(&next_state);
         let timestamp = labello_domain::now();
         // 2. Let assignment/migration policy finish the complete event batch.
         crate::assignment::append_guide_invalidation_payloads(
@@ -63,9 +64,14 @@ impl DatasetRepository {
         }
         // 4. Atomically publish events.jsonl, the authoritative state transition.
         self.append_events_atomic(image_id, &events).await?;
-        // 5. Publish state.json only after the event log; it remains rebuildable.
+        // 5. Observe the authoritative transition synchronously. There must be no
+        // cancellation point between durable event publication and this update.
+        self.observe_completion_transition(image_id, previous_completion, &next_state);
+        #[cfg(test)]
+        self.completion_post_observation_test_hook().await?;
+        // 6. Publish state.json only after the event log; it remains rebuildable.
         write_json_atomic(&self.state_path(image_id), &next_state).await?;
-        // 6. Invalidate derived process-local caches after durable publication.
+        // 7. Invalidate other derived process-local caches after durable publication.
         if events.iter().any(stats_relevant_event) {
             self.stats_cache.invalidate();
         }

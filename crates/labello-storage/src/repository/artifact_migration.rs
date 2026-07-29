@@ -17,6 +17,8 @@ impl DatasetRepository {
             let journal: ArtifactMigrationJournal = read_json(&journal_path).await?;
             validate_artifact_migration_journal(&journal)?;
             if journal.phase == ArtifactMigrationPhase::Completed {
+                self.task_completion_cache
+                    .invalidate("artifact_migration_completed_recovery");
                 self.migration_complete.store(true, Ordering::Release);
                 return Ok(());
             }
@@ -74,6 +76,8 @@ impl DatasetRepository {
                 .await?;
         }
         self.stats_cache.invalidate();
+        self.task_completion_cache
+            .invalidate("artifact_migration_completed");
         self.assignment_availability_cache.invalidate();
         self.migration_complete.store(true, Ordering::Release);
         Ok(())

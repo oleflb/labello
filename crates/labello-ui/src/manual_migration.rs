@@ -2362,6 +2362,13 @@ fn migration_guide_style(
     current: bool,
     status: Option<&MigrationDispositionStatus>,
 ) -> CanvasAnnotationStyle {
+    if matches!(status, Some(MigrationDispositionStatus::Excluded { .. })) {
+        return if current {
+            CanvasAnnotationStyle::solid(theme::DANGER)
+        } else {
+            CanvasAnnotationStyle::dashed(theme::DANGER)
+        };
+    }
     if current {
         return CanvasAnnotationStyle::solid(theme::ACCENT_HOVER);
     }
@@ -2409,7 +2416,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migration_guide_styles_distinguish_active_annotated_and_pending_objects() {
+    fn migration_guide_styles_keep_the_active_exclusion_red_for_review() {
         assert_eq!(
             migration_guide_style(true, Some(&MigrationDispositionStatus::Pending)),
             CanvasAnnotationStyle::solid(theme::ACCENT_HOVER)
@@ -2427,6 +2434,24 @@ mod tests {
         assert_eq!(
             migration_guide_style(false, Some(&MigrationDispositionStatus::Pending)),
             CanvasAnnotationStyle::dashed(theme::TEXT_MUTED)
+        );
+        let excluded = MigrationDispositionStatus::Excluded {
+            exclusion: labello_domain::MigrationExclusion {
+                reason: MigrationExclusionReason::ObjectNotPresent,
+                event_id: labello_domain::EventId::from("evt-excluded"),
+                actor_user_id: labello_domain::UserId::from("annotator"),
+                timestamp: labello_domain::now(),
+                note: None,
+            },
+        };
+        assert_eq!(
+            migration_guide_style(true, Some(&excluded)),
+            CanvasAnnotationStyle::solid(theme::DANGER),
+            "the current Review target must keep its rejected/excluded color"
+        );
+        assert_eq!(
+            migration_guide_style(false, Some(&excluded)),
+            CanvasAnnotationStyle::dashed(theme::DANGER)
         );
     }
 }

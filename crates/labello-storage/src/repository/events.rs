@@ -23,6 +23,7 @@ impl DatasetRepository {
     pub async fn rebuild_image_state(&self, image_id: &ImageId) -> StorageResult<ImageState> {
         let events = self.load_events(image_id).await?;
         let state = rebuild_state(image_id.clone(), &events)?;
+        self.observe_authoritative_completion(&state);
         write_json_atomic(&self.state_path(image_id), &state).await?;
         if events.iter().any(stats_relevant_event) {
             self.stats_cache.invalidate();

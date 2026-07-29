@@ -944,6 +944,61 @@ async fn config_rejects_enabling_independent_agreement() {
 }
 
 #[tokio::test]
+async fn config_rejects_invalid_imbalance_ratio() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    let admin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/datasets/ds/admin")
+                .header("x-test-user-id", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(admin.into_body(), usize::MAX).await.unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let update = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/datasets/ds/admin")
+                .header("x-test-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": metadata["name"],
+                        "imageRoots": metadata["imageRoots"],
+                        "labelClasses": metadata["labelClasses"],
+                        "tasks": metadata["tasks"],
+                        "roleAssignments": metadata["roleAssignments"],
+                        "imbalance": {
+                            "maxRatio": 0.5,
+                            "enforce": true
+                        },
+                        "prelabelConfigs": metadata["prelabelConfigs"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(update.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&body)
+            .contains("imbalance maxRatio must be finite and at least 1.0")
+    );
+}
+
+#[tokio::test]
 async fn assign_next_uses_camel_case_json_body() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

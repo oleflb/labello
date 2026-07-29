@@ -352,6 +352,7 @@ impl DatasetRepository {
         events: &[EventLogEntry],
     ) -> StorageResult<usize> {
         let mut next_state = state.clone();
+        let previous_completion = self.completion_observation(&next_state);
         let mut resequenced = Vec::with_capacity(events.len());
         for original in events {
             let mut event = original.clone();
@@ -361,6 +362,7 @@ impl DatasetRepository {
             resequenced.push(event);
         }
         self.append_events_atomic(image_id, &resequenced).await?;
+        self.observe_completion_transition(image_id, previous_completion, &next_state);
         *state = next_state;
         crate::fsjson::write_json_atomic(&self.state_path(image_id), state).await?;
         if resequenced
