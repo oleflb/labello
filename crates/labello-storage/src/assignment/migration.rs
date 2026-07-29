@@ -169,7 +169,13 @@ impl DatasetRepository {
             .current_annotation(&target.reserved_skeleton_annotation_id)
             .cloned();
         let mut payloads = Vec::new();
-        if has_dependency(&state, context.task_id, &expected.object_group_id) {
+        let pending_dependency = state
+            .migration_dependencies
+            .get(context.task_id)
+            .and_then(|markers| markers.get(&expected.object_group_id))
+            .is_some_and(|marker| marker.kind == MigrationDependencyKind::ManualSelection);
+        if has_dependency(&state, context.task_id, &expected.object_group_id) && !pending_dependency
+        {
             make_dependency_clearable(
                 &mut state,
                 context.task_id,
@@ -249,6 +255,23 @@ impl DatasetRepository {
                 disposition: disposition.clone(),
             },
         )?;
+        if pending_dependency {
+            let marker_version = state.migration_dependencies[context.task_id]
+                [&expected.object_group_id]
+                .marker_version;
+            push_simulated(
+                &mut state,
+                &mut payloads,
+                user_id,
+                DatasetRole::Annotator,
+                now,
+                EventPayload::MigrationDependencyCleared {
+                    task_id: context.task_id.clone(),
+                    object_group_id: expected.object_group_id.clone(),
+                    marker_version,
+                },
+            )?;
+        }
         if let Some(pass_id) = pass_id {
             let item = pass_item(
                 &state,
@@ -722,17 +745,26 @@ impl DatasetRepository {
         if has_dependency(&state, context.task_id, &expected.object_group_id) {
             return Err(conflict("migration target already requires correction"));
         }
-        if matches!(
+        let pending = matches!(
             current_disposition(&state, context.task_id, &expected.object_group_id)?.status,
             MigrationDispositionStatus::Pending
-        ) {
-            return Err(conflict("pending migration target cannot be revisited"));
-        }
-        match state.migration_cursor(context.task_id, pass_id)? {
-            MigrationCursor::Object { sequence_index, .. }
+        );
+        match (pending, state.migration_cursor(context.task_id, pass_id)?) {
+            (
+                true,
+                MigrationCursor::Object {
+                    object_group_id, ..
+                },
+            ) if object_group_id != target.object_group_id => {}
+            (false, MigrationCursor::Object { sequence_index, .. })
                 if target.sequence_index < sequence_index => {}
-            MigrationCursor::FullImage => {}
-            _ => {
+            (false, MigrationCursor::FullImage) => {}
+            (true, _) => {
+                return Err(conflict(
+                    "pending migration target is already the current target",
+                ));
+            }
+            (false, _) => {
                 return Err(conflict(
                     "only a previously resolved migration target can be revisited",
                 ));
@@ -743,7 +775,9 @@ impl DatasetRepository {
             .ok_or_else(|| conflict("migration guide is missing"))?;
         let marker = labello_domain::MigrationDependencyMarker {
             marker_version: 1,
-            kind: if guide.deleted {
+            kind: if pending {
+                MigrationDependencyKind::ManualSelection
+            } else if guide.deleted {
                 MigrationDependencyKind::GuideUnavailable
             } else {
                 MigrationDependencyKind::CorrectionRequired
@@ -1799,7 +1833,7 @@ fn make_dependency_clearable(
         }
         MigrationDispositionStatus::Pending => {
             return Err(conflict(
-                "pending dependency requires an audited exclusion before it can be cleared",
+                "pending dependency requires a new disposition before it can be cleared",
             ));
         }
     }

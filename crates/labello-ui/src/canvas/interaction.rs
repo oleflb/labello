@@ -10,6 +10,7 @@ fn canvas_hover_cursor(
     selected_annotation: Option<&AnnotationId>,
     interaction: CanvasInteraction,
     bounding_box_tool: bool,
+    selectable_annotations: Option<&std::collections::BTreeSet<AnnotationId>>,
     primary_down: bool,
     middle_down: bool,
 ) -> Option<egui::CursorIcon> {
@@ -53,7 +54,15 @@ fn canvas_hover_cursor(
             return Some(egui::CursorIcon::Move);
         }
     }
-    if interaction.allow_selection && annotation_at(pointer, image_rect, annotations).is_some() {
+    if interaction.allow_selection
+        && annotation_at_selectable(
+            pointer,
+            image_rect,
+            annotations,
+            selectable_annotations,
+        )
+        .is_some()
+    {
         return Some(egui::CursorIcon::PointingHand);
     }
     (interaction.allow_create && image_rect.contains(pointer)).then_some(if bounding_box_tool {
@@ -203,6 +212,7 @@ fn handle_annotation_pointer(
     bounding_box_tool: bool,
     selected_annotation: Option<&AnnotationId>,
     interaction: CanvasInteraction,
+    selectable_annotations: Option<&std::collections::BTreeSet<AnnotationId>>,
     view_consumed: bool,
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
     if view_consumed || ui.input(|input| input.multi_touch().is_some()) {
@@ -349,7 +359,12 @@ fn handle_annotation_pointer(
         && interaction_rect.contains(pointer)
     {
         if interaction.allow_selection
-            && let Some(annotation) = annotation_at(pointer, image_rect, annotations)
+            && let Some(annotation) = annotation_at_selectable(
+                pointer,
+                image_rect,
+                annotations,
+                selectable_annotations,
+            )
         {
             return Some(CanvasAction::Select(annotation.annotation_id.clone()));
         }

@@ -404,6 +404,65 @@ async fn migration_commands_are_canonical_idempotent_atomic_and_replayable() {
 }
 
 #[tokio::test]
+async fn selecting_a_pending_target_moves_the_cursor_and_returns_after_resolution() {
+    let fixture = fixture(ReviewWorkflow::None, 2).await;
+    let assignment = fixture
+        .repository
+        .assign_next_image(
+            &fixture.annotator,
+            &fixture.task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let initial = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    let selected_target = &fixture.targets[1];
+    let selected = fixture
+        .repository
+        .revisit_migration_target(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &expectation(&initial.image_state, &fixture.task_id, selected_target),
+            "select-pending-second",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        selected.cursor,
+        MigrationCursor::Object { ref object_group_id, .. }
+            if object_group_id == &selected_target.object_group_id
+    ));
+
+    let saved = fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &expectation(&selected.image_state, &fixture.task_id, selected_target),
+            skeleton(0.6),
+            "save-selected-second",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        saved.cursor,
+        MigrationCursor::Object { ref object_group_id, .. }
+            if object_group_id == &fixture.targets[0].object_group_id
+    ));
+    assert!(
+        !saved.image_state.migration_dependencies[&fixture.task_id]
+            .contains_key(&selected_target.object_group_id)
+    );
+}
+
+#[tokio::test]
 async fn revisiting_a_resolved_target_is_audited_idempotent_and_returns_to_the_cursor() {
     let fixture = fixture(ReviewWorkflow::None, 2).await;
     let assignment = fixture

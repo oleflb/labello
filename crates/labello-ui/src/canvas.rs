@@ -47,6 +47,28 @@ pub struct KeypointSelection {
     pub keypoint_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CanvasAnnotationStyle {
+    pub color: Color32,
+    pub dashed_box: bool,
+}
+
+impl CanvasAnnotationStyle {
+    pub(crate) const fn solid(color: Color32) -> Self {
+        Self {
+            color,
+            dashed_box: false,
+        }
+    }
+
+    pub(crate) const fn dashed(color: Color32) -> Self {
+        Self {
+            color,
+            dashed_box: true,
+        }
+    }
+}
+
 /// An action produced by the canvas.
 ///
 /// `Edit` defaults to [`Infallible`] so existing exhaustive matches over actions
@@ -451,6 +473,7 @@ mod tests {
                 Some(&selected),
                 interaction,
                 true,
+                None,
                 false,
                 false,
             ),
@@ -465,6 +488,7 @@ mod tests {
                 Some(&selected),
                 interaction,
                 true,
+                None,
                 false,
                 false,
             ),
@@ -479,6 +503,7 @@ mod tests {
                 Some(&selected),
                 interaction,
                 true,
+                None,
                 false,
                 false,
             ),
@@ -504,6 +529,7 @@ mod tests {
                 Some(&selected),
                 CanvasInteraction::correction(Some(0)),
                 false,
+                None,
                 false,
                 false,
             ),
@@ -519,6 +545,7 @@ mod tests {
                 Some(&selected),
                 interaction,
                 true,
+                None,
                 false,
                 true,
             ),

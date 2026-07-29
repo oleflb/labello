@@ -35,7 +35,10 @@ impl ImageState {
                     || self
                         .migration_dependencies
                         .get(task_id)
-                        .is_some_and(|markers| markers.contains_key(object_group_id))
+                        .and_then(|markers| markers.get(object_group_id))
+                        .is_some_and(|marker| {
+                            marker.kind != crate::MigrationDependencyKind::ManualSelection
+                        })
                 {
                     return Err(DomainError::InvalidMigration(
                         "annotated disposition has the wrong reserved ID or dependency".into(),

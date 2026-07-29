@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText};
 
 use crate::{
     app::{AppView, LabelloApp, MigrationAction, UiCommand},
-    canvas::{CanvasAction, CanvasInteraction, show_canvas_colored},
+    canvas::{CanvasAction, CanvasAnnotationStyle, CanvasInteraction, show_canvas_colored},
     theme,
 };
 
@@ -44,6 +44,7 @@ pub(crate) struct ManualMigrationState {
     pub cursor: Option<MigrationCursor>,
     pub inspected_group_id: Option<ObjectGroupId>,
     pub pending_revisit_target: Option<ObjectGroupId>,
+    pub pending_activate_target: Option<ObjectGroupId>,
     pub active_pass_id: Option<MigrationPassId>,
     pub adding_missing_object: bool,
     pub draft: Option<SkeletonGeometry>,
@@ -66,6 +67,7 @@ impl Default for ManualMigrationState {
             cursor: None,
             inspected_group_id: None,
             pending_revisit_target: None,
+            pending_activate_target: None,
             active_pass_id: None,
             adding_missing_object: false,
             draft: None,
@@ -149,6 +151,7 @@ impl LabelloApp {
             self.work.migration.cursor = cursor;
             self.work.migration.inspected_group_id = None;
             self.work.migration.pending_revisit_target = None;
+            self.work.migration.pending_activate_target = None;
             self.work.migration.adding_missing_object = false;
             self.work.migration.draft = None;
             self.work.migration.draft_group = None;
@@ -175,23 +178,16 @@ impl LabelloApp {
             return;
         };
         let active = self.migration_active_target();
-        let object_focused = matches!(
-            self.work.migration.cursor,
-            Some(MigrationCursor::Object { .. })
-        ) || (self.view == AppView::Review && active.is_some());
         let guide = active.as_ref().and_then(|(_, target)| {
             state
                 .current_annotation(&target.guide_annotation_id)
                 .cloned()
         });
-        if let Some(guide) = guide.as_ref().filter(|guide| !guide.deleted) {
-            self.work.canvas.set_review_focus(Some(guide));
-        } else {
-            self.work.canvas.set_review_focus(None);
-        }
+        self.work.canvas.set_review_focus(guide.as_ref());
         let task_id = task.task_id.clone();
         let mut annotations = Vec::new();
-        let mut annotation_colors = std::collections::BTreeMap::new();
+        let mut annotation_styles = std::collections::BTreeMap::new();
+        let mut selectable_guides = std::collections::BTreeSet::new();
         if let Some(set) = state.migration_target_sets.get(&task_id) {
             for target in &set.targets {
                 let status = state
@@ -202,25 +198,28 @@ impl LabelloApp {
                 let current = active
                     .as_ref()
                     .is_some_and(|(group, _)| group == &target.object_group_id);
-                if object_focused && !current {
-                    continue;
-                }
-                let color = if current {
-                    theme::ACCENT_HOVER
-                } else {
-                    match status {
-                        Some(MigrationDispositionStatus::Annotated { .. }) => theme::SUCCESS,
-                        Some(MigrationDispositionStatus::Excluded { .. }) => theme::DANGER,
-                        _ => theme::TEXT_MUTED,
-                    }
-                };
+                let guide_style = migration_guide_style(current, status);
                 if let Some(guide) = state.current_annotation(&target.guide_annotation_id) {
                     let mut rendered = guide.clone();
                     if rendered.deleted {
                         rendered.deleted = false;
-                        annotation_colors.insert(rendered.annotation_id.clone(), theme::DANGER);
+                        annotation_styles.insert(
+                            rendered.annotation_id.clone(),
+                            if current {
+                                CanvasAnnotationStyle::solid(theme::DANGER)
+                            } else {
+                                CanvasAnnotationStyle::dashed(theme::DANGER)
+                            },
+                        );
                     } else {
-                        annotation_colors.insert(rendered.annotation_id.clone(), color);
+                        annotation_styles.insert(rendered.annotation_id.clone(), guide_style);
+                    }
+                    if !current
+                        && self.view == AppView::Annotate
+                        && (migration_target_is_unmigrated(status)
+                            || matches!(status, Some(MigrationDispositionStatus::Excluded { .. })))
+                    {
+                        selectable_guides.insert(rendered.annotation_id.clone());
                     }
                     annotations.push(rendered);
                 }
@@ -233,7 +232,14 @@ impl LabelloApp {
                         .filter(|skeleton| !skeleton.deleted && skeleton.task_id == task_id)
                 {
                     annotations.push(skeleton.clone());
-                    annotation_colors.insert(skeleton.annotation_id.clone(), color);
+                    annotation_styles.insert(
+                        skeleton.annotation_id.clone(),
+                        CanvasAnnotationStyle::solid(if current {
+                            theme::ACCENT_HOVER
+                        } else {
+                            theme::SUCCESS
+                        }),
+                    );
                 }
             }
         }
@@ -243,7 +249,10 @@ impl LabelloApp {
                 && annotation.annotation_type == AnnotationType::Skeleton
         }) {
             annotations.push(skeleton.clone());
-            annotation_colors.insert(skeleton.annotation_id.clone(), theme::SUCCESS);
+            annotation_styles.insert(
+                skeleton.annotation_id.clone(),
+                CanvasAnnotationStyle::solid(theme::SUCCESS),
+            );
         }
         let mut selected = None;
         if let Some((group_id, target)) = active.as_ref()
@@ -271,7 +280,10 @@ impl LabelloApp {
                 updated_at: labello_domain::now(),
                 deleted: false,
             });
-            annotation_colors.insert(selected.clone().unwrap(), theme::ACCENT_HOVER);
+            annotation_styles.insert(
+                selected.clone().unwrap(),
+                CanvasAnnotationStyle::solid(theme::ACCENT_HOVER),
+            );
         }
         if self.work.migration.adding_missing_object
             && let Some(draft) = self.work.migration.draft.clone()
@@ -296,7 +308,10 @@ impl LabelloApp {
                 updated_at: labello_domain::now(),
                 deleted: false,
             });
-            annotation_colors.insert(annotation_id, theme::ACCENT_HOVER);
+            annotation_styles.insert(
+                annotation_id,
+                CanvasAnnotationStyle::solid(theme::ACCENT_HOVER),
+            );
         }
         let edges = task
             .skeleton
@@ -309,18 +324,19 @@ impl LabelloApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let skeleton_editable = (guide.as_ref().is_some_and(|guide| !guide.deleted)
+            && matches!(
+                self.work.migration.cursor,
+                Some(MigrationCursor::Object { .. })
+            ))
+            || (self.work.migration.adding_missing_object
+                && matches!(self.work.migration.cursor, Some(MigrationCursor::FullImage)));
         let interaction = CanvasInteraction {
             editable: !self.work.migration.busy
                 && self.work.migration.inspected_group_id.is_none()
-                && ((guide.as_ref().is_some_and(|guide| !guide.deleted)
-                    && matches!(
-                        self.work.migration.cursor,
-                        Some(MigrationCursor::Object { .. })
-                    ))
-                    || (self.work.migration.adding_missing_object
-                        && matches!(self.work.migration.cursor, Some(MigrationCursor::FullImage)))),
-            allow_create: true,
-            allow_selection: false,
+                && (skeleton_editable || !selectable_guides.is_empty()),
+            allow_create: skeleton_editable,
+            allow_selection: true,
             edit_keypoints: false,
             selected_keypoint: None,
         };
@@ -336,10 +352,15 @@ impl LabelloApp {
             &edges,
             &[],
             theme::ANNOTATION,
-            &annotation_colors,
+            &annotation_styles,
+            Some(&selectable_guides),
         );
-        if let Some(CanvasAction::PlaceKeypoint(point)) = action {
-            self.place_migration_keypoint(point);
+        match action {
+            Some(CanvasAction::PlaceKeypoint(point)) => self.place_migration_keypoint(point),
+            Some(CanvasAction::Select(annotation_id)) => {
+                self.activate_migration_from_inactive_guide(&annotation_id);
+            }
+            _ => {}
         }
     }
 
@@ -465,7 +486,7 @@ impl LabelloApp {
                     .get(self.work.selected_task_id.as_ref()?)
                     .and_then(|markers| markers.get(&group_id))
             })
-            .is_some();
+            .map(|marker| marker.kind);
         if !guide_valid {
             theme::inline_message(
                 ui,
@@ -481,7 +502,9 @@ impl LabelloApp {
             {
                 self.retry_assignment_load();
             }
-        } else if dependency {
+        } else if dependency
+            .is_some_and(|kind| kind != labello_domain::MigrationDependencyKind::ManualSelection)
+        {
             theme::inline_message(
                 ui,
                 theme::Intent::Warning,
@@ -666,7 +689,7 @@ impl LabelloApp {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
-                    self.can_inspect_previous_migration_object(),
+                    self.can_edit_previous_migration_object(),
                     egui::Button::new("Previous object").shortcut_text(
                         self.shortcut_text(
                             ui.ctx(),
@@ -676,17 +699,19 @@ impl LabelloApp {
                 )
                 .clicked()
             {
-                self.inspect_migration_object(-1);
+                self.edit_previous_migration_object();
             }
             let returns_to_current = self.inspection_next_returns_to_current();
             if ui
-                .button(if returns_to_current {
-                    "Return to current object"
-                } else {
-                    "Next object"
-                })
-                .on_hover_text(
-                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject),
+                .add(
+                    egui::Button::new(if returns_to_current {
+                        "Return to current object"
+                    } else {
+                        "Next object"
+                    })
+                    .shortcut_text(
+                        self.shortcut_text(ui.ctx(), labello_domain::UserAction::SelectNextObject),
+                    ),
                 )
                 .clicked()
             {
@@ -1065,11 +1090,19 @@ impl LabelloApp {
             self.migration_object_navigation_button(ui);
             if !compact
                 && ui
-                    .button(if self.inspection_next_returns_to_current() {
-                        "Return current"
-                    } else {
-                        "Next object"
-                    })
+                    .add(
+                        egui::Button::new(if self.inspection_next_returns_to_current() {
+                            "Return current"
+                        } else {
+                            "Next object"
+                        })
+                        .shortcut_text(
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::SelectNextObject,
+                            ),
+                        ),
+                    )
                     .clicked()
             {
                 self.inspect_migration_object(1);
@@ -1171,7 +1204,7 @@ impl LabelloApp {
     }
 
     fn migration_object_navigation_button(&mut self, ui: &mut egui::Ui) {
-        if !self.can_inspect_previous_migration_object() {
+        if !self.can_edit_previous_migration_object() {
             return;
         }
         if ui
@@ -1180,7 +1213,7 @@ impl LabelloApp {
             ))
             .clicked()
         {
-            self.inspect_migration_object(-1);
+            self.edit_previous_migration_object();
         }
     }
 
@@ -1489,10 +1522,15 @@ impl LabelloApp {
         let mut annotated = 0;
         let mut excluded = 0;
         for target in &set.targets {
-            match state.migration_dispositions[task_id][&target.object_group_id].status {
-                MigrationDispositionStatus::Annotated { .. } => annotated += 1,
-                MigrationDispositionStatus::Excluded { .. } => excluded += 1,
-                MigrationDispositionStatus::Pending => {}
+            match state
+                .migration_dispositions
+                .get(task_id)
+                .and_then(|dispositions| dispositions.get(&target.object_group_id))
+                .map(|disposition| &disposition.status)
+            {
+                Some(MigrationDispositionStatus::Annotated { .. }) => annotated += 1,
+                Some(MigrationDispositionStatus::Excluded { .. }) => excluded += 1,
+                Some(MigrationDispositionStatus::Pending) | None => {}
             }
         }
         let expected = set.targets.len() as u64;
@@ -1617,7 +1655,7 @@ impl LabelloApp {
         }
     }
 
-    pub(crate) fn can_inspect_previous_migration_object(&self) -> bool {
+    pub(crate) fn can_edit_previous_migration_object(&self) -> bool {
         if self.view != AppView::Annotate
             || self.work.migration.busy
             || self.work.migration.adding_missing_object
@@ -1638,6 +1676,28 @@ impl LabelloApp {
             })
             .unwrap_or(boundary);
         position > 0
+    }
+
+    pub(crate) fn edit_previous_migration_object(&mut self) {
+        if !self.can_edit_previous_migration_object() {
+            return;
+        }
+        let targets = self.migration_targets();
+        let boundary = self.migration_browse_boundary(&targets);
+        let position = self
+            .work
+            .migration
+            .inspected_group_id
+            .as_ref()
+            .and_then(|group_id| {
+                targets
+                    .iter()
+                    .position(|target| &target.object_group_id == group_id)
+            })
+            .unwrap_or(boundary);
+        if let Some(previous) = position.checked_sub(1).and_then(|index| targets.get(index)) {
+            self.begin_revisit_migration_target(previous.object_group_id.clone());
+        }
     }
 
     fn inspection_next_returns_to_current(&self) -> bool {
@@ -1748,6 +1808,54 @@ impl LabelloApp {
 
     pub(crate) fn cancel_pending_migration_revisit(&mut self) {
         self.work.migration.pending_revisit_target = None;
+    }
+
+    fn activate_migration_from_inactive_guide(&mut self, guide_id: &labello_domain::AnnotationId) {
+        if self.view != AppView::Annotate || self.work.migration.busy {
+            return;
+        }
+        let Some(task_id) = self.work.selected_task_id.as_ref() else {
+            return;
+        };
+        let clicked = self.work.current_state.as_ref().and_then(|state| {
+            let target = state
+                .migration_target_sets
+                .get(task_id)?
+                .targets
+                .iter()
+                .find(|target| &target.guide_annotation_id == guide_id)?;
+            let status = state
+                .migration_dispositions
+                .get(task_id)
+                .and_then(|dispositions| dispositions.get(&target.object_group_id))
+                .map(|disposition| disposition.status.clone());
+            Some((target.object_group_id.clone(), status))
+        });
+        let Some((clicked_group_id, status)) = clicked else {
+            return;
+        };
+        if matches!(status, Some(MigrationDispositionStatus::Excluded { .. })) {
+            if self
+                .migration_active_target()
+                .is_none_or(|(active_group_id, _)| active_group_id != clicked_group_id)
+            {
+                self.begin_revisit_migration_target(clicked_group_id);
+            }
+            return;
+        }
+        let Some((active_group_id, _)) = self.migration_active_target() else {
+            return;
+        };
+        if clicked_group_id == active_group_id || !migration_target_is_unmigrated(status.as_ref()) {
+            return;
+        }
+        if let Some((action, true)) = self.migration_primary_action() {
+            self.work.migration.pending_activate_target = Some(clicked_group_id);
+            self.perform_migration_primary_action(action);
+        } else if self.migration_draft_has_no_keypoint_input() {
+            self.work.migration.pending_activate_target = Some(clicked_group_id);
+            self.request_skip_migration_target(active_group_id);
+        }
     }
 
     fn migration_active_target(&self) -> Option<(ObjectGroupId, labello_domain::MigrationTarget)> {
@@ -1951,6 +2059,16 @@ impl LabelloApp {
             })
     }
 
+    fn migration_draft_has_no_keypoint_input(&self) -> bool {
+        self.work.migration.keypoint_index == 0
+            && self.work.migration.draft.as_ref().is_none_or(|draft| {
+                draft
+                    .keypoints
+                    .iter()
+                    .all(|keypoint| keypoint.point.is_none())
+            })
+    }
+
     fn migration_expectation(
         &self,
         group_id: &ObjectGroupId,
@@ -2023,6 +2141,21 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_exclude_migration_target(&mut self, group_id: ObjectGroupId) {
+        let note = (!self.work.migration.exclusion_note.trim().is_empty())
+            .then(|| self.work.migration.exclusion_note.trim().to_string());
+        self.request_migration_exclusion(group_id, self.work.migration.exclusion_reason, note);
+    }
+
+    fn request_skip_migration_target(&mut self, group_id: ObjectGroupId) {
+        self.request_migration_exclusion(group_id, MigrationExclusionReason::NoValidSkeleton, None);
+    }
+
+    fn request_migration_exclusion(
+        &mut self,
+        group_id: ObjectGroupId,
+        reason: MigrationExclusionReason,
+        note: Option<String>,
+    ) {
         let Some((assignment, target)) = self
             .work
             .assignment
@@ -2036,9 +2169,8 @@ impl LabelloApp {
                 assignment_id: assignment.assignment_id,
                 pass_id: self.work.migration.active_pass_id.clone(),
                 target,
-                reason: self.work.migration.exclusion_reason,
-                note: (!self.work.migration.exclusion_note.trim().is_empty())
-                    .then(|| self.work.migration.exclusion_note.trim().to_string()),
+                reason,
+                note,
             },
         ));
     }
@@ -2061,7 +2193,7 @@ impl LabelloApp {
         ));
     }
 
-    fn request_revisit_migration_target(&mut self, group_id: ObjectGroupId) {
+    pub(crate) fn request_revisit_migration_target(&mut self, group_id: ObjectGroupId) {
         let Some((assignment, target)) = self
             .work
             .assignment
@@ -2206,6 +2338,24 @@ impl LabelloApp {
     }
 }
 
+fn migration_guide_style(
+    current: bool,
+    status: Option<&MigrationDispositionStatus>,
+) -> CanvasAnnotationStyle {
+    if current {
+        return CanvasAnnotationStyle::solid(theme::ACCENT_HOVER);
+    }
+    CanvasAnnotationStyle::dashed(match status {
+        Some(MigrationDispositionStatus::Annotated { .. }) => theme::SUCCESS,
+        Some(MigrationDispositionStatus::Excluded { .. }) => theme::DANGER,
+        Some(MigrationDispositionStatus::Pending) | None => theme::TEXT_MUTED,
+    })
+}
+
+fn migration_target_is_unmigrated(status: Option<&MigrationDispositionStatus>) -> bool {
+    matches!(status, Some(MigrationDispositionStatus::Pending) | None)
+}
+
 fn disposition_label(status: Option<&MigrationDispositionStatus>) -> &'static str {
     match status {
         Some(MigrationDispositionStatus::Pending) => "Pending",
@@ -2231,5 +2381,32 @@ fn exclusion_label(reason: MigrationExclusionReason) -> &'static str {
         MigrationExclusionReason::DuplicateSourceObject => "Duplicate source object",
         MigrationExclusionReason::ObjectNotPresent => "Object not present",
         MigrationExclusionReason::Other => "Other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_guide_styles_distinguish_active_annotated_and_pending_objects() {
+        assert_eq!(
+            migration_guide_style(true, Some(&MigrationDispositionStatus::Pending)),
+            CanvasAnnotationStyle::solid(theme::ACCENT_HOVER)
+        );
+        assert_eq!(
+            migration_guide_style(
+                false,
+                Some(&MigrationDispositionStatus::Annotated {
+                    skeleton_annotation_id: labello_domain::AnnotationId::from("skeleton"),
+                    skeleton_version: 1,
+                }),
+            ),
+            CanvasAnnotationStyle::dashed(theme::SUCCESS)
+        );
+        assert_eq!(
+            migration_guide_style(false, Some(&MigrationDispositionStatus::Pending)),
+            CanvasAnnotationStyle::dashed(theme::TEXT_MUTED)
+        );
     }
 }

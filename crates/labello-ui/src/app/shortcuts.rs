@@ -180,7 +180,7 @@ impl LabelloApp {
                     return;
                 }
                 UserAction::SelectPreviousObject => {
-                    self.inspect_migration_object(-1);
+                    self.edit_previous_migration_object();
                     return;
                 }
                 UserAction::SelectNextObject => {

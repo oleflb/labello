@@ -53,6 +53,23 @@ impl ImageState {
                 "migration pass belongs to another task".into(),
             ));
         }
+        if let Some(target) = targets.iter().copied().find(|target| {
+            matches!(
+                self.migration_dispositions[task_id][&target.object_group_id].status,
+                MigrationDispositionStatus::Pending
+            ) && self
+                .migration_dependencies
+                .get(task_id)
+                .and_then(|markers| markers.get(&target.object_group_id))
+                .is_some_and(|marker| {
+                    marker.kind == crate::MigrationDependencyKind::ManualSelection
+                })
+        }) {
+            return Ok(crate::MigrationCursor::Object {
+                object_group_id: target.object_group_id.clone(),
+                sequence_index: target.sequence_index,
+            });
+        }
         for target in targets {
             let guide = self
                 .current_annotation(&target.guide_annotation_id)

@@ -17,7 +17,7 @@ fn paint_canvas(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
     annotation_color: Color32,
-    annotation_colors: &std::collections::BTreeMap<AnnotationId, Color32>,
+    annotation_styles: &std::collections::BTreeMap<AnnotationId, CanvasAnnotationStyle>,
 ) {
     let painter = ui.painter_at(viewport);
     painter.rect_filled(
@@ -86,23 +86,25 @@ fn paint_canvas(
 
     for annotation in annotations.iter().filter(|annotation| !annotation.deleted) {
         let selected = selected_annotation == Some(&annotation.annotation_id);
-        let annotation_color = annotation_colors
+        let style = annotation_styles
             .get(&annotation.annotation_id)
             .copied()
-            .unwrap_or(annotation_color);
+            .unwrap_or_else(|| CanvasAnnotationStyle::solid(annotation_color));
         match &annotation.geometry {
             AnnotationGeometry::BoundingBox(bbox) => {
                 let bbox = edit_preview
                     .filter(|(id, _)| *id == &annotation.annotation_id)
                     .map_or(*bbox, |(_, preview)| preview);
                 if selected {
-                    paint_selected_box(&painter, image_rect, bbox, editable, annotation_color);
+                    paint_selected_box(&painter, image_rect, bbox, editable, style.color);
+                } else if style.dashed_box {
+                    paint_context_box(&painter, image_rect, bbox, style.color);
                 } else {
-                    paint_existing_box(&painter, image_rect, bbox, annotation_color);
+                    paint_existing_box(&painter, image_rect, bbox, style.color);
                 }
             }
             AnnotationGeometry::Skeleton(skeleton) => {
-                let color = annotation_color;
+                let color = style.color;
                 for (from, to) in skeleton_edges {
                     let from = skeleton
                         .keypoints
@@ -228,6 +230,24 @@ fn paint_existing_box(
         Stroke::new(1.5, color),
         StrokeKind::Inside,
     );
+}
+
+fn paint_context_box(
+    painter: &egui::Painter,
+    image_rect: Rect,
+    bbox: BoundingBox,
+    color: Color32,
+) {
+    let rect = bbox_to_screen_rect(image_rect, bbox);
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(4),
+        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 7),
+    );
+    paint_dashed_segment(painter, rect.left_top(), rect.right_top(), color);
+    paint_dashed_segment(painter, rect.right_top(), rect.right_bottom(), color);
+    paint_dashed_segment(painter, rect.right_bottom(), rect.left_bottom(), color);
+    paint_dashed_segment(painter, rect.left_bottom(), rect.left_top(), color);
 }
 
 fn paint_selected_box(

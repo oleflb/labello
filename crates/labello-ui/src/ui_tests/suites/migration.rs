@@ -71,7 +71,7 @@ fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
-fn migration_previous_objects_are_read_only_until_explicitly_revisited() {
+fn migration_previous_object_navigation_immediately_revisits_for_editing() {
     use crate::inspector_presets::{self, InspectorPreset};
 
     let api = Rc::new(SpyApi::new());
@@ -90,33 +90,6 @@ fn migration_previous_objects_are_read_only_until_explicitly_revisited() {
 
     click_accesskit_button(&mut harness, "Previous object");
     harness.step();
-    assert_eq!(
-        harness.state().work.migration.inspected_group_id,
-        Some(labello_domain::ObjectGroupId::from("group-right"))
-    );
-    assert!(
-        harness
-            .query_by_label_contains("Reviewing object 2 of 2 · Read only")
-            .is_some()
-    );
-    assert_eq!(api.counts().migration_commands, 0);
-
-    harness.key_press(egui::Key::ArrowUp);
-    harness.step();
-    assert_eq!(
-        harness.state().work.migration.inspected_group_id,
-        Some(labello_domain::ObjectGroupId::from("group-left"))
-    );
-    harness.key_press(egui::Key::ArrowDown);
-    harness.step();
-    assert_eq!(
-        harness.state().work.migration.inspected_group_id,
-        Some(labello_domain::ObjectGroupId::from("group-right"))
-    );
-    assert_eq!(api.counts().migration_commands, 0);
-
-    click_accesskit_button(&mut harness, "Edit this object");
-    harness.step();
     step_until(&mut harness, 8, |app| !app.work.migration.busy);
     assert_eq!(api.counts().migration_commands, 1);
     assert!(harness.state().work.migration.inspected_group_id.is_none());
@@ -128,6 +101,55 @@ fn migration_previous_objects_are_read_only_until_explicitly_revisited() {
     assert!(api.image_state(&image_id).migration_dependencies
         [&labello_domain::TaskId::from("skeleton:person")]
         .contains_key(&labello_domain::ObjectGroupId::from("group-right")));
+
+    harness.key_press(egui::Key::ArrowUp);
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 2);
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-left")
+    ));
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn migration_previous_object_edit_confirms_before_discarding_unsaved_input() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+    harness.state_mut().work.migration.draft_dirty = true;
+
+    click_accesskit_button(&mut harness, "Previous object");
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Discard current migration draft?")
+            .is_some()
+    );
+    assert_eq!(api.counts().migration_commands, 0);
+
+    click_accesskit_button(&mut harness, "Discard draft and edit object");
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
+    ));
 }
 
 #[cfg(feature = "inspector-presets")]
@@ -232,6 +254,229 @@ fn migration_full_image_can_add_an_object_missing_from_the_import() {
             .query_by_label_contains("Add missing object")
             .is_some()
     );
+}
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn clicking_a_pending_box_confirms_the_current_skeleton_and_selects_the_clicked_target() {
+    use crate::inspector_presets::{self, InspectorPreset};
+    use crate::manual_migration::ManualMigrationState;
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    let task = app.selected_task().unwrap().clone();
+    let group_id = match app.work.migration.cursor.as_ref().unwrap() {
+        labello_domain::MigrationCursor::Object {
+            object_group_id, ..
+        } => object_group_id.clone(),
+        labello_domain::MigrationCursor::FullImage => panic!("expected object cursor"),
+    };
+    let mut draft = ManualMigrationState::empty_skeleton(
+        task.skeleton
+            .unwrap()
+            .keypoints
+            .into_iter()
+            .map(|point| point.name),
+    );
+    for keypoint in &mut draft.keypoints {
+        keypoint.point = Some(labello_domain::NormalizedPoint { x: 0.25, y: 0.3 });
+        keypoint.state = labello_domain::KeypointState::Visible;
+    }
+    app.work.migration.keypoint_index = draft.keypoints.len();
+    app.work.migration.draft = Some(draft);
+    app.work.migration.draft_group = Some(group_id);
+    app.work.migration.draft_dirty = true;
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+    assert!(harness.state().work.canvas.zoom() > 1.0);
+    harness.state_mut().work.canvas.fit_view();
+    harness.step();
+    let availability_checks = api.counts().assignment_availability;
+
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    let image_aspect = 1280.0 / 800.0;
+    let image_size = if canvas.width() / canvas.height() > image_aspect {
+        egui::vec2(canvas.height() * image_aspect, canvas.height())
+    } else {
+        egui::vec2(canvas.width(), canvas.width() / image_aspect)
+    };
+    let image = egui::Rect::from_center_size(canvas.center(), image_size);
+    let pending_box_center = egui::pos2(
+        image.left() + image.width() * 0.73,
+        image.top() + image.height() * 0.49,
+    );
+    harness.event(egui::Event::PointerMoved(pending_box_center));
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: pending_box_center,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: pending_box_center,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    let clicked_group_id = labello_domain::ObjectGroupId::from("group-right");
+    step_until(&mut harness, 8, |app| {
+        app.work.migration.inspected_group_id.as_ref() == Some(&clicked_group_id)
+    });
+    assert_eq!(
+        harness.state().work.migration.inspected_group_id,
+        Some(clicked_group_id.clone())
+    );
+    assert!(harness.state().work.migration.busy);
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+
+    assert_eq!(api.counts().migration_commands, 2);
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &clicked_group_id
+    ));
+    assert_eq!(
+        harness.state().work.migration.draft_group,
+        Some(clicked_group_id)
+    );
+    assert!(
+        harness
+            .state()
+            .work
+            .migration
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.keypoints.iter().all(|keypoint| keypoint.point.is_none()))
+    );
+    assert!(!harness.state().work.migration.draft_dirty);
+    assert_eq!(
+        api.counts().assignment_availability,
+        availability_checks
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn clicking_an_unmigrated_box_skips_an_empty_current_skeleton() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    let task_id = app.selected_task().unwrap().task_id.clone();
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
+    harness.state_mut().work.canvas.fit_view();
+    harness.step();
+
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    let image_aspect = 1280.0 / 800.0;
+    let image_size = if canvas.width() / canvas.height() > image_aspect {
+        egui::vec2(canvas.height() * image_aspect, canvas.height())
+    } else {
+        egui::vec2(canvas.width(), canvas.width() / image_aspect)
+    };
+    let image = egui::Rect::from_center_size(canvas.center(), image_size);
+    let pending_box_center = egui::pos2(
+        image.left() + image.width() * 0.73,
+        image.top() + image.height() * 0.49,
+    );
+    click_at(&mut harness, pending_box_center);
+    step_until(&mut harness, 8, |app| {
+        matches!(
+            app.work.migration.cursor,
+            Some(labello_domain::MigrationCursor::Object {
+                ref object_group_id,
+                ..
+            }) if object_group_id == &labello_domain::ObjectGroupId::from("group-right")
+        )
+    });
+
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(matches!(
+        &harness.state().work.current_state.as_ref().unwrap().migration_dispositions[&task_id]
+            [&labello_domain::ObjectGroupId::from("group-left")]
+            .status,
+        labello_domain::MigrationDispositionStatus::Excluded { exclusion }
+            if exclusion.reason == labello_domain::MigrationExclusionReason::NoValidSkeleton
+    ));
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn clicking_a_skipped_box_immediately_revisits_it_for_editing() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let api = Rc::new(SpyApi::new());
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    let task_id = app.selected_task().unwrap().task_id.clone();
+    let skipped_group_id = labello_domain::ObjectGroupId::from("group-right");
+    let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
+    let labello_domain::MigrationDispositionStatus::Excluded { exclusion } = &mut app
+        .work
+        .current_state
+        .as_mut()
+        .unwrap()
+        .migration_dispositions
+        .get_mut(&task_id)
+        .unwrap()
+        .get_mut(&skipped_group_id)
+        .unwrap()
+        .status
+    else {
+        panic!("expected excluded migration target");
+    };
+    exclusion.reason = labello_domain::MigrationExclusionReason::NoValidSkeleton;
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    app.runtime.api = Some(api.clone());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    let image_aspect = 1280.0 / 800.0;
+    let image_size = if canvas.width() / canvas.height() > image_aspect {
+        egui::vec2(canvas.height() * image_aspect, canvas.height())
+    } else {
+        egui::vec2(canvas.width(), canvas.width() / image_aspect)
+    };
+    let image = egui::Rect::from_center_size(canvas.center(), image_size);
+    let skipped_box_center = egui::pos2(
+        image.left() + image.width() * 0.73,
+        image.top() + image.height() * 0.49,
+    );
+    click_at(&mut harness, skipped_box_center);
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+
+    assert_eq!(api.counts().migration_commands, 1);
+    assert!(matches!(
+        harness.state().work.migration.cursor,
+        Some(labello_domain::MigrationCursor::Object { ref object_group_id, .. })
+            if object_group_id == &skipped_group_id
+    ));
+    assert!(api.image_state(&image_id).migration_dependencies[&task_id]
+        .contains_key(&skipped_group_id));
 }
 
 #[cfg(feature = "inspector-presets")]
@@ -425,6 +670,7 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
         .build_eframe(|_| app);
     harness.step();
     let previews_before = api.counts().get_image_preview;
+    let availability_checks_before = api.counts().assignment_availability;
 
     harness.key_press(egui::Key::Space);
     harness.step();
@@ -449,6 +695,9 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
     );
     harness.step();
     assert_eq!(api.counts().migration_commands, 1);
+    assert!(
+        api.counts().assignment_availability > availability_checks_before
+    );
 }
 
 #[cfg(feature = "inspector-presets")]

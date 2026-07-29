@@ -191,6 +191,7 @@ impl ImageState {
                     MigrationDependencyKind::CorrectionRequired => {
                         guide.is_some_and(|guide| !guide.deleted) && disposition_is_newer
                     }
+                    MigrationDependencyKind::ManualSelection => disposition_is_newer,
                     MigrationDependencyKind::GuideUnavailable => {
                         disposition_is_newer
                             && guide.is_some_and(|guide| {

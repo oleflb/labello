@@ -768,6 +768,10 @@ impl ImportApi for SpyApi {
             })
             .map(|(task_id, _)| task_id.clone())
             .expect("migration test target");
+        let pending = matches!(
+            image_state.migration_dispositions[&task_id][&request.target.object_group_id].status,
+            MigrationDispositionStatus::Pending
+        );
         image_state
             .migration_dependencies
             .entry(task_id.clone())
@@ -776,7 +780,11 @@ impl ImportApi for SpyApi {
                 request.target.object_group_id,
                 labello_domain::MigrationDependencyMarker {
                     marker_version: 1,
-                    kind: labello_domain::MigrationDependencyKind::CorrectionRequired,
+                    kind: if pending {
+                        labello_domain::MigrationDependencyKind::ManualSelection
+                    } else {
+                        labello_domain::MigrationDependencyKind::CorrectionRequired
+                    },
                     required_disposition_version: request.target.expected_disposition_version,
                     event_id: EventId::from("spy-revisit"),
                     timestamp: now(),

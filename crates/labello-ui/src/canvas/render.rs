@@ -138,6 +138,7 @@ pub(crate) fn show_canvas_styled(
         prelabels,
         annotation_color,
         &std::collections::BTreeMap::new(),
+        None,
     )
 }
 
@@ -157,7 +158,8 @@ pub(crate) fn show_canvas_colored(
     skeleton_edges: &[(String, String)],
     prelabels: &[PrelabelSuggestion],
     annotation_color: Color32,
-    annotation_colors: &std::collections::BTreeMap<AnnotationId, Color32>,
+    annotation_styles: &std::collections::BTreeMap<AnnotationId, CanvasAnnotationStyle>,
+    selectable_annotations: Option<&std::collections::BTreeSet<AnnotationId>>,
 ) -> Option<CanvasAction<BoundingBoxEdit>> {
     let editable = interaction.editable;
     let available = ui.available_size().max(vec2(1.0, 1.0));
@@ -189,7 +191,7 @@ pub(crate) fn show_canvas_colored(
             skeleton_edges,
             prelabels,
             annotation_color,
-            annotation_colors,
+            annotation_styles,
         );
         return None;
     }
@@ -220,6 +222,7 @@ pub(crate) fn show_canvas_colored(
         selected_annotation,
         interaction,
         bounding_box_tool,
+        selectable_annotations,
         primary_down,
         middle_down,
     ) {
@@ -269,7 +272,7 @@ pub(crate) fn show_canvas_colored(
         skeleton_edges,
         prelabels,
         annotation_color,
-        annotation_colors,
+        annotation_styles,
     );
 
     let action = handle_annotation_pointer(
@@ -282,6 +285,7 @@ pub(crate) fn show_canvas_colored(
         bounding_box_tool,
         selected_annotation,
         interaction,
+        selectable_annotations,
         view_consumed,
     );
     state.clamp_to_viewport(interaction_rect, fitted_image);

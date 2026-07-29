@@ -189,6 +189,7 @@ impl MigrationDisposition {
 pub enum MigrationDependencyKind {
     GuideUnavailable,
     CorrectionRequired,
+    ManualSelection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -7,6 +7,8 @@ impl LabelloApp {
         match message {
                 UiMessage::MigrationFinished { result, .. } => {
                     self.work.migration.busy = false;
+                    let pending_activate_target =
+                        self.work.migration.pending_activate_target.take();
                     match *result {
                         Ok(result) => {
                             let completed_assignment =
@@ -16,7 +18,18 @@ impl LabelloApp {
                                 });
                             self.apply_state(result.image_state);
                             self.work.migration.cursor = result.cursor;
-                            self.work.migration.inspected_group_id = None;
+                            let pending_activate_target =
+                                pending_activate_target.filter(|target| {
+                                    !matches!(
+                                        self.work.migration.cursor.as_ref(),
+                                        Some(labello_domain::MigrationCursor::Object {
+                                            object_group_id,
+                                            ..
+                                        }) if object_group_id == target
+                                    )
+                                });
+                            self.work.migration.inspected_group_id =
+                                pending_activate_target.clone();
                             self.work.migration.pending_revisit_target = None;
                             self.work.migration.adding_missing_object = false;
                             self.work.migration.progress = Some(result.progress);
@@ -39,10 +52,20 @@ impl LabelloApp {
                             if let Some(assignment) = completed_assignment {
                                 self.remember_previous_annotation_assignment(assignment);
                                 self.open_next_annotation_assignment(ctx, None);
+                                self.request_assignment_availability();
                             }
-                            self.request_assignment_availability();
+                            if let Some(target) = pending_activate_target {
+                                self.work.migration.pending_activate_target =
+                                    Some(target.clone());
+                                self.request_revisit_migration_target(target);
+                            }
                         }
-                        Err(error) => self.work.migration.error = Some(error),
+                        Err(error) => {
+                            if pending_activate_target.is_some() {
+                                self.work.migration.inspected_group_id = None;
+                            }
+                            self.work.migration.error = Some(error);
+                        }
                     }
                 }
                 UiMessage::AuthOptionsLoaded { result, .. } => {

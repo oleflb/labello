@@ -62,6 +62,7 @@ pub fn migration_state_hash(
                 encoder.tag(match marker.kind {
                     MigrationDependencyKind::GuideUnavailable => 1,
                     MigrationDependencyKind::CorrectionRequired => 2,
+                    MigrationDependencyKind::ManualSelection => 3,
                 });
                 encoder.u32(marker.marker_version);
             }

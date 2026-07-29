@@ -39,10 +39,23 @@ fn annotation_at(
     image_rect: Rect,
     annotations: &[AnnotationVersion],
 ) -> Option<&AnnotationVersion> {
+    annotation_at_selectable(pos, image_rect, annotations, None)
+}
+
+fn annotation_at_selectable<'a>(
+    pos: Pos2,
+    image_rect: Rect,
+    annotations: &'a [AnnotationVersion],
+    selectable_annotations: Option<&std::collections::BTreeSet<AnnotationId>>,
+) -> Option<&'a AnnotationVersion> {
     annotations
         .iter()
         .rev()
-        .filter(|annotation| !annotation.deleted)
+        .filter(|annotation| {
+            !annotation.deleted
+                && selectable_annotations
+                    .is_none_or(|ids| ids.contains(&annotation.annotation_id))
+        })
         .find(|annotation| match annotation.geometry {
             AnnotationGeometry::BoundingBox(bbox) => {
                 bbox_to_screen_rect(image_rect, bbox).contains(pos)
