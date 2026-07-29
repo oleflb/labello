@@ -89,7 +89,8 @@ impl LabelloApp {
             !self.loading.saving && !self.loading.image && self.work.pending_transition.is_none();
         for workflow in workflows {
             let selected = self.work.selected_task_id.as_ref() == Some(&workflow.task_id);
-            let unavailable = self.workflow_availability(&workflow.task_id) == Some(false);
+            let unavailable =
+                self.displayed_workflow_availability(&workflow.task_id) == Some(false);
             let icon_id = ui.id().with(("workflow-type", &workflow.task_id));
             let button = egui::Button::new((
                 egui::Atom::custom(

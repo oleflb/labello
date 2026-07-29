@@ -165,6 +165,16 @@ impl LabelloApp {
         .flatten()
     }
 
+    pub(crate) fn displayed_workflow_availability(&self, task_id: &TaskId) -> Option<bool> {
+        let kind = self.assignment_kind()?;
+        (self.work.availability.dataset_id.as_ref() == Some(&self.config.dataset_id)
+            && self.work.availability.kind.as_ref() == Some(&kind)
+            && self.work.availability.error.is_none()
+            && (self.work.availability.resolved || self.manual_migration_active()))
+        .then(|| self.work.availability.tasks.get(task_id).copied())
+        .flatten()
+    }
+
     pub(crate) fn assignment_availability_cache_age(&self) -> Option<Duration> {
         labello_domain::now()
             .signed_duration_since(self.work.availability.checked_at?)

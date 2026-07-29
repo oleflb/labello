@@ -31,11 +31,14 @@ impl LabelloApp {
                     self.work.availability.loading = false;
                     self.work.availability.last_attempt = Some(Instant::now());
                     if std::mem::take(&mut self.work.availability.refresh_after_load) {
-                        self.work.availability.tasks.clear();
+                        let migration_active = self.manual_migration_active();
+                        if !migration_active {
+                            self.work.availability.tasks.clear();
+                        }
                         self.work.availability.resolved = false;
                         self.work.availability.checked_at = None;
                         self.work.availability.error = None;
-                        if !self.work.migration.busy && !self.manual_migration_active() {
+                        if !self.work.migration.busy && !migration_active {
                             self.work.availability.last_attempt = None;
                             self.request_assignment_availability();
                         }

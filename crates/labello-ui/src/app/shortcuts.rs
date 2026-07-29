@@ -55,7 +55,7 @@ impl LabelloApp {
         for offset in 1..choices.len() {
             let next = (current as isize + direction * offset as isize)
                 .rem_euclid(choices.len() as isize) as usize;
-            if self.workflow_availability(&choices[next].task_id) != Some(false) {
+            if self.displayed_workflow_availability(&choices[next].task_id) != Some(false) {
                 self.request_transition(PendingTransition::Workflow(choices[next].task_id.clone()));
                 return;
             }

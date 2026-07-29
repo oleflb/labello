@@ -9,16 +9,41 @@ fn active_migration_discards_stale_availability_without_rechecking() {
     api.set_image_state(app.work.current_state.clone().unwrap());
     app.runtime.api = Some(api);
 
+    let unavailable_task = TaskId::from("bounding_box:person_cleanup");
+    app.work.availability.dataset_id = Some(app.config.dataset_id.clone());
+    app.work.availability.kind = Some(AssignmentKind::Annotation);
+    app.work.availability.tasks = app
+        .work
+        .tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), task.task_id != unavailable_task))
+        .collect();
+    app.work.availability.resolved = true;
+    assert_eq!(
+        app.workflow_availability(&unavailable_task),
+        Some(false)
+    );
+
     app.request_assignment_availability();
     let availability_request = take_assignment_availability_request(&mut app);
     app.request_exclude_migration_target(labello_domain::ObjectGroupId::from("group-left"));
     assert!(app.work.migration.busy);
     assert!(app.work.availability.refresh_after_load);
+    assert_eq!(app.workflow_availability(&unavailable_task), None);
+    assert_eq!(
+        app.displayed_workflow_availability(&unavailable_task),
+        Some(false)
+    );
 
     deliver_assignment_availability(&mut app, availability_request, true);
 
     assert!(!app.work.availability.loading);
     assert!(!app.work.availability.resolved);
+    assert_eq!(
+        app.displayed_workflow_availability(&unavailable_task),
+        Some(false),
+        "discarding the stale response must retain the last known picker state"
+    );
     assert!(
         app.runtime
             .commands
@@ -43,6 +68,19 @@ fn active_migration_discards_stale_availability_without_rechecking() {
             .commands
             .iter()
             .all(|command| !matches!(command, UiCommand::AssignmentAvailability { .. }))
+    );
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+    let unavailable_workflow = harness.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Imported person bounding-box cleanup",
+    );
+    assert!(
+        unavailable_workflow.accesskit_node().is_disabled(),
+        "the picker must keep the last known unavailable workflow disabled during migration"
     );
 }
 
