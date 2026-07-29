@@ -42,7 +42,7 @@ Only after that continue with the next issue.
   - Evaluate visual noise, workflow complexity, confusing naming, layout,
     interaction flow, visual consistency, and overall design quality.
   - Record every actionable finding as its own unchecked issue in
-    `docs/issues.md`.
+    `docs/tracking/issues.md`.
 
 # Archive
 
@@ -221,7 +221,7 @@ Only after that continue with the next issue.
       cohesive module may remain large when splitting it would obscure an
       invariant.
     - Final audit and phase-by-phase result:
-      [`structural-refactor-result.md`](structural-refactor-result.md).
+      [`structural-refactor-result.md`](../history/structural-refactor-result.md).
 - [x] Promote a prepared assignment immediately after confirming a manual
   migration.
   - Do not release or clear valid prepared assignments when migration

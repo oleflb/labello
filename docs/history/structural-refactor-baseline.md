@@ -6,7 +6,7 @@ Prepared: 2026-07-27
 
 Baseline commit: `09cb40d`
 
-Related issue: [Structural ownership refactor](issues.md)
+Related issue: [Structural ownership refactor](../tracking/issues.md)
 
 ## Purpose
 

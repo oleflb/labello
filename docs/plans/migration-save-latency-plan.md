@@ -9,9 +9,9 @@ complete dataset image index.
 
 Related documents:
 
-- [Architecture](architecture.md)
+- [Architecture](../architecture.md)
 - [Workflow policy ownership](structural-refactor-policy-ownership.md)
-- [Operations and redaction rules](operations.md)
+- [Operations and redaction rules](../operations.md)
 
 ## Summary
 

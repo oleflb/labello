@@ -10,9 +10,9 @@ Scope: Behavior-preserving preparation for the dataset import feature
 
 Related documents:
 
-- [Dataset import feature design](dataset-import-design.md)
-- [Labello UI and design guidelines](ui-design-guidelines.md)
-- [Operations and redaction rules](operations.md)
+- [Dataset import feature design](../dataset-import-design.md)
+- [Labello UI and design guidelines](../ui-design-guidelines.md)
+- [Operations and redaction rules](../operations.md)
 
 ## Decision Summary
 
@@ -32,7 +32,7 @@ These gates are not a redesign. Each change must preserve serialization,
 routes, authorization, locking, replay, UI behavior, and public Rust paths.
 
 If a refactor is not needed by an upcoming import phase, defer it to the
-[post-import refactor plan](post-import-refactor-plan.md). In particular,
+post-import refactor plan. In particular,
 splitting `crates/labello-ui/src/admin.rs` is valuable but is not an import
 prerequisite.
 

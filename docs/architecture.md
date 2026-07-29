@@ -115,7 +115,7 @@ demonstrated need.
 
 ## Detailed ownership references
 
-- [`structural-refactor-policy-ownership.md`](structural-refactor-policy-ownership.md)
+- [`structural-refactor-policy-ownership.md`](plans/structural-refactor-policy-ownership.md)
 - [`import-ownership.md`](import-ownership.md)
 - [`ui-ownership.md`](ui-ownership.md)
-- [`structural-refactor-result.md`](structural-refactor-result.md)
+- [`structural-refactor-result.md`](history/structural-refactor-result.md)

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Create `docs/availability-assignment-plan.md` against `alex-probiert-dinge` at `055d70b`.
+Create `docs/plans/availability-assignment-plan.md` against `alex-probiert-dinge` at `055d70b`.
 
 This is documentation-only work. The document describes the current availability subsystem, identifies confirmed cache/retrigger defects, and specifies a future test-first correction. Previous Assignment remains a separate review track.
 
@@ -495,7 +495,7 @@ Any confirmed defect receives a separate plan and change set.
 
 The documentation task is complete when:
 
-- `docs/availability-assignment-plan.md` exists.
+- `docs/plans/availability-assignment-plan.md` exists.
 - Contracts, routes, keys, invalidations, hits, misses, ownership, and retriggers are accurate.
 - Logical and physical cache keys are distinguished.
 - Server lookup/publication linearization is explicit.
@@ -556,7 +556,7 @@ Do not include:
 
 ## Assumptions
 
-- Output is repository Markdown at `docs/availability-assignment-plan.md`.
+- Output is repository Markdown at `docs/plans/availability-assignment-plan.md`.
 - `alex-probiert-dinge` remains the baseline.
 - Claims remain authoritative.
 - Server and UI TTLs remain 30 seconds.

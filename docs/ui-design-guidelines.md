@@ -1,8 +1,8 @@
 # Labello UI And Design Guidelines
 
 This is the working standard for UI changes. It distills the original
-[`ui-beautification.md`](ui-beautification.md) report and the completed
-[beautification work](beautification/README.md), which remain as rationale and
+[`ui-beautification.md`](plans/ui-beautification.md) report and the completed
+[beautification work](plans/beautification/README.md), which remain as rationale and
 history.
 
 ## Product Rules

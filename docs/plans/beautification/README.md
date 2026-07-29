@@ -1,6 +1,6 @@
 # Beautification Branch Stack
 
-For ongoing UI work, follow the [Labello UI and design guidelines](../ui-design-guidelines.md).
+For ongoing UI work, follow the [Labello UI and design guidelines](../../ui-design-guidelines.md).
 The documents below record the overhaul's implementation history.
 
 The UI beautification is implemented as ten stacked branches. Each branch is
