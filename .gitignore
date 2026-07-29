@@ -3,3 +3,4 @@
 /labello.server.toml
 /apps/labello-wasm/dist/
 *.tmp
+.worktrees/
