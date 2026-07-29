@@ -178,13 +178,16 @@ impl LabelloApp {
             && !self.loading.saving
             && !self.loading.image
             && self.pending_transition.is_none();
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             if self.view == AppView::Annotate
                 && ui
                     .add_enabled(ready, egui::Button::new("Submit & next"))
                     .clicked()
             {
                 self.submit_and_advance();
+            }
+            if self.view == AppView::Review && self.correction_draft.is_none() {
+                self.review_decision_buttons(ui, ready);
             }
             ui.menu_button("More actions", |ui| {
                 if self.view == AppView::Annotate {
@@ -367,20 +370,27 @@ impl LabelloApp {
                 self.start_correction();
             }
         }
+        if ui.ctx().content_rect().width() < LayoutMode::COMPACT_MAX_WIDTH {
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new("Approve  Y"))
-                .clicked()
-            {
-                self.request_review(ReviewDecision::Approved);
-            }
-            if ui
-                .add_enabled(ready, egui::Button::new("Reject  N"))
-                .clicked()
-            {
-                self.request_review(ReviewDecision::Rejected);
-            }
+            self.review_decision_buttons(ui, ready);
         });
+    }
+
+    fn review_decision_buttons(&mut self, ui: &mut egui::Ui, ready: bool) {
+        if ui
+            .add_enabled(ready, egui::Button::new("Approve  Y"))
+            .clicked()
+        {
+            self.request_review(ReviewDecision::Approved);
+        }
+        if ui
+            .add_enabled(ready, egui::Button::new("Reject  N"))
+            .clicked()
+        {
+            self.request_review(ReviewDecision::Rejected);
+        }
     }
 
     fn correction_actions(&mut self, ui: &mut egui::Ui, ready: bool) {

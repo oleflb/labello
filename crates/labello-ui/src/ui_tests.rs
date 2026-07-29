@@ -1214,6 +1214,55 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
 }
 
 #[test]
+fn mobile_review_decisions_share_one_bar_in_accept_reject_order() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        false,
+    );
+    let mut harness = loaded_review_harness(api);
+
+    for (width, height) in [(320.0, 568.0), (390.0, 667.0)] {
+        harness.state_mut().drawer = Some(Drawer::Inspector);
+        harness.set_size(egui::vec2(width, height));
+        harness.step();
+
+        let approve = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Approve  Y");
+        let reject = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Reject  N");
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Button, "Approve  Y")
+                .count(),
+            1,
+        );
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Button, "Reject  N")
+                .count(),
+            1,
+        );
+        assert!(
+            (approve.rect().center().y - reject.rect().center().y).abs() <= 1.0,
+            "review decisions are not in the same bar at {width}x{height}",
+        );
+        assert!(
+            approve.rect().right() <= reject.rect().left(),
+            "approve must be left of reject at {width}x{height}",
+        );
+        assert!(
+            approve.rect().bottom() <= height && reject.rect().bottom() <= height,
+            "review decisions overflow the mobile viewport at {width}x{height}",
+        );
+    }
+}
+
+#[test]
 fn setup_geometry_stays_clamped_at_supported_viewports() {
     let api = Rc::new(SpyApi::new());
     let mut harness = live_harness(api);
