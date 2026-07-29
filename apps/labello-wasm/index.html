@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Labello</title>
+    <link rel="icon" type="image/svg+xml" href="./assets/labello-icon.svg" />
     <link data-trunk rel="copy-dir" href="../../assets" data-target-path="assets" />
     <style>
       @font-face {
@@ -38,6 +39,11 @@
         z-index: 10;
       }
       #startup-status[data-error="true"] { color: #f87171; }
+      #startup-status img {
+        width: 96px;
+        height: 96px;
+        justify-self: center;
+      }
     </style>
     <script>
       function showStartupFailure(reason) {
@@ -55,7 +61,10 @@
     </script>
   </head>
   <body>
-    <div id="startup-status" role="status">Loading Labello...</div>
+    <div id="startup-status" role="status">
+      <img src="./assets/labello-icon.svg" alt="" aria-hidden="true" />
+      <span>Loading Labello...</span>
+    </div>
     <canvas id="labello-canvas"></canvas>
   </body>
 </html>

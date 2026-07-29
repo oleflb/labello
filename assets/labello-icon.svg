@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Labello Annotator app icon</title>
+  <desc id="desc">A centered thick teal bounding box whose right side is being completed by a proportionally accurate diagonal lip-balm stick.</desc>
+
+  <rect width="1024" height="1024" rx="190" fill="#090E18"/>
+
+  <path
+    d="M 882 357
+       V 794
+       Q 882 842 834 842
+       H 190
+       Q 142 842 142 794
+       V 230
+       Q 142 182 190 182
+       H 882"
+    fill="none"
+    stroke="#2DD4BF"
+    stroke-width="90"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!--
+    Reference silhouette: 760 px long by 187 px maximum width.
+    The base vector uses 500 × 123.0263158 units, preserving the 760:187 ratio.
+    It is uniformly scaled to 560 × 137.7894737 units for this composition.
+  -->
+  <g transform="translate(866.2 287.6) rotate(150) scale(1.12)">
+    <!-- Carve the frame away around the balm's exact rounded-tip contour. -->
+    <path
+      d="M 43.5 -43.5
+         H 72
+         V 43.5
+         H 43.5
+         A 43.5 43.5 0 0 1 43.5 -43.5
+         Z"
+      fill="#090E18"
+      stroke="#090E18"
+      stroke-width="24"
+      stroke-linejoin="round"
+    />
+
+    <path
+      d="M 43.5 -43.5
+         H 72
+         V 43.5
+         H 43.5
+         A 43.5 43.5 0 0 1 43.5 -43.5
+         Z"
+      fill="#020617"
+      transform="translate(-1.93 -12.66)"
+    />
+    <path
+      d="M 66 -44
+         V 44
+         C 66 49 70 52.5 76 52.5
+         H 346
+         C 354 52.5 356 61.5131579 366 61.5131579
+         H 480
+         C 506.6666667 61.5131579 506.6666667 -61.5131579 480 -61.5131579
+         H 366
+         C 356 -61.5131579 354 -52.5 346 -52.5
+         H 76
+         C 70 -52.5 66 -49 66 -44
+         Z"
+      fill="#020617"
+      transform="translate(-1.93 -12.66)"
+    />
+
+    <path
+      d="M 43.5 -43.5
+         H 72
+         V 43.5
+         H 43.5
+         A 43.5 43.5 0 0 1 43.5 -43.5
+         Z"
+      fill="#2DD4BF"
+    />
+    <path
+      d="M 23 -24
+         A 30 30 0 0 1 47 -34
+         H 63
+         V -20
+         H 47
+         A 18 18 0 0 0 33 -13
+         Z"
+      fill="#5EEAD4"
+    />
+    <path
+      d="M 66 -44
+         V 44
+         C 66 49 70 52.5 76 52.5
+         H 346
+         C 354 52.5 356 61.5131579 366 61.5131579
+         H 480
+         C 506.6666667 61.5131579 506.6666667 -61.5131579 480 -61.5131579
+         H 366
+         C 356 -61.5131579 354 -52.5 346 -52.5
+         H 76
+         C 70 -52.5 66 -49 66 -44
+         Z"
+      fill="#2364C9"
+    />
+    <path
+      d="M 358 -58
+         C 365 -30 365 30 358 58"
+      fill="none"
+      stroke="#1E55AF"
+      stroke-width="5"
+      stroke-linecap="round"
+    />
+    <path
+      d="M 88 -39
+         H 340
+         C 349 -39 356 -49 366 -49
+         H 470"
+      fill="none"
+      stroke="#4F7FD5"
+      stroke-width="9"
+      stroke-linecap="round"
+    />
+  </g>
+</svg>

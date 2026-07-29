@@ -1,5 +1,7 @@
 # Labello
 
+<img src="assets/labello-icon.svg" alt="Labello icon" width="128" />
+
 Labello is a browser-based image annotation system written in Rust. It combines
 an egui WebAssembly client with an Axum API and stores datasets, annotations,
 reviews, and audit history on the filesystem.
