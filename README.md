@@ -261,7 +261,7 @@ See the current [architecture and ownership map](docs/architecture.md), the
 The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
 
-`dev/egui-mcp-inspector` is a standalone native development tool outside the
+`apps/egui-mcp-inspector` is a standalone native development tool outside the
 main workspace. It reuses `labello-ui` with deterministic demo state by default
 and has an opt-in live mode for local development servers.
 
@@ -292,14 +292,14 @@ native inspector from the repository root:
 
 ```sh
 cargo install egui_mcp --locked
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml
 ```
 
 To inspect the native UI against a running local server, enable local
 administrator login and start the inspector in live mode:
 
 ```sh
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --live
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml -- --live
 ```
 
 The repository's `opencode.json` configures the `egui` MCP server. Restart
@@ -308,7 +308,7 @@ egui accessibility tree and accepts inspection input after attaching. Live
 mode can mutate real server data through the local administrator session; use
 a disposable development dataset. Use Chromium to validate actual WASM
 startup, browser behavior, cookies, and responsive rendering.
-See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
+See the [inspector README](apps/egui-mcp-inspector/README.md) for details.
 
 ## Production Notes
 

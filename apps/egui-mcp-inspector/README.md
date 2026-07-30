@@ -8,13 +8,13 @@ Run it from the repository root:
 
 ```sh
 cargo install egui_mcp --locked
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml
 ```
 
 The default is the annotation preset. Select another frozen visual state with:
 
 ```sh
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --preset review
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml -- --preset review
 ```
 
 Available presets are `annotation`, `setup`, `review`, `review-correction`,
@@ -33,7 +33,7 @@ clean inspection context.
 To connect the inspector to a running Labello server instead, use live mode:
 
 ```sh
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml -- --live
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml -- --live
 ```
 
 Live mode defaults to `http://127.0.0.1:8080`. When the loopback server enables

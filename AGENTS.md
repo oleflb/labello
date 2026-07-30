@@ -58,7 +58,7 @@ revision-specific records instead of silently rewriting them as current.
   shutdown wiring, and the Tokio/Axum executable.
 - `apps/labello-wasm`: thin browser bootstrap, raw browser-folder import
   adapter, Trunk target, and deployment assets.
-- `dev/egui-mcp-inspector`: standalone native inspection application with its
+- `apps/egui-mcp-inspector`: standalone native inspection application with its
   own workspace, lockfile, target directory, deterministic presets, and
   opt-in live-server mode.
 - `assets/`: tracked icon and font assets used by the product.
@@ -197,14 +197,14 @@ Do not edit or commit runtime/generated paths unless the task explicitly
 requires it:
 
 - `target/`
-- `dev/egui-mcp-inspector/target/`
+- `apps/egui-mcp-inspector/target/`
 - `apps/labello-wasm/dist/`
 - `datasets/` and all managed `.labello-server/` or `.labello/` contents
 - `datasets/.labello-server/auth.json`
 - `labello.server.toml`
 
 Modify `Cargo.lock` only when the root dependency graph changes. The inspector's
-`dev/egui-mcp-inspector/Cargo.lock` belongs to its separate workspace and should
+`apps/egui-mcp-inspector/Cargo.lock` belongs to its separate workspace and should
 change only with that graph.
 
 ## Commands
@@ -253,7 +253,7 @@ cargo check -p labello-wasm --target wasm32-unknown-unknown
 Check the standalone inspector through its manifest:
 
 ```sh
-cargo check --manifest-path dev/egui-mcp-inspector/Cargo.toml
+cargo check --manifest-path apps/egui-mcp-inspector/Cargo.toml
 ```
 
 ## Verification
@@ -296,12 +296,12 @@ Use each validation surface only for what it proves:
 Run the inspector from the repository root:
 
 ```sh
-EGUI_INSPECTION=1 cargo run --manifest-path dev/egui-mcp-inspector/Cargo.toml
+EGUI_INSPECTION=1 cargo run --manifest-path apps/egui-mcp-inspector/Cargo.toml
 ```
 
 Use `-- --preset <name>` for a frozen state or `-- --live` for a local server.
 The preset list and live-mode limitations are maintained in
-`dev/egui-mcp-inspector/README.md`. Live mode omits browser-only folder upload,
+`apps/egui-mcp-inspector/README.md`. Live mode omits browser-only folder upload,
 snapshot download, OAuth, and persistent native drafts.
 
 Keep the inspector bound to loopback. Its default inspection port has no
