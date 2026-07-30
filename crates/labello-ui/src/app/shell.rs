@@ -11,6 +11,11 @@ impl eframe::App for LabelloApp {
         self.process_messages(ui.ctx());
         self.retry_prefetch_if_due(ui.ctx());
         self.sync_review_selection();
+        self.work.canvas.require_pan_mode(
+            self.view == AppView::Review
+                && self.work.current.is_some()
+                && self.work.correction_draft.is_none(),
+        );
         self.sync_manual_migration();
         self.start_next_persistence_command();
         self.start_setup_load();

@@ -17,7 +17,7 @@ fn canvas_hover_cursor(
     if middle_down {
         return Some(egui::CursorIcon::Grabbing);
     }
-    if state.pan_mode || state.space_pan || state.primary_pan {
+    if state.pan_mode() || state.space_pan || state.primary_pan {
         return Some(if primary_down {
             egui::CursorIcon::Grabbing
         } else {
@@ -125,7 +125,7 @@ fn handle_view_gestures(
     });
     if primary_pressed && response.is_pointer_button_down_on() {
         state.space_pan = space_down;
-        state.primary_pan = state.pan_mode;
+        state.primary_pan = state.pan_mode();
     }
     if state.space_pan || state.primary_pan {
         if primary_down {

@@ -201,6 +201,11 @@ zoom keys. Press `P` to toggle Pan mode, then left-drag a zoomed image. Press
 `P` or `Escape` to return to annotation input. Space+left-drag, middle-drag,
 touch gestures, and double-click-to-fit remain available.
 
+Approval review keeps Pan mode active so primary drag moves the focused image
+without an extra mode switch. Starting a reviewer correction returns primary
+drag to object editing; Space+left-drag and middle-drag still pan while
+correcting.
+
 While placing or revising a skeleton, drag any already placed keypoint on the
 selected object to correct its position. This works for ordinary annotation,
 guided migration drafts, and reviewer correction; read-only review remains

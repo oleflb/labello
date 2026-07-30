@@ -42,7 +42,8 @@ Only after that continue with the next issue.
   - Completed on 2026-07-30 by separating visible and occluded placement,
     optional not-present keypoints, and clearly labeled object exclusion, with
     a one-position minimum for new migration skeletons.
-- [ ] Always be in pan mode when in review
+- [x] Always be in pan mode when in review
+  - Completed on 2026-07-30.
 - [ ] Submit and switch does not work
 - [ ] Review does not have a refocus button.
 - [ ] After loading an image or completing an availability check, the workflow

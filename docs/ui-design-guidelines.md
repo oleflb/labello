@@ -127,8 +127,10 @@ has been recorded.
 - **Setup:** feature one valid next dataset action, list all datasets separately,
   and keep connection and creation secondary after sign-in.
 - **Workspace:** preserve tested canvas geometry and gestures; keep Pan, zoom,
-  and Fit visible; place review phase near the canvas; prefer compact object
-  summaries over coordinate-heavy labels.
+  and Fit visible; keep Pan mode active during approval decisions and return
+  primary drag to object editing during reviewer correction; place review phase
+  near the canvas; prefer compact object summaries over coordinate-heavy
+  labels.
 - **Skeleton outcomes:** present **Visible** and **Occluded** as selected
   coordinate-placement modes with one concise dynamic instruction. Present
   **Not present** as a coordinate-free outcome for one optional keypoint.

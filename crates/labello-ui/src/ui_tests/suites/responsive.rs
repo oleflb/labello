@@ -707,18 +707,29 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
     );
     let mut harness = loaded_review_harness(api);
 
+    assert!(harness.state().work.canvas.pan_mode());
+    assert!(harness.state().work.canvas.pan_mode_required());
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Pan")
+            .accesskit_node()
+            .is_disabled()
+    );
     click(&mut harness, "Zoom in");
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
     let pan_before = harness.get_by_label("Pan").rect();
     let zoom_out_before = harness.get_by_label("Zoom out").rect();
-    click(&mut harness, "Pan");
+    harness.key_press(egui::Key::P);
+    harness.step();
     assert!(harness.state().work.canvas.pan_mode());
     assert_eq!(harness.get_by_label("Pan").rect(), pan_before);
     assert_eq!(harness.get_by_label("Zoom out").rect(), zoom_out_before);
-    click(&mut harness, "Pan");
-    assert!(!harness.state().work.canvas.pan_mode());
+    harness.key_press(egui::Key::Escape);
+    harness.step();
+    assert!(harness.state().work.canvas.pan_mode());
     click(&mut harness, "Fit");
     assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
+    assert!(harness.state().work.canvas.pan_mode());
     harness.key_press(egui::Key::Plus);
     harness.step();
     assert!(harness.state().work.canvas.current_zoom() > 1.0);

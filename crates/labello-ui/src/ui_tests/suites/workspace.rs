@@ -2250,6 +2250,53 @@ fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_dra
 }
 
 #[test]
+fn review_pan_mode_is_locked_until_reviewer_correction_needs_primary_drag() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.3,
+            height: 0.3,
+        }),
+        true,
+    );
+    let mut harness = loaded_review_harness(api);
+
+    assert!(harness.state().work.canvas.pan_mode());
+    assert!(harness.state().work.canvas.pan_mode_required());
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Pan")
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    click(&mut harness, "Correct object");
+    harness.step();
+    assert!(!harness.state().work.canvas.pan_mode());
+    assert!(!harness.state().work.canvas.pan_mode_required());
+    assert!(
+        !harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Pan")
+            .accesskit_node()
+            .is_disabled()
+    );
+
+    click(&mut harness, "Discard correction");
+    harness.step();
+    assert!(harness.state().work.canvas.pan_mode());
+    assert!(harness.state().work.canvas.pan_mode_required());
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Pan")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
 fn review_target_is_canonical_and_full_image_phase_cannot_correct() {
     let api = Rc::new(SpyApi::new());
     seed_review_annotation(

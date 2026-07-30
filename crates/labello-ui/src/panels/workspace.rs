@@ -297,13 +297,22 @@ impl LabelloApp {
         ui.horizontal(|ui| {
             let pan_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
+            let pan_required = self.work.canvas.pan_mode_required();
             let pan = egui::Button::new("Pan")
                 .selected(self.work.canvas.pan_mode())
                 .min_size(egui::vec2(52.0, 44.0));
             if ui
-                .add_enabled(self.work.canvas.can_pan(), pan)
-                .on_disabled_hover_text("Zoom in before enabling Pan mode.")
-                .on_hover_text(format!("Pan ({pan_shortcut}). Space or middle-drag."))
+                .add_enabled(self.work.canvas.can_pan() && !pan_required, pan)
+                .on_disabled_hover_text(if pan_required {
+                    "Pan mode stays active during review."
+                } else {
+                    "Zoom in before enabling Pan mode."
+                })
+                .on_hover_text(if pan_required {
+                    "Pan mode stays active during review. Space or middle-drag.".to_string()
+                } else {
+                    format!("Pan ({pan_shortcut}). Space or middle-drag.")
+                })
                 .clicked()
             {
                 self.trigger_user_action(labello_domain::UserAction::TogglePanMode);

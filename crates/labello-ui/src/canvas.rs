@@ -124,6 +124,7 @@ pub struct CanvasState {
     pan: Vec2,
     space_pan: bool,
     pan_mode: bool,
+    pan_mode_required: bool,
     primary_pan: bool,
     last_canvas_click: Option<(f64, Pos2)>,
     review_target: ReviewViewTarget,
@@ -140,6 +141,7 @@ impl Default for CanvasState {
             pan: Vec2::ZERO,
             space_pan: false,
             pan_mode: false,
+            pan_mode_required: false,
             primary_pan: false,
             last_canvas_click: None,
             review_target: ReviewViewTarget::Disabled,
@@ -174,7 +176,11 @@ impl CanvasState {
     }
 
     pub fn pan_mode(&self) -> bool {
-        self.pan_mode
+        self.pan_mode_required || self.pan_mode
+    }
+
+    pub(crate) fn pan_mode_required(&self) -> bool {
+        self.pan_mode_required
     }
 
     pub fn can_pan(&self) -> bool {
@@ -190,14 +196,31 @@ impl CanvasState {
     }
 
     pub fn toggle_pan_mode(&mut self) {
+        if self.pan_mode_required {
+            return;
+        }
         self.cancel_drag();
         self.primary_pan = false;
         self.pan_mode = self.zoom > MIN_ZOOM && !self.pan_mode;
     }
 
     pub fn exit_pan_mode(&mut self) {
+        if self.pan_mode_required {
+            return;
+        }
         self.primary_pan = false;
         self.pan_mode = false;
+    }
+
+    pub(crate) fn require_pan_mode(&mut self, required: bool) {
+        if self.pan_mode_required == required {
+            return;
+        }
+        self.cancel_drag();
+        self.space_pan = false;
+        self.primary_pan = false;
+        self.pan_mode = false;
+        self.pan_mode_required = required;
     }
 
     pub(crate) fn stored_transform(&self) -> crate::persistence::StoredCanvasTransform {
@@ -1341,6 +1364,41 @@ mod tests {
         assert!(harness.state().actions.is_empty());
 
         harness.state_mut().canvas.fit_view();
+        harness.step();
+        assert!(!harness.state().canvas.pan_mode());
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            pos2(100.0, 100.0),
+            pos2(180.0, 160.0),
+        );
+        assert!(matches!(
+            harness.state().actions.last(),
+            Some(CanvasAction::CreateBoundingBox(_))
+        ));
+    }
+
+    #[test]
+    fn required_pan_mode_cannot_be_exited_and_unlocks_to_annotation_input() {
+        let mut harness = canvas_harness(true);
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.zoom_in();
+        harness.state_mut().canvas.require_pan_mode(true);
+        harness.step();
+        assert!(harness.state().canvas.pan_mode());
+        assert!(harness.state().canvas.pan_mode_required());
+
+        stepped_primary_drag(&mut harness, pos2(200.0, 150.0), pos2(230.0, 175.0));
+        assert_ne!(harness.state().canvas.pan, Vec2::ZERO);
+        assert!(harness.state().actions.is_empty());
+
+        harness.state_mut().canvas.toggle_pan_mode();
+        harness.state_mut().canvas.exit_pan_mode();
+        harness.state_mut().canvas.fit_view();
+        harness.step();
+        assert!(harness.state().canvas.pan_mode());
+
+        harness.state_mut().canvas.require_pan_mode(false);
         harness.step();
         assert!(!harness.state().canvas.pan_mode());
         drag_at(
