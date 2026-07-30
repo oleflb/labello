@@ -1,5 +1,10 @@
 # Labello
 
+> **Status:** Current repository overview and setup guide
+> **Owner:** Labello maintainers
+> **Audience:** Users, operators, and contributors
+> **Last verified:** 2026-07-30 at `4f9c332`
+
 <img src="assets/labello-icon.svg" alt="Labello icon" width="128" />
 
 Labello is a browser-based image annotation system written in Rust. It combines
@@ -10,9 +15,9 @@ Labello currently supports:
 
 - bounding-box and skeleton/keypoint annotation;
 - autosave, undo/redo, and browser draft recovery;
-- automatic annotation, review, and adjudication assignments;
-- object-level approval review and correction workflows;
-- dataset, task, class, tutorial, role, and keybinding administration;
+- automatic annotation and approval-review assignments;
+- object-level approval review, full-image checks, and correction workflows;
+- dataset, task, class, text-tutorial, role, and keybinding administration;
 - filesystem image ingestion, duplicate detection, statistics, and snapshots;
 - atomic new-dataset import for explicit YOLO detection/pose and COCO
   instances/keypoints ground-truth profiles;
@@ -248,9 +253,10 @@ boundaries; and the UI owns explicit feature state with closed asynchronous
 commands and responses. `DatasetRepository`, `ImportService`, and `LabelloApi`
 are intentional capability facades, not generic abstraction layers.
 
-See the current [architecture and ownership map](docs/architecture.md), plus
-the detailed [import](docs/import.md) and
-[UI](docs/ui-ownership.md) ownership references.
+See the current [architecture and ownership map](docs/architecture.md), the
+[HTTP API contract](docs/api.md), the
+[persistence and recovery contract](docs/persistence.md), and the detailed
+[import](docs/import.md) and [UI](docs/ui-ownership.md) ownership references.
 
 The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
@@ -317,20 +323,77 @@ See the [inspector README](dev/egui-mcp-inspector/README.md) for details.
 
 ## Current Limitations
 
-- Browser offline bundle and synchronization APIs are not wired into the UI.
-- Independent multi-annotator agreement and automatic disagreement routing are
-  not operational, so the Adjudicate UI is disabled.
-- Prelabel configuration exists, but model execution currently returns
-  placeholder suggestions.
-- There is no supported native desktop client or browser end-to-end test suite;
-  the native inspector is a development tool and its live mode omits
-  browser-only functionality.
-- Ingest jobs and some caches are process-local and do not survive restarts.
+### Product And Workflow Gaps
+
+- Offline bundle and synchronization APIs exist, but the browser UI cannot
+  download an offline workspace, author against it without a network
+  connection, retain versioned offline mutations, synchronize them, or
+  present merge conflicts. Browser draft recovery is not offline mode.
+- Independent multi-annotator labeling, agreement calculation, automatic
+  acceptance, disagreement routing, and adjudication are not operational.
+  Adjudicator roles and API/domain shapes exist, but there is no reachable
+  production adjudication workflow and the Adjudicate UI is disabled.
+- Prelabel configuration, task association, queued loading, display,
+  acceptance, and discard controls exist, but annotators cannot choose among
+  the available configurations: every configuration associated with the task
+  is requested. No model is executed. The server returns fixed placeholder
+  geometry; browser-local WebGPU and CPU/WASM fallback execution are not
+  implemented. Accepted placeholders currently record a generic model identity
+  rather than the configured model's exact identity.
+- Task tutorials display configured title and text only. Administrators can
+  enter example-image paths, but those images are not loaded or shown to
+  annotators.
+- Approval review supports object decisions through buttons and configurable
+  shortcuts plus a final full-image check. Swipe-to-approve or reject is not
+  implemented.
+- The canvas routes a single pen like a generic pointer, but Labello does not
+  currently claim tested stylus support for a named browser/device combination
+  or guarantee that pen, mouse, and touch interactions do not conflict.
+- Assignment imbalance enforcement compares completion counts per enabled task.
+  It does not separately aggregate and enforce class-level balance when
+  multiple tasks share a class.
+- There is no supported native desktop client. The native inspector is a
+  development tool, not an offline or production client.
+
+### Persistence And Compatibility Gaps
+
+- Current dataset configuration and keybindings are versioned TOML, while image
+  indexes, state, events, schemas, snapshots, and import records use JSON or
+  JSONL. This differs from the target design's all-JSON dataset-metadata
+  description.
+- Persisted schema version 3 is current and version 2 is the only supported
+  legacy version. Version 1 artifacts are rejected; no `1 -> 2` migration is
+  available despite the target design saying schema versions start at 1.
+- Snapshots are downloadable annotation/audit packages, not complete backups.
+  They omit image bytes, authentication state, user keybindings, and private
+  import control state, and there is no native snapshot-restore operation.
+
+### Production And Operational Boundaries
+
+- There is no browser end-to-end test suite. `egui_kittest` and the native
+  inspector do not validate WASM networking, cookies, IndexedDB, browser input,
+  or deployed responsive behavior.
+- Ingest jobs and some derived caches are process-local and do not survive
+  restarts as durable jobs.
+- Configured cleanup of retained import jobs is not invoked or scheduled by the
+  production server, and import API control/idempotency records have no complete
+  retention lifecycle.
+- `GET /health` is liveness only; there is no readiness endpoint covering the
+  authentication store, dataset-root mount, write capacity, or free space.
+- Graceful shutdown is wired to Ctrl-C, but there is no application drain
+  deadline or documented SIGTERM handler.
 - Import format support is tested under configured limits, but official
   COCO-scale operation remains a separate performance gate.
-- Import publication and assignment locking assume one server process per
-  datasets root.
+- Import does not merge into existing datasets and does not support prediction
+  or prelabel import, segmentation, remote sources, archive sources, or
+  round-trip export.
+- Import publication, assignment locking, and in-memory caches assume one
+  Labello server process per datasets root. Multi-process coordination is not
+  supported, including on a shared network filesystem.
 
 The broader product requirements and planned behavior are documented in
 [labello.md](labello.md). That document describes the target product and is
-not an implementation checklist.
+not evidence of current support. Fully absent product capabilities are tracked
+in [feature requests](docs/tracking/feature-requests.md); partial behavior,
+contract disagreements, and implementation defects are tracked in
+[issues](docs/tracking/issues.md).

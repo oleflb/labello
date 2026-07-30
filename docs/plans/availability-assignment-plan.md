@@ -1,12 +1,24 @@
 # Availability Contracts, Cache Retriggers, and Previous Assignment Review
 
+Status: Completed; retained as a historical implementation record
+
+Prepared against: `055d70b`
+
+Last classified: 2026-07-30 at `4f9c332`
+
+Current references: [Architecture](../architecture.md),
+[UI ownership](../ui-ownership.md), and the current code and tests
+
 ## Summary
 
-Create `docs/plans/availability-assignment-plan.md` against `alex-probiert-dinge` at `055d70b`.
+This document captured the availability subsystem at `055d70b`, identified
+cache/retrigger defects, and specified their test-first correction together
+with the separate Previous Assignment review. The batch lookup/publication,
+central UI invalidation, persisted-cache protection, deterministic race tests,
+and Previous Assignment behavior described below are implemented.
 
-This is documentation-only work. The document describes the current availability subsystem, identifies confirmed cache/retrigger defects, and specifies a future test-first correction. Previous Assignment remains a separate review track.
-
-No production code is changed as part of this documentation work.
+The baseline, file paths, and future-tense acceptance language are retained as
+the implementation record. They are not a current source map.
 
 ## Baseline
 
@@ -456,7 +468,7 @@ Document ownership validation, exact target validation, active-successor renewal
 
 Any confirmed defect receives a separate plan and change set.
 
-## Future implementation file map
+## Implemented File Map
 
 ### Server
 
@@ -508,7 +520,7 @@ The documentation task is complete when:
 - `git diff --check` passes.
 - No production code changes are included.
 
-## Future implementation acceptance
+## Implementation Acceptance
 
 A later implementation is complete when:
 

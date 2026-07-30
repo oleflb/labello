@@ -1,5 +1,15 @@
 # Workflow policy ownership
 
+Status: Current ownership inventory
+
+Owner: Labello maintainers
+
+Audience: Maintainers and contributors
+
+Last verified: 2026-07-30 at `4f9c332`
+
+Normative summary: [Architecture](../architecture.md)
+
 This inventory fixes the semantic owner of exhaustive workflow matches during
 the structural refactor. It distinguishes shape and replay validity from API
 trust policy and storage transaction policy. Selective searches for one event

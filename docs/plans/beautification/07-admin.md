@@ -1,5 +1,7 @@
 # Step 7: Restructure Admin And Data Views
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Split the single Admin scroll into Overview, People, Images, Schema,

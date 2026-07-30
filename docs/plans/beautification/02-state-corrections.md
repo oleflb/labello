@@ -1,5 +1,7 @@
 # Step 2: Truthful Async States
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Keep API URL edits in a draft until Reconnect or Enter commits a change.

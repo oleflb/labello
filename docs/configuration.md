@@ -1,5 +1,10 @@
 # Server Configuration
 
+> **Status:** Normative current reference
+> **Owner:** Server maintainers
+> **Audience:** Operators and maintainers
+> **Last verified:** 2026-07-30 at `4f9c332`
+
 Labello reads its server configuration from `labello.server.toml` in the
 current working directory. Set `LABELLO_CONFIG` to use a different path. If the
 selected file does not exist, the server creates its parent directories and
@@ -194,6 +199,12 @@ browser-upload-only deployment, omit that array entry and set
 | `import.serverRoots[].path` | Existing source directory outside and non-overlapping with `datasetsRoot`. |
 | `import.serverRoots[].allowedOwners` | Bootstrap administrator user IDs allowed to see and select this root. An empty list allows any bootstrap administrator. Invalid user IDs fail startup. |
 
+The two retention values configure storage cleanup policy, but the production
+server does not currently schedule that cleanup. Startup recovery separately
+expires abandoned non-protected jobs; it does not provide periodic cleanup of
+retained failed, cancelled, or successful metadata. See
+[Dataset Import operations](operations.md#dataset-import).
+
 ### Import Limits
 
 The optional `[import.limits]` section controls every limit enforced by the
@@ -242,6 +253,18 @@ and upload chunks cannot exceed a single file; path component and depth limits
 cannot exceed the path byte limit; per-image annotations cannot exceed total
 annotations; YOLO columns cannot exceed line bytes; generated per-image files
 cannot exceed staged bytes; and total source bytes cannot exceed staged bytes.
+
+Image validation also requires:
+
+```text
+decodedImageMemoryBytes >= singleSourceFileBytes + (2 * decodedImageBytes)
+```
+
+The reservation covers the encoded source file, its worst-case decoded output,
+and a second decoded canvas required by GIF validation. With the defaults this
+is exactly 4 GiB + (2 × 512 MiB) = 5 GiB. Startup rejects configurations that
+overflow while calculating the minimum or whose memory budget is below it with
+an error naming all three settings.
 
 Server-root capability filtering is fail closed: only roots present in the
 loaded configuration and authorized for the current bootstrap administrator

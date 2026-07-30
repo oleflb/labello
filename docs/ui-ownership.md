@@ -1,5 +1,10 @@
 # UI ownership
 
+> **Status:** Normative current reference
+> **Owner:** UI maintainers
+> **Audience:** UI maintainers and contributors
+> **Last verified:** 2026-07-30 at `4f9c332`
+
 `LabelloApp` is the egui composition root. It owns navigation and the following
 explicit feature states:
 

@@ -1,5 +1,12 @@
 # Dataset Import
 
+> **Status:** Normative current reference
+> **Owner:** Import maintainers
+> **Audience:** Operators, maintainers, and UI contributors
+> **Last verified:** 2026-07-30 at `4f9c332`
+> **Supersedes:** `history/dataset-import-design.md` and
+> `history/import-ownership.md` for current behavior
+
 Labello imports an externally annotated YOLO or COCO source by converting it
 into a new native dataset. Import never merges into, replaces, or restores an
 existing dataset. The source is sealed and preflighted before Labello builds
@@ -84,19 +91,48 @@ supported.
    replay exactly from event logs, and publishes with an atomic no-replace
    rename.
 8. The client can recover and continue an owned job after reload. Server
-   startup reconciles durable jobs, publication state, reservations, and
-   cleanup.
+   startup reconciles durable jobs, publication state, and reservations.
 
-The persisted lifecycle is monotonic:
+The normal successful path moves forward:
 
 ```text
 registering -> uploading -> sealed -> preflighting -> awaiting_decision
 awaiting_decision -> building -> verifying -> committing -> succeeded
-any pre-commit state -> failed | cancelled | expired
 ```
 
-`committing` is not cancellable. A retryable operation can resume only while
-the sealed source and accepted plan still match.
+The lifecycle is deliberately not monotonic across retries and process
+recovery:
+
+```text
+preflighting --preflight failure--> sealed
+preflighting --recovery with valid artifacts--> awaiting_decision
+preflighting --recovery without valid artifacts--> sealed
+building | verifying --recovery with valid artifacts--> awaiting_decision
+building | verifying --recovery without valid artifacts--> sealed
+committing --recovery of sealed output--> succeeded
+building | verifying --recovery after publication--> succeeded
+build failure before publication--> failed
+any retained state except committing or succeeded --cancel request--> cancelled
+inactive non-protected work --startup expiration--> expired, then removed
+retained terminal or inactive work --retention cleanup--> expired, then removed
+```
+
+Recovery rewinds only to a durable checkpoint. `awaiting_decision` requires a
+current persisted plan and normalized import artifacts; otherwise recovery
+returns to the sealed source. Output from an interrupted build or verification
+is discarded before retry. A committing job is never cancelled or expired:
+startup verifies and publishes its sealed output, or recognizes the already
+published destination. A failed job can be cancelled to release and remove its
+remaining workspace.
+
+Retention cleanup is implemented by the storage service but is not currently
+scheduled by the production server. Startup independently expires abandoned
+non-terminal jobs outside the protected build, verification, and commit
+phases. See [Operations](operations.md#dataset-import) for the current
+operational limitation.
+
+A retryable operation can resume only while the sealed source and accepted
+plan still match.
 
 ## Mapping And Workflow Semantics
 
@@ -141,8 +177,10 @@ dataset files and are not added to snapshots.
 Private jobs, destination reservations, source indexes, upload state, and API
 control records live below `<datasetsRoot>/.labello-server/imports`. Startup
 recovery validates staged generations, resumes supported migrations,
-reconciles a completed publication with its job record, and cleans expired
+reconciles a completed publication with its job record, and expires abandoned
 inactive work without expiring active build, verification, or commit phases.
+Configured cleanup of retained terminal metadata is not currently scheduled by
+the production server.
 
 ## Code Ownership
 

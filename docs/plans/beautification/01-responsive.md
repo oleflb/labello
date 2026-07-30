@@ -1,5 +1,7 @@
 # Step 1: Responsive Work Header
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Reproduce the compact layout failure with long image and workflow names at

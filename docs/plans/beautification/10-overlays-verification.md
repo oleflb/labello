@@ -1,5 +1,7 @@
 # Step 10: Complete Overlays And Verification
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Use native `egui::Modal` surfaces for every blocking decision and for compact

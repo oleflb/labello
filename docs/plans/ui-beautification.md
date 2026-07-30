@@ -1,19 +1,31 @@
 # Labello UI Beautification
 
+Status: Completed; retained as a historical design report
+
+Assessment baseline: egui/eframe 0.35 before the beautification branch stack
+
+Last classified: 2026-07-30 at `4f9c332`
+
+Current replacement: [Labello UI and design guidelines](../ui-design-guidelines.md)
+
 ## Purpose
 
-This document compares Labello's current `egui` UI with the recommendations in
-the "Make `egui` look like a designed product" report and turns that comparison
-into a repository-specific overhaul plan.
+This document compared Labello's `egui` UI at the assessment baseline with the
+recommendations in the "Make `egui` look like a designed product" report and
+turned that comparison into a repository-specific overhaul plan.
 
 The goal is not to replace working UI code with a large component framework. It
 is to make Labello feel like one deliberate product by completing the visual
 system it already has, clarifying the application shell, and polishing each
 screen and state consistently.
 
-The assessment is based on the current `egui`/`eframe` 0.35 code, the native
+The assessment was based on the then-current `egui`/`eframe` 0.35 code, the native
 inspector in deterministic and live-server modes, and the existing
 `egui_kittest` suite.
+
+Source paths, line references, observations, and “current” labels below refer
+to that historical baseline. They are preserved as design rationale, not as a
+map of the present code.
 
 ## Executive Assessment
 
@@ -107,11 +119,11 @@ visual foundations to preserve.
 | Complete loading, empty, error, and disabled states | Many states exist, but several first-load states conflict or show misleading fallback content | Partial | Define one state composition per data region and test the state matrix |
 | Restrained borders, radii, shadows, and accent | Cards and separators are frequent; cards use a 14-point radius; shadows are mostly defaults | Partial | Use spacing before borders, reduce card nesting, standardize radii, reserve shadows for overlays |
 
-## Current Visual System
+## Visual System At Assessment
 
 ### Implementation Map
 
-| Area | Current source |
+| Area | Source at assessment |
 | --- | --- |
 | Palette, global style, and shared frames | `crates/labello-ui/src/theme.rs` |
 | Layout modes and shell panel order | `crates/labello-ui/src/app.rs:81-109`, `crates/labello-ui/src/app.rs:1965-2045` |
@@ -261,7 +273,7 @@ where Labello needs a semantic visual distinction.
 
 ## Application Shell
 
-### Current Problem
+### Problem At Assessment
 
 The current top region has two visual rows. It combines:
 

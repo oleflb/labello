@@ -1,5 +1,7 @@
 # Step 5: Recompose The Application Shell
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Separate global identity, dataset, status, account, and overflow controls from

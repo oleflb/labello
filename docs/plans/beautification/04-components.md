@@ -1,5 +1,7 @@
 # Step 4: Consolidate Components
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Add semantic primary, quiet, and danger button variants while retaining the

@@ -1,10 +1,17 @@
 # Labello
 
+> **Status:** Target product specification; not evidence of current support
+> **Owner:** Product maintainers
+> **Audience:** Product owners, designers, and maintainers
+> **Last classified:** 2026-07-30 at `4f9c332`
+> **Current behavior:** See [`README.md`](README.md) and
+> [`docs/README.md`](docs/README.md)
+
 ## Stories
 
 User Stories And Acceptance Criteria
 US-01: Browser-Based Annotation
-User story:  
+User story:
 As an annotator, I want to annotate images directly in the browser so that I can work without downloading the full dataset in advance.
 Acceptance criteria:
 - The browser annotation UI is implemented in Rust using egui and compiled to WebAssembly.
@@ -13,7 +20,7 @@ Acceptance criteria:
 - Annotations are saved automatically or through an explicit save action.
 - Annotators can continue through assigned images without manually downloading or managing dataset files.
 US-02: Client-Side Image Queue
-User story:  
+User story:
 As an annotator, I want upcoming images to be preloaded in the browser so that switching images does not require a visible roundtrip.
 Acceptance criteria:
 - The client keeps a configurable queue of upcoming images.
@@ -22,7 +29,7 @@ Acceptance criteria:
 - The queue size can be configured.
 - If the queue is empty, the UI clearly indicates loading state.
 US-03: Stylus Input
-User story:  
+User story:
 As an annotator, I want to use stylus input so that I can annotate precisely on supported devices.
 Acceptance criteria:
 - Stylus input is supported for annotation actions.
@@ -30,7 +37,7 @@ Acceptance criteria:
 - Annotators can place, move, and adjust labels using a stylus.
 - The annotation canvas behaves correctly on devices with pen support.
 US-04: Offline Annotation
-User story:  
+User story:
 As an annotator, I want to download an assigned subset of the dataset so that I can annotate offline.
 Acceptance criteria:
 - Annotators can download a bounded subset of assigned images and required metadata.
@@ -41,7 +48,7 @@ Acceptance criteria:
 - During sync, offline event log fragments are validated and merged into the server-side per-image event logs.
 - Sync conflicts are detected and surfaced to the user.
 US-05: Labeling Task Configuration
-User story:  
+User story:
 As a data admin, I want to define what should be labeled so that annotators work on the correct tasks.
 Acceptance criteria:
 - Admins can define labeling tasks.
@@ -50,7 +57,7 @@ Acceptance criteria:
 - Supported annotation types include bounding boxes and skeleton/keypoints.
 - Task configuration determines which tools and labels are available to annotators.
 US-06: Labeling Instructions And Tutorial
-User story:  
+User story:
 As a data admin, I want to provide labeling instructions so that annotators understand how to complete each task.
 Acceptance criteria:
 - Admins can add instructions per task.
@@ -59,7 +66,7 @@ Acceptance criteria:
 - Annotators can access the tutorial while labeling.
 - Tutorial content can explain both what to label and how to label it.
 US-07: Task-Focused Annotation
-User story:  
+User story:
 As an annotator, I want to select the current labeling task so that I can focus on one class or annotation type at a time.
 Acceptance criteria:
 - Annotators can select from available tasks.
@@ -68,7 +75,7 @@ Acceptance criteria:
 - The system tracks which tasks have been completed per image.
 - Completed and pending tasks are visible to the annotator.
 US-08: Per-Task Review Configuration
-User story:  
+User story:
 As a data admin, I want to configure review requirements per task so that annotation quality can be controlled independently for each label type, class, or workflow.
 Acceptance criteria:
 - Admins can define the required number of reviews per task.
@@ -78,7 +85,7 @@ Acceptance criteria:
 - Review settings are applied when assigning work.
 - Review settings are applied when determining task completion.
 US-09: Independent Labeling With Adjudication
-User story:  
+User story:
 As a data admin, I want independent labeling review with adjudication by authorized adjudicators so that disagreements between annotators can be resolved by qualified users.
 Acceptance criteria:
 - Multiple annotators can label the same image/task independently.
@@ -93,7 +100,7 @@ Acceptance criteria:
 - Reviewer and adjudicator roles are assigned per dataset.
 - Only users explicitly assigned to the relevant dataset role can act as reviewers or adjudicators.
 US-10: Approval Review Workflow
-User story:  
+User story:
 As a data admin, I want approval review so that reviewers can approve or reject completed annotations.
 Acceptance criteria:
 - Reviewers receive completed annotations for review.
@@ -106,7 +113,7 @@ Acceptance criteria:
 - Reviewer corrections create new annotation versions and are recorded in the per-image event log.
 - Only users explicitly assigned as reviewers for the dataset can approve, reject, or correct annotations.
 US-11: Prelabeling Job Configuration
-User story:  
+User story:
 As a data admin, I want to configure prelabeling jobs so that model-generated suggestions can accelerate annotation.
 Acceptance criteria:
 - Admins can create prelabeling configurations.
@@ -120,7 +127,7 @@ Acceptance criteria:
 - Output processing can include IoU or overlap handling.
 - Prelabeling configurations can be made available to annotators.
 US-12: Prelabeling Suggestions For Annotators
-User story:  
+User story:
 As an annotator, I want to select a prelabeling configuration so that suggested labels are available when I open an image.
 Acceptance criteria:
 - Annotators can choose from available prelabeling configurations.
@@ -132,7 +139,7 @@ Acceptance criteria:
 - Prelabels are temporary client-side hints until accepted by the annotator.
 - Accepted prelabels are persisted as normal annotations with source metadata indicating they originated from a prelabel suggestion.
 US-13: Class And Task Imbalance Control
-User story:  
+User story:
 As a data admin, I want to limit class and task imbalance so that annotation progress remains balanced across the dataset.
 Acceptance criteria:
 - Admins can configure a maximum imbalance ratio.
@@ -143,7 +150,7 @@ Acceptance criteria:
 - If imbalance exceeds the configured limit, annotators are directed to another class and task.
 - If required, the system prevents annotators from continuing work on overrepresented classes or tasks until balance is restored.
 US-14: Automatic Next Image Assignment
-User story:  
+User story:
 As an annotator, I want to automatically receive the next image to annotate so that I can work continuously.
 Acceptance criteria:
 - The system assigns the next suitable image automatically.
@@ -153,7 +160,7 @@ Acceptance criteria:
 - Assignment considers image availability.
 - Annotators do not need to manually search for the next image.
 US-15: Annotation And Review Statistics
-User story:  
+User story:
 As an annotator, I want to see annotation and review statistics so that I understand dataset progress and my throughput.
 Acceptance criteria:
 - Statistics show completed tasks.
@@ -165,7 +172,7 @@ Acceptance criteria:
 - Statistics show progress per class where applicable.
 - Statistics show annotation or review throughput over time.
 US-16: GitHub OAuth Login
-User story:  
+User story:
 As a user, I want to log in with GitHub OAuth so that I can access the system without a separate password.
 Acceptance criteria:
 - Users can authenticate via GitHub OAuth.
@@ -173,7 +180,7 @@ Acceptance criteria:
 - Roles and permissions are applied after login.
 - Unauthorized users cannot access protected datasets or workflows.
 US-17: Configurable Keybindings
-User story:  
+User story:
 As a user, I want to configure keybindings so that I can work efficiently with my preferred shortcuts.
 Acceptance criteria:
 - Users can view available actions and assigned shortcuts.
@@ -182,7 +189,7 @@ Acceptance criteria:
 - Users can reset keybindings to defaults.
 - Keybindings persist across sessions.
 US-18: Filesystem-Based Image Storage
-User story:  
+User story:
 As a data admin, I want the server to load images from the filesystem so that datasets can be managed without uploading all images into a separate storage service.
 Acceptance criteria:
 - Admins can configure a dataset root directory.
@@ -192,7 +199,7 @@ Acceptance criteria:
 - Missing or unreadable image files are reported clearly.
 - The dataset can be used without copying image bytes into object storage.
 US-19: Versioned JSON Dataset Metadata
-User story:  
+User story:
 As a data admin, I want annotations, task state, reviews, adjudications, and audit metadata to be stored in versioned JSON files so that datasets remain portable and can be migrated in the future.
 Acceptance criteria:
 - The server creates and updates JSON metadata files for datasets and annotations.
@@ -502,7 +509,7 @@ Example reviewer correction event:
 ## Supported Label Types
 
 ### Bounding Boxes
-Description:  
+Description:
 Rectangular annotations used to label objects or regions in an image.
 Acceptance criteria:
 - Users can create bounding boxes.
@@ -511,7 +518,7 @@ Acceptance criteria:
 - Bounding boxes can be reviewed using IoU-based agreement.
 
 ### Skeleton / Keypoints
-Description:  
+Description:
 Named keypoints, optionally connected by a skeleton structure, used to label poses, landmarks, or object parts.
 Acceptance criteria:
 - Users can place named keypoints.

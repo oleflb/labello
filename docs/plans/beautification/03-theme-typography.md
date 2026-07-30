@@ -1,5 +1,7 @@
 # Step 3: Theme And Typography
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Add semantic surface, text, intent, canvas, spacing, radius, and type tokens.

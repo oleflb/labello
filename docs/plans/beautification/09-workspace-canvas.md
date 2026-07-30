@@ -1,5 +1,7 @@
 # Step 9: Polish Workspace And Canvas
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Preserve the existing canvas geometry, zoom, pan, touch, and review-focus

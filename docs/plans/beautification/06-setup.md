@@ -1,5 +1,7 @@
 # Step 6: Refine Setup And Dataset Selection
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Preserve the bounded Setup page, explicit API reconnect, and mutually

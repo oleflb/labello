@@ -1,5 +1,7 @@
 # Step 8: Recompose Statistics
 
+Status: Completed; historical work package
+
 ## Implementation Plan
 
 - Use the shared Compact, Medium, and Wide layout modes for Statistics instead

@@ -1,9 +1,16 @@
 # Labello UI And Design Guidelines
 
+> **Status:** Normative current reference
+> **Owner:** UI maintainers
+> **Audience:** UI designers, maintainers, and contributors
+> **Last verified:** 2026-07-30 at `4f9c332`
+> **Supersedes:** `plans/ui-beautification.md` and
+> `plans/beautification/` for current UI acceptance criteria
+
 This is the working standard for UI changes. It distills the original
 [`ui-beautification.md`](plans/ui-beautification.md) report and the completed
-[beautification work](plans/beautification/README.md), which remain as rationale and
-history.
+[beautification work](plans/beautification/README.md), which remain as rationale
+and history.
 
 ## Product Rules
 
@@ -78,6 +85,43 @@ history.
 - Match cursors to create, move, resize, pan, and disabled behavior. Keep
   gestures and shortcuts discoverable through controls or concise hints.
 
+### Measurable Accessibility Criteria
+
+- Normal text and text rendered into controls must have a contrast ratio of at
+  least 4.5:1 against its background. Text at least 18 points, or at least
+  14 points and bold, may use 3:1.
+- Control boundaries, annotation handles, focus indicators, and meaningful
+  non-text states must have at least 3:1 contrast against adjacent colors.
+  Focus must remain visible on every interactive control and cannot be
+  represented by color alone.
+- Browser zoom from 100% through 200% must preserve access to every primary
+  action and all non-canvas content. Reflow may switch `LayoutMode`; it must not
+  create page-level horizontal scrolling except for a deliberately scrollable
+  data region.
+- Long labels and browser or OS text enlargement must wrap, truncate with an
+  accessible full value, or expand their region without covering adjacent
+  controls. A clipped visual label still requires a complete accessible name.
+- Keyboard-only users must be able to sign in, choose a dataset and task, claim
+  and release work, create/edit/delete annotations, submit or skip an
+  assignment, complete review/adjudication decisions, edit and save
+  administration forms, operate import decisions, open settings/help, and
+  dismiss or confirm every modal. Canvas-only spatial placement may require a
+  pointer, but all surrounding commands and any non-spatial alternative must
+  remain keyboard reachable.
+- Tab order follows the visual and task order. Overlays trap focus while open,
+  restore it to the invoking control when closed, and expose an accessible name
+  and modal state. Escape closes only the highest-priority dismissible overlay.
+- Every icon-only action has a contextual accessible name and tooltip. Dynamic
+  loading, error, selection, expanded, disabled, and completion states must be
+  represented in the accessibility tree, not only painted.
+
+Labello does not currently claim certification for a specific
+screen-reader/browser pair. AccessKit labels and the Chromium accessibility
+tree are the supported semantic verification surfaces. A release must not claim
+screen-reader support until its critical workflows have also been exercised
+with named browser, operating-system, and screen-reader versions and the result
+has been recorded.
+
 ## Screen Patterns
 
 - **Setup:** feature one valid next dataset action, list all datasets separately,
@@ -98,9 +142,17 @@ history.
   the smallest `egui_kittest` regression for behavior, geometry, or AccessKit
   semantics. Include long content and failure states when relevant.
 - Inspect relevant states at 320x568, 390x844, 600x800, 1288x820, 1440x1000,
-  and a short size such as 320x320.
+  and a short size such as 320x320. Exercise each applicable size at device
+  pixel ratios 1 and 2; test 390x844 at DPR 3 for a high-density mobile case.
+- Repeat critical browser workflows at 200% browser zoom and with the platform's
+  larger-text setting where Chromium exposes it. Record any unsupported
+  platform behavior instead of silently reducing the test matrix.
 - Use native inspector presets for shared rendering and accessibility checks.
   Use Chromium for WASM startup, scaling, browser input, and desktop/mobile
-  rendering; the native inspector does not prove browser behavior.
+  rendering and inspect the browser accessibility tree. The native inspector
+  does not prove browser behavior, zoom reflow, or screen-reader output.
+- Run a keyboard-only pass for every changed critical workflow. For modal,
+  focus, or semantic changes, record the initial focus, tab sequence, accessible
+  name/state, Escape behavior, and restored focus.
 - Run focused UI tests, formatting, and Clippy. Run the WASM check and
   `trunk build --release` when browser or shared rendering changes.

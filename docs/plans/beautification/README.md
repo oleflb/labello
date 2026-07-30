@@ -1,5 +1,9 @@
 # Beautification Branch Stack
 
+Status: Completed; historical delivery record
+
+Last classified: 2026-07-30 at `4f9c332`
+
 For ongoing UI work, follow the [Labello UI and design guidelines](../../ui-design-guidelines.md).
 The documents below record the overhaul's implementation history.
 

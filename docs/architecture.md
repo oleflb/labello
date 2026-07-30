@@ -1,5 +1,10 @@
 # Architecture
 
+> **Status:** Normative current reference
+> **Owner:** Labello maintainers
+> **Audience:** Maintainers and contributors
+> **Last verified:** 2026-07-30 at `4f9c332`
+
 This document describes the current implementation ownership. Product intent
 belongs in `labello.md`; runtime and operational rules belong in
 [`operations.md`](operations.md).
@@ -57,7 +62,8 @@ load and authorize
 ```
 
 Per-image `events.jsonl` remains authoritative. `state.json` and statistics are
-derived caches.
+derived caches. The complete on-disk authority, compatibility, and repair
+contract is documented in [`persistence.md`](persistence.md).
 
 `ImportService` is the import capability facade. Its modules separately own
 job limits and recovery, source registration/sealing, profile parsing,
@@ -82,6 +88,9 @@ The API owns the external trust boundary:
 
 API import handlers do not perform raw durable control-file I/O. They use the
 storage-owned import control store through `ImportService`.
+
+The maintained route, authorization, transport, error, and compatibility
+reference is [`api.md`](api.md).
 
 ## UI
 
