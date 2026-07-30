@@ -40,6 +40,13 @@ pub struct AssignmentActionRequest {
     pub kind: AssignmentKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentRevalidation {
+    pub assignment: Assignment,
+    pub state: labello_domain::ImageState,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppendEventRequest {
     pub payload: EventPayload,

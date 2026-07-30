@@ -8,11 +8,11 @@ use axum::{
 use labello_client::{
     AddMigrationSkeletonRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
     AssignmentAvailability, AssignmentAvailabilityEntry, AssignmentAvailabilityRequest,
-    ConfirmMigrationRequest, CorrectionRequest, DeleteMigrationSkeletonRequest,
-    EditMigrationSkeletonRequest, ExcludeMigrationTargetRequest, KeepMigrationTargetRequest,
-    ManualMigrationCommandResult, OfflineBundleRequest, PrelabelSuggestionRequest,
-    ReopenMigrationTargetRequest, ReviewMigrationRequest, RevisitMigrationTargetRequest,
-    SaveMigrationSkeletonRequest, StartMigrationPassRequest,
+    AssignmentRevalidation, ConfirmMigrationRequest, CorrectionRequest,
+    DeleteMigrationSkeletonRequest, EditMigrationSkeletonRequest, ExcludeMigrationTargetRequest,
+    KeepMigrationTargetRequest, ManualMigrationCommandResult, OfflineBundleRequest,
+    PrelabelSuggestionRequest, ReopenMigrationTargetRequest, ReviewMigrationRequest,
+    RevisitMigrationTargetRequest, SaveMigrationSkeletonRequest, StartMigrationPassRequest,
 };
 use labello_domain::{
     Actor, AdjudicationDecision, AnnotationGeometry, AnnotationType, Assignment, AssignmentKind,
@@ -167,6 +167,36 @@ pub(crate) async fn release_assignment(
         "assignment released"
     );
     Ok(Json(assignment))
+}
+
+pub(crate) async fn revalidate_assignment(
+    State(state): State<ApiState>,
+    Path((dataset_id, image_id)): Path<(DatasetId, ImageId)>,
+    headers: HeaderMap,
+    Json(request): Json<AssignmentActionRequest>,
+) -> ApiResult<Json<Option<AssignmentRevalidation>>> {
+    image_id.validate_path_segment()?;
+    request.assignment_id.validate_path_segment()?;
+    request.image_id.validate_path_segment()?;
+    request.task_id.validate_path_segment()?;
+    if request.image_id != image_id {
+        return Err(ApiError::BadRequest(
+            "assignment image does not match the route image".to_string(),
+        ));
+    }
+    let actor = actor_from_headers(&state, &headers)?;
+    let repo = state.repo(&dataset_id)?;
+    let revalidated = repo
+        .revalidate_assignment_on_image(
+            &actor.user_id,
+            &request.assignment_id,
+            &image_id,
+            &request.task_id,
+            request.kind,
+        )
+        .await?
+        .map(|(assignment, state)| AssignmentRevalidation { assignment, state });
+    Ok(Json(revalidated))
 }
 
 pub(crate) async fn complete_assignment(

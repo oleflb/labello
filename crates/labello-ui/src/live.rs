@@ -68,6 +68,9 @@ impl LabelloApp {
                             assignment: Some(assignment),
                             ..
                         } => self.release_reservation(dataset_id, assignment),
+                        UiMessage::PreparedReviewRevalidated { cached, .. } => {
+                            self.release_reservation(dataset_id, cached.assignment)
+                        }
                         _ => {}
                     }
                 }

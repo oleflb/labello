@@ -26,6 +26,10 @@ impl SpyApi {
         self.state.borrow_mut().fail_next_preview = true;
     }
 
+    pub(super) fn fail_next_revalidation(&self) {
+        self.state.borrow_mut().fail_next_revalidation = true;
+    }
+
     pub(super) fn clear_workflows(&self) {
         self.state.borrow_mut().metadata.tasks.clear();
     }
@@ -94,7 +98,6 @@ impl SpyApi {
         self.state.borrow_mut().fail_next_migration = true;
     }
 
-    #[cfg(feature = "inspector-presets")]
     pub(super) fn set_image_state(&self, state: ImageState) {
         self.state
             .borrow_mut()
@@ -131,12 +134,46 @@ impl SpyApi {
         self.state.borrow().exclusions.clone()
     }
 
+    pub(super) fn revalidated_assignment_ids(&self) -> Vec<AssignmentId> {
+        self.state.borrow().revalidated_assignment_ids.clone()
+    }
+
+    #[cfg(feature = "inspector-presets")]
+    pub(super) fn add_active_assignment(&self, assignment: Assignment) {
+        self.state.borrow_mut().active_assignments.push(assignment);
+    }
+
+    pub(super) fn complete_review_elsewhere(&self, image_id: &ImageId) -> AssignmentId {
+        let mut state = self.state.borrow_mut();
+        let assignment = state
+            .active_assignments
+            .iter()
+            .find(|assignment| {
+                assignment.kind == AssignmentKind::Review && assignment.image_id == *image_id
+            })
+            .expect("prepared review assignment")
+            .clone();
+        state.completed_review_images.insert(image_id.clone());
+        assignment.assignment_id
+    }
+
     pub(super) fn has_active_assignment(&self, assignment_id: &AssignmentId) -> bool {
         self.state
             .borrow()
             .active_assignments
             .iter()
             .any(|assignment| &assignment.assignment_id == assignment_id)
+    }
+
+    pub(super) fn active_assignment_id_for_image(&self, image_id: &ImageId) -> AssignmentId {
+        self.state
+            .borrow()
+            .active_assignments
+            .iter()
+            .find(|assignment| &assignment.image_id == image_id)
+            .expect("active assignment for image")
+            .assignment_id
+            .clone()
     }
 }
 
@@ -154,6 +191,7 @@ pub(super) struct CallCounts {
     pub(super) ingest_dataset: usize,
     pub(super) assignment_availability: usize,
     pub(super) assign_next_image: usize,
+    pub(super) revalidate_assignment: usize,
     pub(super) release_assignment: usize,
     pub(super) complete_assignment: usize,
     pub(super) reopen_assignment: usize,
@@ -198,13 +236,17 @@ pub(super) struct SpyState {
     pub(super) next_image: usize,
     pub(super) events: Vec<EventPayload>,
     pub(super) fail_next_preview: bool,
+    pub(super) fail_next_revalidation: bool,
     pub(super) no_assignment: bool,
     pub(super) availability_overrides: BTreeMap<TaskId, bool>,
     pub(super) fail_next_availability: bool,
     pub(super) active_assignments: Vec<Assignment>,
     pub(super) reopenable_assignments: Vec<Assignment>,
     pub(super) exclusions: Vec<Vec<ImageId>>,
+    pub(super) reclaim_assignment_ids: Vec<AssignmentId>,
+    pub(super) revalidated_assignment_ids: Vec<AssignmentId>,
     pub(super) completed_images: BTreeSet<ImageId>,
+    pub(super) completed_review_images: BTreeSet<ImageId>,
     pub(super) summary_roles: Vec<DatasetRole>,
     pub(super) users: Vec<DatasetUser>,
     pub(super) fail_me: bool,
@@ -314,13 +356,17 @@ impl SpyState {
             next_image: 0,
             events: Vec::new(),
             fail_next_preview: false,
+            fail_next_revalidation: false,
             no_assignment: false,
             availability_overrides: BTreeMap::new(),
             fail_next_availability: false,
             active_assignments: Vec::new(),
             reopenable_assignments: Vec::new(),
             exclusions: Vec::new(),
+            reclaim_assignment_ids: Vec::new(),
+            revalidated_assignment_ids: Vec::new(),
             completed_images: BTreeSet::new(),
+            completed_review_images: BTreeSet::new(),
             summary_roles: vec![
                 DatasetRole::DataAdmin,
                 DatasetRole::Annotator,
@@ -1365,15 +1411,22 @@ impl ImageApi for SpyApi {
         let mut state = self.state.borrow_mut();
         state.counts.assign_next_image += 1;
         state.exclusions.push(request.excluded_image_ids.clone());
+        if let Some(assignment_id) = request.assignment_id.clone() {
+            state.reclaim_assignment_ids.push(assignment_id);
+        }
         if state.no_assignment {
             return ready(Ok(None));
         }
         let kind = request.kind.unwrap_or(AssignmentKind::Annotation);
         if let Some(active) = state.active_assignments.iter().find(|active| {
-            request.assignment_id.as_ref() == Some(&active.assignment_id)
-                || (active.task_id == request.task_id
-                    && active.kind == kind
-                    && !request.excluded_image_ids.contains(&active.image_id))
+            (active.kind != AssignmentKind::Annotation
+                || !state.completed_images.contains(&active.image_id))
+                && (active.kind != AssignmentKind::Review
+                    || !state.completed_review_images.contains(&active.image_id))
+                && (request.assignment_id.as_ref() == Some(&active.assignment_id)
+                    || (active.task_id == request.task_id
+                        && active.kind == kind
+                        && !request.excluded_image_ids.contains(&active.image_id)))
         }) {
             return ready(Ok(Some(active.clone())));
         }
@@ -1383,6 +1436,8 @@ impl ImageApi for SpyApi {
             (!request.excluded_image_ids.contains(&image_id)
                 && (kind != AssignmentKind::Annotation
                     || !state.completed_images.contains(&image_id))
+                && (kind != AssignmentKind::Review
+                    || !state.completed_review_images.contains(&image_id))
                 && !state
                     .active_assignments
                     .iter()
@@ -1408,6 +1463,53 @@ impl ImageApi for SpyApi {
         };
         state.active_assignments.push(assignment.clone());
         ready(Ok(Some(assignment)))
+    }
+
+    fn revalidate_assignment<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Option<labello_client::AssignmentRevalidation>> {
+        let mut state = self.state.borrow_mut();
+        state.counts.revalidate_assignment += 1;
+        state
+            .revalidated_assignment_ids
+            .push(request.assignment_id.clone());
+        if std::mem::take(&mut state.fail_next_revalidation) {
+            return ready(Err(ClientError::Demo(
+                "assignment revalidation failed".to_string(),
+            )));
+        }
+        if dataset_id != &state.metadata.dataset_id || image_id != &request.image_id {
+            return ready(Err(ClientError::Demo(
+                "assignment revalidation target mismatch".to_string(),
+            )));
+        }
+        if state.completed_review_images.contains(image_id) {
+            return ready(Ok(None));
+        }
+        let Some(assignment) = state
+            .active_assignments
+            .iter()
+            .find(|assignment| assignment_matches(assignment, &request))
+            .cloned()
+        else {
+            return ready(Ok(None));
+        };
+        let mut image_state = state
+            .states
+            .get(image_id)
+            .cloned()
+            .unwrap_or_else(|| ImageState::new(image_id.clone()));
+        image_state
+            .assignments
+            .retain(|stored| stored.assignment_id != assignment.assignment_id);
+        image_state.assignments.push(assignment.clone());
+        ready(Ok(Some(labello_client::AssignmentRevalidation {
+            assignment,
+            state: image_state,
+        })))
     }
 
     fn release_assignment<'a>(
@@ -1775,6 +1877,9 @@ impl ReviewApi for SpyApi {
         }
         let result = image_state.clone();
         if complete {
+            state
+                .completed_review_images
+                .insert(assignment.image_id.clone());
             state
                 .active_assignments
                 .retain(|active| !assignment_matches(active, &assignment));

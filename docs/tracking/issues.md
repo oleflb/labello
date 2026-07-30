@@ -35,7 +35,9 @@ Only after that continue with the next issue.
 
 - [x] Be able to edit added missing objects after creating them
   - Completed on 2026-07-30 in `da6ba30`.
-- [ ] Review does not have a queue.
+- [x] Review does not have a queue.
+  - Completed on 2026-07-30 with cached review and migration queue promotion,
+    image-scoped assignment revalidation, and stale-lease race protection.
 - [ ] Improve Place keypoint as hidden UX.
 - [ ] Always be in pan mode when in review
 - [ ] Submit and switch does not work
@@ -47,6 +49,7 @@ Only after that continue with the next issue.
 - [ ] Mobile nav menu left drawer instead of burger menu
 - [ ] Add an additional configurable shortcut for panning
 - [ ] Search for assigned keys in the shortcut window
+- [ ] When in the overview after finishing all objects in the current image, all object should be clickable to directly edit them again.
 
 ## Documentation deep-dive findings
 

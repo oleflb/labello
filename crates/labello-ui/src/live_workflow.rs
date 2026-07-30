@@ -127,6 +127,7 @@ impl LabelloApp {
                 dataset_id,
                 task_id,
                 prelabel_config_ids,
+                kind,
                 excluded_image_ids,
             } => self.spawn_message(request.clone(), async move {
                 let assignment = match api
@@ -134,7 +135,7 @@ impl LabelloApp {
                         &dataset_id,
                         AssignNextRequest {
                             task_id,
-                            kind: Some(AssignmentKind::Annotation),
+                            kind: Some(kind.clone()),
                             assignment_id: None,
                             excluded_image_ids,
                         },
@@ -162,7 +163,7 @@ impl LabelloApp {
                     dataset_id.clone(),
                     assignment.clone(),
                     prelabel_config_ids,
-                    true,
+                    kind == AssignmentKind::Annotation,
                 )
                 .await
                 .map(Some)
@@ -175,6 +176,27 @@ impl LabelloApp {
                 UiMessage::PrefetchLoaded {
                     request,
                     operation_id,
+                    result: Box::new(result),
+                }
+            }),
+            UiCommand::RevalidatePreparedReview {
+                request,
+                operation_id,
+                dataset_id,
+                cached,
+            } => self.spawn_message(request.clone(), async move {
+                let result = api
+                    .revalidate_assignment(
+                        &dataset_id,
+                        &cached.assignment.image_id,
+                        assignment_action(&cached.assignment),
+                    )
+                    .await
+                    .map_err(|error| error.to_string());
+                UiMessage::PreparedReviewRevalidated {
+                    request,
+                    operation_id,
+                    cached,
                     result: Box::new(result),
                 }
             }),
@@ -467,7 +489,7 @@ impl LabelloApp {
     }
 
     pub(crate) fn request_prefetch(&mut self) {
-        if self.view != AppView::Annotate
+        if !matches!(self.view, AppView::Annotate | AppView::Review)
             || self.work.assignment.is_none()
             || self.work.queue.is_loading()
             || self.work.queue.len() >= self.work.queue.queue_size()
@@ -476,6 +498,9 @@ impl LabelloApp {
             return;
         }
         let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let Some(kind) = self.assignment_kind() else {
             return;
         };
         let operation_id = self.next_operation();
@@ -488,9 +513,28 @@ impl LabelloApp {
             operation_id,
             dataset_id: self.config.dataset_id.clone(),
             task_id: task.task_id,
-            prelabel_config_ids: task.prelabel_config_ids,
+            prelabel_config_ids: if kind == AssignmentKind::Annotation {
+                task.prelabel_config_ids
+            } else {
+                Vec::new()
+            },
+            kind,
             excluded_image_ids,
         });
+    }
+
+    pub(crate) fn revalidate_prepared_review(&mut self, cached: LoadedImage) -> bool {
+        if self.runtime.api.is_none() {
+            return false;
+        }
+        let operation_id = self.begin_load();
+        let request = self.operation_identity(operation_id, self.config.dataset_id.clone());
+        self.queue_command(UiCommand::RevalidatePreparedReview {
+            request,
+            operation_id,
+            dataset_id: self.config.dataset_id.clone(),
+            cached: Box::new(cached),
+        })
     }
 
     fn assignment_exclusions(&self) -> Vec<labello_domain::ImageId> {
@@ -543,6 +587,21 @@ impl LabelloApp {
                 assignment,
             },
         );
+    }
+
+    pub(crate) fn release_revalidation_assignments(
+        &mut self,
+        dataset_id: labello_domain::DatasetId,
+        expected_assignment: Assignment,
+        claimed_assignment: Option<Assignment>,
+    ) {
+        let expected_assignment_id = expected_assignment.assignment_id.clone();
+        self.release_reservation(dataset_id.clone(), expected_assignment);
+        if let Some(claimed_assignment) = claimed_assignment
+            && claimed_assignment.assignment_id != expected_assignment_id
+        {
+            self.release_reservation(dataset_id, claimed_assignment);
+        }
     }
 
     pub(crate) fn clear_previous_annotation_assignment(&mut self) {

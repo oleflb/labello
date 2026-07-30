@@ -53,7 +53,7 @@ impl LabelloApp {
                             let migration_completed = completed_assignment.is_some();
                             if let Some(assignment) = completed_assignment {
                                 self.remember_previous_annotation_assignment(assignment);
-                                self.open_next_annotation_assignment(ctx, None);
+                                self.open_next_assignment(ctx, None);
                             }
                             if let Some(target) = pending_activate_target {
                                 self.work.migration.pending_activate_target =

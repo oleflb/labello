@@ -221,10 +221,10 @@ impl LabelloApp {
         released_image_id: Option<labello_domain::ImageId>,
     ) {
         let transition = self.work.pending_transition.take();
-        if self.view == AppView::Annotate
+        if matches!(self.view, AppView::Annotate | AppView::Review)
             && transition == Some(crate::app::PendingTransition::NextAssignment)
         {
-            self.open_next_annotation_assignment(ctx, released_image_id);
+            self.open_next_assignment(ctx, released_image_id);
             return;
         }
         if let Some(crate::app::PendingTransition::PreviousAssignment(assignment)) = transition {
@@ -240,22 +240,39 @@ impl LabelloApp {
         }
     }
 
-    fn open_next_annotation_assignment(
+    fn open_next_assignment(
         &mut self,
         ctx: &egui::Context,
         released_image_id: Option<labello_domain::ImageId>,
     ) {
-        self.work.one_shot_excluded_image_id = released_image_id;
-        if self.view == AppView::Annotate {
-            while let Some(loaded) = self.work.queue.pop_prepared() {
-                if loaded.assignment.status == labello_domain::AssignmentStatus::Active {
-                    self.apply_loaded_image(ctx, loaded);
-                    return;
-                }
-            }
+        if self.promote_prepared_assignment(ctx, released_image_id) {
+            return;
         }
         self.clear_current_image();
         self.request_next_image();
+    }
+
+    pub(crate) fn promote_prepared_assignment(
+        &mut self,
+        ctx: &egui::Context,
+        released_image_id: Option<labello_domain::ImageId>,
+    ) -> bool {
+        self.work.one_shot_excluded_image_id = released_image_id;
+        let Some(kind) = self.assignment_kind() else {
+            return false;
+        };
+        while let Some(loaded) = self.work.queue.pop_prepared() {
+            if loaded.assignment.kind == kind
+                && loaded.assignment.status == labello_domain::AssignmentStatus::Active
+            {
+                if kind == labello_domain::AssignmentKind::Review {
+                    return self.revalidate_prepared_review(loaded);
+                }
+                self.apply_loaded_image(ctx, loaded);
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) fn apply_state(&mut self, state: labello_domain::ImageState) {

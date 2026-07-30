@@ -143,6 +143,18 @@ impl LabelloApp {
                     self.loading.image = false;
                 }
             }
+            UiCommand::RevalidatePreparedReview {
+                operation_id,
+                dataset_id,
+                cached,
+                ..
+            } => {
+                if self.work.active_load_id == Some(*operation_id) {
+                    self.work.active_load_id = None;
+                    self.loading.image = false;
+                }
+                self.release_reservation(dataset_id.clone(), cached.assignment.clone());
+            }
             UiCommand::PrefetchAssignment { operation_id, .. } => {
                 if self.work.active_prefetch_id == Some(*operation_id) {
                     self.work.active_prefetch_id = None;

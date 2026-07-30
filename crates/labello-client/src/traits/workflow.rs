@@ -30,6 +30,18 @@ pub trait ImageApi {
         dataset_id: &'a DatasetId,
         request: AssignNextRequest,
     ) -> ApiFuture<'a, Option<Assignment>>;
+    fn revalidate_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: AssignmentActionRequest,
+    ) -> ApiFuture<'a, Option<AssignmentRevalidation>> {
+        Box::pin(async {
+            Err(ClientError::Demo(
+                "assignment revalidation is not implemented by this client".to_string(),
+            ))
+        })
+    }
     fn release_assignment<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

@@ -49,6 +49,15 @@ impl ImageApi for DemoLabelloApi {
         Box::pin(async move { Ok(None) })
     }
 
+    fn revalidate_assignment<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Option<crate::AssignmentRevalidation>> {
+        Box::pin(async move { Ok(None) })
+    }
+
     fn release_assignment<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

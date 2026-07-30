@@ -91,7 +91,7 @@ fallback. Replace the deployed copy for each environment, or edit the source
 copy before starting a local `trunk serve` session. The `api` query parameter
 remains an explicit temporary override.
 
-The annotation client prepares two upcoming assignments by default; set
+The annotation and review workflows prepare two upcoming assignments by default; set
 `queueSize=1` to hold only one upcoming assignment. Values are clamped to
 `1..=2`, so a browser holds at most the current assignment and two prepared
 assignments.

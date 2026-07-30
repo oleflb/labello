@@ -117,6 +117,17 @@ impl ImageQueue {
         self.prepared.pop_front()
     }
 
+    pub(crate) fn remove_prepared_image(
+        &mut self,
+        image_id: &labello_domain::ImageId,
+    ) -> Option<LoadedImage> {
+        let index = self
+            .prepared
+            .iter()
+            .position(|loaded| &loaded.assignment.image_id == image_id)?;
+        self.prepared.remove(index)
+    }
+
     pub(crate) fn drain_prepared_assignments(&mut self) -> Vec<labello_domain::Assignment> {
         self.prepared
             .drain(..)

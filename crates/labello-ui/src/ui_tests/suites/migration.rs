@@ -888,6 +888,83 @@ fn migration_confirmation_promotes_prepared_assignment_without_blocking_reload()
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_review_approval_promotes_cached_work_without_refetching_image_data() {
+    use crate::app::LoadedImage;
+    use crate::inspector_presets::{self, InspectorPreset};
+    use crate::queue::QueuedImage;
+
+    let api = Rc::new(SpyApi::new());
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationReview, &egui::Context::default());
+    api.set_image_state(app.work.current_state.clone().unwrap());
+    api.complete_next_migration_with(app.work.assignment.clone().unwrap());
+    let next_image_id = ImageId::from("img_cached_migration_review");
+    let next_assignment = Assignment {
+        assignment_id: AssignmentId::generate(),
+        image_id: next_image_id.clone(),
+        task_id: app.work.selected_task_id.clone().unwrap(),
+        assigned_to: app.config.user_id.clone(),
+        kind: AssignmentKind::Review,
+        status: AssignmentStatus::Active,
+        expires_at: Some(now() + chrono::Duration::minutes(5)),
+        created_at: now(),
+        updated_at: now(),
+    };
+    api.add_active_assignment(next_assignment.clone());
+    app.work.queue.clear();
+    assert!(app.work.queue.push_prepared(LoadedImage {
+        assignment: next_assignment,
+        queued: QueuedImage {
+            image: image_record(
+                next_image_id.as_str(),
+                "cached-migration-review.png",
+                640,
+                480,
+            ),
+            prelabels: Vec::new(),
+        },
+        annotations: Vec::new(),
+        state: ImageState::new(next_image_id.clone()),
+        color_image: Some(egui::ColorImage::from_rgba_unmultiplied(
+            [1, 1],
+            &[24, 48, 72, 255],
+        )),
+    }));
+    api.set_no_assignment(true);
+    app.runtime.api = Some(api.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_max_steps(40)
+        .build_eframe(|_| app);
+    harness.step();
+    let counts_before = api.counts();
+
+    harness.key_press(egui::Key::Y);
+    harness.step();
+    step_until(&mut harness, 10, |app| {
+        !app.work.migration.busy
+            && app
+                .work
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.image_id == next_image_id)
+    });
+
+    assert_eq!(api.counts().migration_commands, 1);
+    assert_eq!(api.counts().revalidate_assignment, 1);
+    assert_eq!(
+        api.counts().get_image_record,
+        counts_before.get_image_record
+    );
+    assert_eq!(
+        api.counts().get_image_preview,
+        counts_before.get_image_preview
+    );
+    assert!(harness.state().work.current_texture.is_some());
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     use crate::inspector_presets::{self, InspectorPreset};
 

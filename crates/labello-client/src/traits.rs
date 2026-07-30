@@ -9,11 +9,11 @@ use labello_domain::{
 
 use crate::{
     AnnotationBatchRequest, AppendEventRequest, AssignNextRequest, AssignmentActionRequest,
-    AssignmentAvailability, AssignmentAvailabilityRequest, AuthOptions, ClientError, ClientResult,
-    CorrectionRequest, CreateDatasetRequest, DatasetSummary, DatasetUser, ImageExplorerQuery,
-    ImageFile, ImagePreview, IngestJob, IngestReport, OAuthCallbackRequest, OAuthLoginRequest,
-    OfflineBundleRequest, PrelabelSuggestionRequest, SessionInfo, SetDatasetRolesRequest,
-    UpdateDatasetConfigRequest,
+    AssignmentAvailability, AssignmentAvailabilityRequest, AssignmentRevalidation, AuthOptions,
+    ClientError, ClientResult, CorrectionRequest, CreateDatasetRequest, DatasetSummary,
+    DatasetUser, ImageExplorerQuery, ImageFile, ImagePreview, IngestJob, IngestReport,
+    OAuthCallbackRequest, OAuthLoginRequest, OfflineBundleRequest, PrelabelSuggestionRequest,
+    SessionInfo, SetDatasetRolesRequest, UpdateDatasetConfigRequest,
 };
 
 pub type ApiFuture<'a, T> = Pin<Box<dyn Future<Output = ClientResult<T>> + 'a>>;

@@ -278,6 +278,12 @@ pub(crate) enum UiMessage {
         operation_id: u64,
         result: Box<Result<Option<LoadedImage>, String>>,
     },
+    PreparedReviewRevalidated {
+        request: RequestIdentity,
+        operation_id: u64,
+        cached: Box<LoadedImage>,
+        result: Box<Result<Option<labello_client::AssignmentRevalidation>, String>>,
+    },
     ReservationReleased {
         request: RequestIdentity,
         result: Result<(), String>,
@@ -538,7 +544,14 @@ pub(crate) enum UiCommand {
         dataset_id: DatasetId,
         task_id: TaskId,
         prelabel_config_ids: Vec<PrelabelConfigId>,
+        kind: AssignmentKind,
         excluded_image_ids: Vec<ImageId>,
+    },
+    RevalidatePreparedReview {
+        request: RequestIdentity,
+        operation_id: u64,
+        dataset_id: DatasetId,
+        cached: Box<LoadedImage>,
     },
     ReleaseReservation {
         request: RequestIdentity,
@@ -653,6 +666,7 @@ impl UiCommand {
             | Self::SaveKeybindings { request, .. }
             | Self::ClaimAssignment { request, .. }
             | Self::PrefetchAssignment { request, .. }
+            | Self::RevalidatePreparedReview { request, .. }
             | Self::ReleaseReservation { request, .. }
             | Self::ReloadAssignment { request, .. }
             | Self::ReopenAssignment { request, .. }
@@ -737,6 +751,7 @@ impl UiMessage {
             | Self::ImageLoaded { request, .. }
             | Self::PreviousAssignmentLoaded { request, .. }
             | Self::PrefetchLoaded { request, .. }
+            | Self::PreparedReviewRevalidated { request, .. }
             | Self::ReservationReleased { request, .. }
             | Self::SaveFinished { request, .. }
             | Self::ReleaseFinished { request, .. }

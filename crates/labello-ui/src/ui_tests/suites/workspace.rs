@@ -1036,6 +1036,174 @@ fn annotation_prefetch_fills_two_without_blocking_the_current_image() {
 }
 
 #[test]
+fn review_prefetch_fills_two_and_promotes_the_next_loaded_assignment() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+
+    assert_eq!(api.counts().prelabel_suggestions, 0);
+    let selected_workflow =
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "Person boxes");
+    assert_eq!(
+        selected_workflow.accesskit_node().description(),
+        Some("Loaded assignment queue: 2 of 2".to_string())
+    );
+    let next = harness.state().work.queue.prepared_image_ids()[0].clone();
+    let mut refreshed_state = ImageState::new(next.clone());
+    refreshed_state.current_sequence = 41;
+    api.set_image_state(refreshed_state);
+    api.set_no_assignment(true);
+    let counts_before = api.counts();
+
+    click(&mut harness, "Complete review");
+    step_until(&mut harness, 12, |app| {
+        app.work
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id == next)
+    });
+
+    assert_eq!(api.counts().record_review, 1);
+    assert_eq!(api.counts().revalidate_assignment, 1);
+    assert_eq!(
+        api.counts().get_image_record,
+        counts_before.get_image_record
+    );
+    assert_eq!(
+        api.counts().get_image_preview,
+        counts_before.get_image_preview
+    );
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .current_state
+            .as_ref()
+            .unwrap()
+            .current_sequence,
+        41,
+        "promotion must display the authoritative revalidated state"
+    );
+    assert!(!harness.state().loading.image);
+    assert!(harness.state().work.current_texture.is_some());
+}
+
+#[test]
+fn review_promotion_revalidates_and_discards_stale_prepared_work() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let prepared = harness.state().work.queue.prepared_image_ids();
+    let stale = prepared[0].clone();
+    let fallback = prepared[1].clone();
+    let stale_assignment_id = api.complete_review_elsewhere(&stale);
+
+    click(&mut harness, "Complete review");
+    step_until(&mut harness, 20, |app| {
+        app.work
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id == fallback)
+    });
+
+    assert_eq!(
+        &api.revalidated_assignment_ids()[..2],
+        &[
+            stale_assignment_id.clone(),
+            api.active_assignment_id_for_image(&fallback)
+        ]
+    );
+    assert_ne!(
+        harness.state().work.assignment.as_ref().unwrap().image_id,
+        stale
+    );
+    assert_eq!(
+        harness.state().work.current.as_ref().unwrap().image.image_id,
+        fallback
+    );
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .current_state
+            .as_ref()
+            .unwrap()
+            .image_id,
+        fallback
+    );
+    assert!(
+        !harness
+            .state()
+            .work
+            .queue
+            .prepared_image_ids()
+            .contains(&fallback)
+    );
+    step_until(&mut harness, 8, |_| {
+        !api.has_active_assignment(&stale_assignment_id)
+    });
+}
+
+#[test]
+fn empty_review_revalidation_clears_completed_work_and_releases_cached_leases() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let prepared = harness.state().work.queue.prepared_image_ids();
+    let stale_assignment_ids = prepared
+        .iter()
+        .map(|image_id| api.complete_review_elsewhere(image_id))
+        .collect::<Vec<_>>();
+
+    click(&mut harness, "Complete review");
+    step_until(&mut harness, 20, |app| {
+        !app.loading.image && app.work.current.is_none() && app.work.assignment.is_none()
+    });
+    step_until(&mut harness, 8, |_| {
+        stale_assignment_ids
+            .iter()
+            .all(|assignment_id| !api.has_active_assignment(assignment_id))
+    });
+
+    assert_eq!(
+        harness.state().runtime.notice.as_deref(),
+        Some("No reviews are currently waiting.")
+    );
+    assert!(harness.state().runtime.error.is_none());
+    assert!(harness.state().work.current_state.is_none());
+}
+
+#[test]
+fn failed_review_revalidation_clears_old_image_and_releases_claimed_assignment() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let expected_image_id = harness.state().work.queue.prepared_image_ids()[0].clone();
+    let expected_assignment_id = api.active_assignment_id_for_image(&expected_image_id);
+    api.fail_next_revalidation();
+    let counts_before = api.counts();
+
+    click(&mut harness, "Complete review");
+    step_until(&mut harness, 20, |app| {
+        !app.loading.image && app.work.current.is_none() && app.runtime.error.is_some()
+    });
+    step_until(&mut harness, 8, |_| {
+        !api.has_active_assignment(&expected_assignment_id)
+    });
+
+    assert!(harness.state().work.assignment.is_none());
+    assert!(harness.state().work.current_state.is_none());
+    assert_eq!(
+        api.counts().get_image_record,
+        counts_before.get_image_record
+    );
+    assert_eq!(
+        api.counts().get_image_preview,
+        counts_before.get_image_preview
+    );
+}
+
+#[test]
 fn empty_prepared_queue_falls_back_to_blocking_load() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);
@@ -1416,9 +1584,16 @@ fn locally_expired_previous_assignment_is_left_for_the_server_to_validate() {
 fn skip_remains_active_in_review() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let next = harness.state().work.queue.prepared_image_ids()[0].clone();
 
     click(&mut harness, "Skip");
-    step_until(&mut harness, 8, |_| api.counts().release_assignment == 1);
+    step_until(&mut harness, 8, |app| {
+        app.work
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id == next)
+    });
 
     assert_eq!(api.counts().release_assignment, 1);
 }
@@ -1926,6 +2101,8 @@ fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_dra
     let annotation_id =
         seed_review_annotation(&api, AnnotationGeometry::BoundingBox(original), true);
     let mut harness = loaded_review_harness(api.clone());
+    step_until(&mut harness, 12, |app| app.work.queue.len() == 2);
+    let next = harness.state().work.queue.prepared_image_ids()[0].clone();
     click(&mut harness, "Correct object");
     harness.state_mut().edit_correction_bbox(BoundingBoxEdit {
         annotation_id,
@@ -1965,7 +2142,14 @@ fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_dra
     assert!(harness.state().work.current.is_some());
 
     click(&mut harness, "Correct & finalize");
-    step_until(&mut harness, 12, |_| api.counts().record_correction == 2);
+    step_until(&mut harness, 12, |app| {
+        api.counts().record_correction == 2
+            && app
+                .work
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.image_id == next)
+    });
     let request = api.last_correction().unwrap();
     assert_eq!(request.expected_version, 1);
     assert!(matches!(
@@ -2037,6 +2221,7 @@ fn review_and_save_responses_propagate_renewed_assignments_without_refetching_st
         true,
     );
     let mut review = loaded_review_harness(review_api.clone());
+    step_until(&mut review, 12, |app| app.work.queue.len() == 2);
     let original_review_expiry = review.state().work.assignment.as_ref().unwrap().expires_at;
     let state_reads = review_api.counts().get_image_state;
     review

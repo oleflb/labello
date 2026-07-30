@@ -1115,6 +1115,104 @@ async fn assign_next_honors_exact_reclaim_then_exclusions() {
 }
 
 #[tokio::test]
+async fn assignment_revalidation_is_image_scoped_and_returns_authoritative_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = router(ApiState::new(temp.path()));
+    create_dataset(&app).await;
+    configure_pixel_task(&app).await;
+    upload_test_image(&app, "first.png", &png_bytes(2, 2)).await;
+
+    let assignment = claim_assignment(&app, "admin", "annotation").await;
+    let image_id = assignment["imageId"].as_str().unwrap();
+    let request_body = json!({
+        "assignmentId": assignment["assignmentId"],
+        "imageId": assignment["imageId"],
+        "taskId": assignment["taskId"],
+        "kind": "annotation"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{image_id}/assignments/revalidate"
+                ))
+                .header("x-test-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let revalidated: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        revalidated["assignment"]["assignmentId"],
+        assignment["assignmentId"]
+    );
+    assert_eq!(revalidated["state"]["imageId"], assignment["imageId"]);
+    assert!(
+        revalidated["state"]["assignments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stored| stored["assignmentId"] == assignment["assignmentId"])
+    );
+
+    let mismatch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{image_id}/assignments/revalidate"
+                ))
+                .header("x-test-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "assignmentId": assignment["assignmentId"],
+                        "imageId": "img_other",
+                        "taskId": assignment["taskId"],
+                        "kind": "annotation"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+
+    assert_eq!(
+        post_assignment_action(&app, "admin", "release", &assignment)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let stale = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/datasets/ds/images/{image_id}/assignments/revalidate"
+                ))
+                .header("x-test-user-id", "admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::OK);
+    let stale: serde_json::Value =
+        serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(stale.is_null());
+}
+
+#[tokio::test]
 async fn assignment_availability_is_batched_authenticated_and_advisory() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(ApiState::new(temp.path()));

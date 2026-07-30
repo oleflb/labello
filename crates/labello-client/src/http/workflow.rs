@@ -77,6 +77,26 @@ impl ImageApi for HttpLabelloApi {
         })
     }
 
+    fn revalidate_assignment<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: AssignmentActionRequest,
+    ) -> crate::ApiFuture<'a, Option<crate::AssignmentRevalidation>> {
+        Box::pin(async move {
+            Self::send_json(
+                self.request(
+                    Method::POST,
+                    &format!(
+                        "/datasets/{dataset_id}/images/{image_id}/assignments/revalidate"
+                    ),
+                )?,
+                &request,
+            )
+            .await
+        })
+    }
+
     fn release_assignment<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

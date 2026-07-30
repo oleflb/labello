@@ -284,6 +284,116 @@ impl DatasetRepository {
         Ok(None)
     }
 
+    /// Revalidate and renew one known assignment without scanning the dataset.
+    ///
+    /// Queue promotion already knows the image that was reserved. Returning the
+    /// post-renewal state lets callers refresh mutable workflow data while
+    /// retaining cached immutable image data.
+    pub async fn revalidate_assignment_on_image(
+        &self,
+        user_id: &UserId,
+        assignment_id: &AssignmentId,
+        image_id: &ImageId,
+        task_id: &TaskId,
+        kind: AssignmentKind,
+    ) -> StorageResult<Option<(Assignment, labello_domain::ImageState)>> {
+        let metadata = self.load_dataset().await?;
+        let role = role_for_kind(&kind);
+        require_role(
+            &metadata.role_assignments,
+            &metadata.dataset_id,
+            user_id,
+            role.clone(),
+        )?;
+        ensure_assignment_target_exists(&metadata, image_id, task_id)?;
+        let task = metadata
+            .task(task_id)
+            .expect("assignment target validation must find the task");
+        if !task.enabled {
+            return Ok(None);
+        }
+        if kind == AssignmentKind::Review {
+            match task.review.workflow {
+                ReviewWorkflow::Approval => {}
+                ReviewWorkflow::None => return Ok(None),
+                ReviewWorkflow::IndependentAgreement => {
+                    return Err(StorageError::InvalidAssignment(format!(
+                        "independent agreement workflow is not implemented for task {task_id}"
+                    )));
+                }
+            }
+        }
+
+        let lock = self.image_lock(image_id);
+        let _guard = lock.lock().await;
+        let state = self.load_image_state(image_id).await?;
+        let Some(stored) = state
+            .assignments
+            .iter()
+            .find(|assignment| assignment.assignment_id == *assignment_id)
+        else {
+            return Ok(None);
+        };
+        if stored.assigned_to != *user_id {
+            return Err(StorageError::Unauthorized(format!(
+                "assignment {assignment_id} belongs to another user"
+            )));
+        }
+        if stored.image_id != *image_id || stored.task_id != *task_id || stored.kind != kind {
+            return Err(StorageError::InvalidAssignment(format!(
+                "assignment {assignment_id} does not match the requested image, task, and kind"
+            )));
+        }
+        let now = labello_domain::now();
+        if stored.status != AssignmentStatus::Active || assignment_is_expired(stored, now) {
+            return Ok(None);
+        }
+        let status = state
+            .task_states
+            .get(task_id)
+            .map(|task_state| &task_state.status)
+            .unwrap_or(&TaskStatus::Pending);
+        let eligible = match kind {
+            AssignmentKind::Annotation => state.assignment_eligible(task_id),
+            AssignmentKind::Review => status == &TaskStatus::Submitted,
+            AssignmentKind::Adjudication => status == &TaskStatus::AdjudicationRequired,
+        };
+        if !eligible {
+            return Ok(None);
+        }
+        if kind == AssignmentKind::Review {
+            let events = self.load_events(image_id).await?;
+            let already_final = if task.manual_box_guide_migration.is_some() {
+                has_migration_final_review_by_user(&events, task_id, user_id)
+                    || migration_final_approval_count(&events, task_id)
+                        >= task.review.required_reviews
+            } else {
+                let reviews = current_task_reviews(&events, task_id);
+                has_task_review_by_user(&reviews, task_id, user_id)
+                    || task_approval_count(&reviews, task_id) >= task.review.required_reviews
+            };
+            if already_final {
+                return Ok(None);
+            }
+        }
+
+        let mut assignment = stored.clone();
+        renew_assignment(&mut assignment, now);
+        let (_, state) = self
+            .append_payloads_with_state_unlocked(
+                image_id,
+                &Actor {
+                    user_id: user_id.clone(),
+                    role,
+                },
+                vec![EventPayload::AssignmentUpdated {
+                    assignment: assignment.clone(),
+                }],
+            )
+            .await?;
+        Ok(Some((assignment, state)))
+    }
+
     pub async fn assign_next_image(
         &self,
         user_id: &UserId,
@@ -490,7 +600,9 @@ impl DatasetRepository {
         if *kind == AssignmentKind::Annotation && !state.assignment_eligible(task_id) {
             return Ok(false);
         }
-        if active_assignment_for_user(&state.assignments, task_id, user_id, kind, now).is_some() {
+        if *kind == AssignmentKind::Annotation
+            && active_assignment_for_user(&state.assignments, task_id, user_id, kind, now).is_some()
+        {
             return Ok(true);
         }
         if has_conflicting_assignment(&state.assignments, task_id, user_id, kind, now) {

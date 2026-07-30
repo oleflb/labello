@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use labello_domain::{
-    AnnotationGeometry, AnnotationId, AssignmentId, AssignmentKind, ClassId, CorrectionId,
-    DatasetId, DatasetRole, DatasetRoleAssignment, EventLogEntry, EventPayload, ImageId,
-    ImageRecord, ImbalanceConfig, LabelClass, PrelabelConfig, PrelabelConfigId, TaskDefinition,
-    TaskId, TaskStatus, UserAccount, UserId,
+    AnnotationGeometry, AnnotationId, Assignment, AssignmentId, AssignmentKind, ClassId,
+    CorrectionId, DatasetId, DatasetRole, DatasetRoleAssignment, EventLogEntry, EventPayload,
+    ImageId, ImageRecord, ImbalanceConfig, LabelClass, PrelabelConfig, PrelabelConfigId,
+    TaskDefinition, TaskId, TaskStatus, UserAccount, UserId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
@@ -71,6 +71,30 @@ mod tests {
         .unwrap();
 
         assert!(request.excluded_image_ids.is_empty());
+    }
+
+    #[test]
+    fn assignment_revalidation_uses_camel_case_json() {
+        let timestamp = labello_domain::now();
+        let assignment = Assignment {
+            assignment_id: AssignmentId::from("asn_1"),
+            image_id: ImageId::from("img_1"),
+            task_id: TaskId::from("bounding_box:person"),
+            assigned_to: UserId::from("reviewer"),
+            kind: AssignmentKind::Review,
+            status: labello_domain::AssignmentStatus::Active,
+            expires_at: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let response = AssignmentRevalidation {
+            state: labello_domain::ImageState::new(assignment.image_id.clone()),
+            assignment,
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["assignment"]["assignmentId"], "asn_1");
+        assert_eq!(value["state"]["imageId"], "img_1");
     }
 
     #[test]

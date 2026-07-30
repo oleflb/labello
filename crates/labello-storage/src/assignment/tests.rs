@@ -2017,6 +2017,133 @@ async fn claim_review(
     assignment
 }
 
+#[tokio::test]
+async fn image_scoped_revalidation_refreshes_state_and_rejects_completed_review_work() {
+    let (_temp, repo, image_id, task_id, _annotator, reviewers) =
+        correction_repo(AnnotationType::BoundingBox, false).await;
+    let queued = claim_review(&repo, &image_id, &task_id, &reviewers[0]).await;
+    let competing = claim_review(&repo, &image_id, &task_id, &reviewers[1]).await;
+    let sequence_before = repo
+        .load_image_state(&image_id)
+        .await
+        .unwrap()
+        .current_sequence;
+
+    let (renewed, refreshed) = repo
+        .revalidate_assignment_on_image(
+            &reviewers[0],
+            &queued.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Review,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renewed.assignment_id, queued.assignment_id);
+    assert!(renewed.updated_at >= queued.updated_at);
+    assert_eq!(refreshed.current_sequence, sequence_before + 1);
+    assert_eq!(refreshed.active_annotations().count(), 1);
+    assert!(refreshed.assignments.contains(&renewed));
+
+    repo.record_review_for_assignment(
+        &reviewers[1],
+        AssignmentContext {
+            assignment_id: &competing.assignment_id,
+            image_id: &image_id,
+            task_id: &task_id,
+            kind: AssignmentKind::Review,
+        },
+        ReviewRecord {
+            review_id: ReviewId::from("rev_competing_final"),
+            target: ReviewTarget::Task {
+                task_id: task_id.clone(),
+            },
+            reviewer_user_id: reviewers[1].clone(),
+            decision: ReviewDecision::Approved,
+            timestamp: now(),
+            comment: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        repo.revalidate_assignment_on_image(
+            &reviewers[0],
+            &queued.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Review,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        repo.assign_next_image(&reviewers[0], &task_id, AssignmentKind::Review)
+            .await
+            .unwrap()
+            .is_none(),
+        "an active but stale review lease must not be reclaimed before its delayed release"
+    );
+    let released = repo
+        .release_assignment(
+            &reviewers[0],
+            &queued.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Review,
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.status, AssignmentStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn image_scoped_revalidation_rejects_a_disabled_review_workflow_without_renewal() {
+    let (_temp, repo, image_id, task_id, _annotator, reviewers) =
+        correction_repo(AnnotationType::BoundingBox, false).await;
+    let queued = claim_review(&repo, &image_id, &task_id, &reviewers[0]).await;
+    let mut metadata = repo.load_dataset_config().await.unwrap();
+    let task = metadata
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == task_id)
+        .unwrap();
+    task.review.workflow = ReviewWorkflow::None;
+    task.review.required_reviews = 0;
+    repo.save_dataset(&metadata).await.unwrap();
+    let sequence_before = repo
+        .load_image_state(&image_id)
+        .await
+        .unwrap()
+        .current_sequence;
+
+    assert!(
+        repo.revalidate_assignment_on_image(
+            &reviewers[0],
+            &queued.assignment_id,
+            &image_id,
+            &task_id,
+            AssignmentKind::Review,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let state = repo.load_image_state(&image_id).await.unwrap();
+    assert_eq!(state.current_sequence, sequence_before);
+    assert_eq!(
+        state
+            .assignments
+            .iter()
+            .find(|assignment| assignment.assignment_id == queued.assignment_id)
+            .unwrap(),
+        &queued
+    );
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the test helper exposes every correction input varied by its callers"

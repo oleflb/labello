@@ -21,6 +21,9 @@ impl LabelloApp {
                             self.work.one_shot_excluded_image_id = None;
                             self.runtime.error = None;
                             self.runtime.notice = None;
+                            self.work
+                                .queue
+                                .remove_prepared_image(&loaded.assignment.image_id);
                             if let Some(expected) =
                                 self.runtime.persistence.expected_assignment.take()
                                 && loaded.assignment.assignment_id != expected
@@ -60,6 +63,76 @@ impl LabelloApp {
                             }
                             self.runtime.persistence.expected_assignment = None;
                             self.work.assignment = assignment;
+                            self.runtime.error = Some(error);
+                            self.request_assignment_availability();
+                        }
+                    }
+                }
+                UiMessage::PreparedReviewRevalidated {
+                    request,
+                    operation_id,
+                    mut cached,
+                    result,
+                } => {
+                    let dataset_id = request
+                        .dataset_id
+                        .clone()
+                        .expect("prepared review revalidation is dataset-scoped");
+                    if self.work.active_load_id != Some(operation_id) {
+                        self.release_reservation(dataset_id, cached.assignment);
+                        return None;
+                    }
+                    self.work.active_load_id = None;
+                    self.loading.image = false;
+                    match *result {
+                        Ok(Some(revalidated)) => {
+                            let expected = cached.assignment.clone();
+                            let assignment = revalidated.assignment;
+                            let state = revalidated.state;
+                            let consistent = assignment.assignment_id == expected.assignment_id
+                                && assignment.image_id == expected.image_id
+                                && assignment.task_id == expected.task_id
+                                && assignment.kind == expected.kind
+                                && assignment.assigned_to == expected.assigned_to
+                                && assignment.status
+                                    == labello_domain::AssignmentStatus::Active
+                                && state.image_id == assignment.image_id
+                                && state.assignments.iter().any(|stored| {
+                                    stored.assignment_id == assignment.assignment_id
+                                        && stored == &assignment
+                                });
+                            if !consistent {
+                                self.release_revalidation_assignments(
+                                    dataset_id,
+                                    expected,
+                                    Some(assignment),
+                                );
+                                self.clear_current_image();
+                                self.runtime.error = Some(
+                                    "Prepared review revalidation returned inconsistent work."
+                                        .to_string(),
+                                );
+                                return None;
+                            }
+                            cached.assignment = assignment;
+                            cached.annotations = state.active_annotations().cloned().collect();
+                            cached.state = state;
+                            self.runtime.error = None;
+                            self.runtime.notice = None;
+                            self.apply_loaded_image(ctx, *cached);
+                            self.refresh_assignment_availability_if_due();
+                        }
+                        Ok(None) => {
+                            self.release_reservation(dataset_id, cached.assignment);
+                            self.runtime.error = None;
+                            if !self.promote_prepared_assignment(ctx, None) {
+                                self.clear_current_image();
+                                self.request_next_image();
+                            }
+                        }
+                        Err(error) => {
+                            self.release_reservation(dataset_id, cached.assignment);
+                            self.clear_current_image();
                             self.runtime.error = Some(error);
                             self.request_assignment_availability();
                         }
@@ -121,8 +194,7 @@ impl LabelloApp {
                     self.work.queue.set_loading(false);
                     match *result {
                         Ok(Some(loaded))
-                            if loaded.assignment.kind
-                                == labello_domain::AssignmentKind::Annotation
+                            if self.assignment_kind().as_ref() == Some(&loaded.assignment.kind)
                                 && loaded.assignment.status
                                     == labello_domain::AssignmentStatus::Active
                                 && self.work.assignment.as_ref().is_some_and(|current| {
@@ -345,7 +417,9 @@ impl LabelloApp {
                                 }
                                 crate::app::ReviewPhase::FullImage => {
                                     self.request_stats();
-                                    self.clear_current_image();
+                                    if !self.promote_prepared_assignment(ctx, None) {
+                                        self.clear_current_image();
+                                    }
                                 }
                             }
                             self.assignment_availability_mutation_completed(
@@ -353,7 +427,8 @@ impl LabelloApp {
                                     .dataset_id
                                     .as_ref()
                                     .expect("review mutations are dataset-scoped"),
-                                phase == crate::app::ReviewPhase::FullImage,
+                                phase == crate::app::ReviewPhase::FullImage
+                                    && self.work.assignment.is_none(),
                             );
                         }
                         Err(error) => {
@@ -387,13 +462,15 @@ impl LabelloApp {
                             }
                             self.runtime.error = None;
                             self.request_stats();
-                            self.clear_current_image();
+                            if !self.promote_prepared_assignment(ctx, None) {
+                                self.clear_current_image();
+                            }
                             self.assignment_availability_mutation_completed(
                                 request
                                     .dataset_id
                                     .as_ref()
                                     .expect("correction mutations are dataset-scoped"),
-                                true,
+                                self.work.assignment.is_none(),
                             );
                         }
                         Err(error) => {

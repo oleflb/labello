@@ -31,7 +31,9 @@ impl LabelloApp {
     }
 
     fn workflow_queue_status(&self) -> Option<String> {
-        (self.view == AppView::Annotate && self.work.assignment.is_some()).then(|| {
+        (matches!(self.view, AppView::Annotate | AppView::Review)
+            && self.work.assignment.is_some())
+        .then(|| {
             if self.work.queue.failed() {
                 "Loaded assignment queue refill failed; retrying".to_string()
             } else if self.work.queue.is_loading() {

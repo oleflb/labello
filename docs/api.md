@@ -127,6 +127,7 @@ handler; a data administrator cannot use this route to bypass those rules.
 | --- | --- | --- |
 | `GET /datasets/{dataset_id}/assignments/availability` | Session; requested kind authorized by storage | `AssignmentAvailabilityRequest` query → `AssignmentAvailability` |
 | `POST /datasets/{dataset_id}/images/next` | Session; requested kind authorized by storage | `AssignNextRequest` → `Assignment?` |
+| `POST /datasets/{dataset_id}/images/{image_id}/assignments/revalidate` | Owner of exact active assignment | `AssignmentActionRequest` → `AssignmentRevalidation?` |
 | `POST /datasets/{dataset_id}/assignments/release` | Assigned actor | `AssignmentActionRequest` → `Assignment` |
 | `POST /datasets/{dataset_id}/assignments/complete` | Assigned annotator | `AssignmentActionRequest` → `Assignment` |
 | `POST /datasets/{dataset_id}/assignments/reopen` | Owner of exact prior annotation assignment | `AssignmentActionRequest` → `Assignment` |
