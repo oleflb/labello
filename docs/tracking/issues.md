@@ -54,6 +54,37 @@ Only after that continue with the next issue.
 - [ ] Add an additional configurable shortcut for panning
 - [ ] Search for assigned keys in the shortcut window
 - [ ] When in the overview after finishing all objects in the current image, all object should be clickable to directly edit them again.
+- [ ] Move statistics from separate view into an overlay, to not have to leave the current assignment. 
+- [ ] Current activity live stats in the bottom bar. 
+- [ ] Image viewer border has a clipping pixel row on the left.
+- [ ] Remove image grid overlay.
+- [ ] Remove zoom controls. 
+- [ ] Remove Mark as not present from UI when disabled.
+- [ ] Distinsguish visible and occluded points rendered in image. In all views! Also Increase contrast of all things rendered on image, with e.g. a secondary color/border.
+- [ ] During review, added missing object keypoints that have no bounding boxes are not zoomed in on and are not listed in the inspector.
+- [ ] Add small Dot in the workflow selector, for the current workflow.
+- [ ] Add button to fully remove image from dataset, even from all other workflows.
+- [ ] Add button to mark entire image as unsure. To be reviewed.
+- [ ] People page in admin can be visally improved. Full width, better margins...
+- [ ] Classes color: add color picker
+- [ ] Assignment balance policy from ratio to absolute window of x amount of images, can be between the most and least labeled classes.
+- [ ] Previous assignment in review
+- [ ] Validate Tutorial UI. Example images should be able to be provided. Image should be uploaded via file picker.
+- [ ] Confirm no guides & finish rename. 
+- [ ] Shortcut text color in highlighted button needs be improved.
+- [ ] Remove Connection Setup section. Replace with proper login page, this should be cleaneup completely.
+- [ ] Improve wasm app loading time.
+- [ ] Webp image proxies.
+- [ ] Bounding boxes have minimum size currently. Investigate if this is correct and intended.
+- [ ] Second bar, more actions buttons collects some buttons even though more space is available.
+- [ ] Setup button icon should be home icon.
+- [ ] Look into lease expiration. Optimistic reclaiming, if no other claims happened after expiration.
+- [ ] Better, more obvious visual feedback, when the class changes after the current class is nto available for the next image.
+- [ ] Remove start correction pass.
+- [ ] Investigate api errors not showing up in server log.
+- [ ] Normal non-migration annotation view need major. 
+- [ ] Allow review correction does not seem to work. Causes api errors when accepting and not correction UI are available. 
+- [ ] Debounce/edge trigger submission/accept buttons. Holding the button should only do one accept.
 
 ## Documentation deep-dive findings
 
