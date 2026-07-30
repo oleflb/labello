@@ -3,7 +3,7 @@
 > **Status:** Current repository overview and setup guide
 > **Owner:** Labello maintainers
 > **Audience:** Users, operators, and contributors
-> **Last verified:** 2026-07-30 at `4f9c332`
+> **Last verified:** 2026-07-30 at `5f10153`
 
 <img src="assets/labello-icon.svg" alt="Labello icon" width="128" />
 
@@ -62,11 +62,39 @@ Open <http://127.0.0.1:8081> and select `Continue as local admin`. The default
 loopback-only server configuration enables this session login for the `admin`
 bootstrap user, which can create the first dataset.
 
-The client normally connects to port `8080` on the same hostname used to open
-the UI. Override this with the `api` query parameter when needed. The annotation
-client prepares two upcoming assignments by default; set `queueSize=1` to hold
-only one upcoming assignment. Values are clamped to `1..=2`, so a browser holds
-at most the current assignment and two prepared assignments.
+The client selects its API URL from the `api` query parameter, then from the
+public `labello.client.json` file deployed beside the browser application, and
+finally from port `8080` on the same hostname used to open the UI. The tracked
+[`labello.client.example.json`](apps/labello-wasm/labello.client.example.json)
+contains every supported field with its default. Copy it before configuring a
+local client:
+
+```sh
+cp apps/labello-wasm/labello.client.example.json \
+  apps/labello-wasm/labello.client.json
+```
+
+Its default `null` value selects the hostname-derived port `8080` fallback.
+For example, replace it with the following value to make port `8090` the
+deployment default without putting it in every application URL:
+
+```json
+{
+  "apiBaseUrl": "http://127.0.0.1:8090"
+}
+```
+
+`apps/labello-wasm/labello.client.json` is ignored by Git and copied into a
+Trunk distribution when it exists. It is public browser configuration and must
+not contain secrets. A build without the file uses the hostname-derived
+fallback. Replace the deployed copy for each environment, or edit the source
+copy before starting a local `trunk serve` session. The `api` query parameter
+remains an explicit temporary override.
+
+The annotation client prepares two upcoming assignments by default; set
+`queueSize=1` to hold only one upcoming assignment. Values are clamped to
+`1..=2`, so a browser holds at most the current assignment and two prepared
+assignments.
 
 ```text
 http://127.0.0.1:8081/?api=http://127.0.0.1:9000&queueSize=1

@@ -3,7 +3,7 @@
 > **Status:** Normative current reference
 > **Owner:** Server maintainers
 > **Audience:** Operators and maintainers
-> **Last verified:** 2026-07-30 at `4f9c332`
+> **Last verified:** 2026-07-30 at `5f10153`
 
 Labello reads its server configuration from `labello.server.toml` in the
 current working directory. Set `LABELLO_CONFIG` to use a different path. If the
@@ -21,6 +21,67 @@ cp labello.server.example.toml labello.server.toml
 `labello.server.toml` is ignored by Git because it can contain credentials.
 Keep production secrets in the environment or another secret-management
 system.
+
+## Browser Runtime Configuration
+
+The Axum server and browser distribution are deployed separately. The WASM
+application therefore cannot safely read `labello.server.toml`: it must know
+the API address before making its first API request, and the server file may
+contain OAuth credentials.
+
+The tracked
+[`labello.client.example.json`](../apps/labello-wasm/labello.client.example.json)
+contains every supported browser field with its default value:
+
+```json
+{
+  "apiBaseUrl": null
+}
+```
+
+Copy it to the public runtime file before setting a deployment-specific API
+URL:
+
+```sh
+cp apps/labello-wasm/labello.client.example.json \
+  apps/labello-wasm/labello.client.json
+```
+
+`"apiBaseUrl": null` is equivalent to omitting the field and selects the
+hostname-derived port `8080` fallback. Set it to an absolute URL to configure a
+deployment:
+
+```json
+{
+  "apiBaseUrl": "https://api.example.com"
+}
+```
+
+The runtime `apps/labello-wasm/labello.client.json` is ignored by Git. When it
+exists, a Trunk post-build hook copies it into the distribution root. When it
+is absent, the build still succeeds and the client uses the hostname-derived
+fallback. Operators may replace the deployed copy without rebuilding the WASM
+bundle. A browser reload is required after a deployed-file change; restart
+`trunk serve` after changing the source runtime file.
+
+The client resolves its API URL in this order:
+
+1. The `api` URL query parameter, when present.
+2. `apiBaseUrl` from `labello.client.json`, when present.
+3. `http(s)://<browser-host>:8080`.
+
+`apiBaseUrl` must be an absolute HTTP or HTTPS URL with a host. It must not
+contain credentials, a query, or a fragment. A non-root path prefix is
+supported only when it ends in `/`, for example
+`https://example.com/labello-api/`. Unknown fields, malformed JSON, files over
+16 KiB, and invalid configured URLs stop browser startup with a bounded error
+that does not repeat the URL. An HTTP 404 means the runtime file is absent and
+uses the legacy fallback. Other fetch failures stop startup.
+
+The runtime file is fetched without browser caching on each page load. It is a
+public artifact and must never contain OAuth credentials, cookies, tokens, or
+other secrets. Static hosting must return a real 404 for an absent
+`labello.client.json`, rather than rewriting that path to `index.html`.
 
 ## Complete Configuration
 

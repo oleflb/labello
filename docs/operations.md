@@ -3,7 +3,7 @@
 > **Status:** Normative current reference
 > **Owner:** Server maintainers
 > **Audience:** Operators and maintainers
-> **Last verified:** 2026-07-30 at `4f9c332`
+> **Last verified:** 2026-07-30 at `5f10153`
 
 ## Logging
 
@@ -162,6 +162,16 @@ Deploy the browser and API behind TLS. Set `sessionCookieSecure = true`, disable
 local development login, restrict `browserOrigins` to exact HTTPS origins, and
 keep the public browser hostname consistent with the OAuth callback hostname
 through cookie flows. The API does not serve the WASM distribution.
+
+Deploy the complete Trunk browser distribution. The Git-ignored
+`labello.client.json` is copied into the distribution when present and may set
+the deployment's default `apiBaseUrl`; an absent file uses the fallback.
+Replace it after the Trunk build or as part of the atomic deployment rather
+than rebuilding the WASM bundle. It is fetched with `no-store` on each page
+load, so a reload adopts a replacement. Never place OAuth secrets or other
+credentials in it. Configure the static host to return 404 for a missing
+runtime file instead of an SPA fallback to `index.html`. Trunk development
+serving disables its SPA fallback for the same reason.
 
 Retain logs according to local audit policy while preserving the redaction
 rules above. Restrict access to logs because safe identifiers and aggregate

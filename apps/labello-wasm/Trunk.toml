@@ -2,3 +2,14 @@
 target = "index.html"
 dist = "dist"
 public_url = "./"
+
+[serve]
+no_spa = true
+
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+    "-c",
+    'if [ -f "$TRUNK_SOURCE_DIR/labello.client.json" ]; then cp "$TRUNK_SOURCE_DIR/labello.client.json" "$TRUNK_STAGING_DIR/labello.client.json"; fi',
+]
