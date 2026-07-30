@@ -179,30 +179,42 @@ impl LabelloApp {
                 } else {
                     "Start skeleton"
                 },
-                name,
+                name.as_str(),
             );
             if let Some(spec) = spec {
+                let hidden_shortcut = self.shortcut_text(
+                    ui.ctx(),
+                    labello_domain::UserAction::ToggleKeypointHidden,
+                );
                 ui.add_enabled_ui(!self.loading.saving, |ui| {
+                    if spec.allow_hidden {
+                        keypoint_placement_mode(
+                            ui,
+                            &name,
+                            &mut self.work.next_keypoint_hidden,
+                            &hidden_shortcut,
+                        );
+                    }
                     ui.horizontal(|ui| {
-                        if spec.allow_hidden {
-                            ui.checkbox(&mut self.work.next_keypoint_hidden, "Hidden")
-                                .on_hover_text(format!(
-                                    "Shortcut: {}",
-                                    self.shortcut_text(
-                                        ui.ctx(),
-                                        labello_domain::UserAction::ToggleKeypointHidden,
-                                    )
-                                ));
-                        }
                         if spec.allow_absent
                             && self.work.active_skeleton.is_some()
+                            && spec
+                                .keypoints
+                                .get(self.work.skeleton_keypoint_index)
+                                .is_some_and(|keypoint| !keypoint.required)
                             && ui
-                                .add(egui::Button::new("Mark absent").shortcut_text(
-                                    self.shortcut_text(
+                                .add(
+                                    egui::Button::new(format!(
+                                        "Mark {name} as not present"
+                                    ))
+                                    .shortcut_text(self.shortcut_text(
                                         ui.ctx(),
                                         labello_domain::UserAction::MarkKeypointAbsent,
-                                    ),
-                                ))
+                                    )),
+                                )
+                                .on_hover_text(
+                                    "Record this optional keypoint without a position.",
+                                )
                                 .clicked()
                         {
                             self.skip_keypoint();

@@ -44,7 +44,7 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             );
             assert!(
                 migration
-                    .query_by_label("Can't annotate this object")
+                    .query_by_label("Exclude object")
                     .is_some()
             );
         }
@@ -83,7 +83,6 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
                 canvas.right() + 15.0 <= inspector.left(),
                 "canvas crowds the inspector text: canvas={canvas:?} inspector={inspector:?}",
             );
-            click_accesskit_button(&mut migration, "Can't annotate this object");
             let exclusion_note = migration
                 .get_by_role_and_label(
                     egui::accesskit::Role::MultilineTextInput,

@@ -49,6 +49,7 @@ pub enum InspectorPreset {
     ImportPartialCategories,
     ImportRecoveryBlocked,
     MigrationObject,
+    MigrationSingleOptional,
     MigrationExclusion,
     MigrationPass,
     MigrationFullImage,
@@ -58,7 +59,7 @@ pub enum InspectorPreset {
 }
 
 impl InspectorPreset {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::Annotation,
         Self::Setup,
         Self::Review,
@@ -87,6 +88,7 @@ impl InspectorPreset {
         Self::ImportPartialCategories,
         Self::ImportRecoveryBlocked,
         Self::MigrationObject,
+        Self::MigrationSingleOptional,
         Self::MigrationExclusion,
         Self::MigrationPass,
         Self::MigrationFullImage,
@@ -125,6 +127,7 @@ impl InspectorPreset {
             Self::ImportPartialCategories => "import-partial-categories",
             Self::ImportRecoveryBlocked => "import-recovery-blocked",
             Self::MigrationObject => "migration-object",
+            Self::MigrationSingleOptional => "migration-single-optional",
             Self::MigrationExclusion => "migration-exclusion",
             Self::MigrationPass => "migration-pass",
             Self::MigrationFullImage => "migration-full-image",
@@ -232,6 +235,9 @@ pub fn build(preset: InspectorPreset, ctx: &egui::Context) -> LabelloApp {
         InspectorPreset::ImportPartialCategories => import_partial_categories_preset(),
         InspectorPreset::ImportRecoveryBlocked => import_recovery_blocked_preset(),
         InspectorPreset::MigrationObject => migration_preset(ctx, MigrationPreset::Object),
+        InspectorPreset::MigrationSingleOptional => {
+            migration_preset(ctx, MigrationPreset::SingleOptional)
+        }
         InspectorPreset::MigrationExclusion => migration_preset(ctx, MigrationPreset::Exclusion),
         InspectorPreset::MigrationPass => migration_preset(ctx, MigrationPreset::Pass),
         InspectorPreset::MigrationFullImage => migration_preset(ctx, MigrationPreset::FullImage),
@@ -617,6 +623,7 @@ fn import_report() -> ImportPreflightReport {
 #[derive(Clone, Copy)]
 enum MigrationPreset {
     Object,
+    SingleOptional,
     Exclusion,
     Pass,
     FullImage,
@@ -638,6 +645,17 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
         target_task_id.clone(),
         guide_task_id.clone(),
     ));
+    if matches!(preset, MigrationPreset::SingleOptional) {
+        app.work.tasks.last_mut().unwrap().skeleton = Some(SkeletonSpec {
+            keypoints: vec![KeypointSpec {
+                name: "center".to_string(),
+                required: false,
+            }],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: true,
+        });
+    }
     app.work.tasks.extend([
         inspector_workflow(
             "bounding_box:person_cleanup",
@@ -659,7 +677,7 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
     app.work.tool = crate::app::Tool::Keypoints;
     app.work.assignment.as_mut().unwrap().task_id = target_task_id.clone();
     let image_id = app.work.current.as_ref().unwrap().image.image_id.clone();
-    let targets = vec![
+    let mut targets = vec![
         MigrationTarget {
             object_group_id: ObjectGroupId::from("group-left"),
             guide_annotation_id: AnnotationId::from("guide-left"),
@@ -673,6 +691,9 @@ fn migration_preset(ctx: &egui::Context, preset: MigrationPreset) -> LabelloApp 
             sequence_index: 1,
         },
     ];
+    if matches!(preset, MigrationPreset::SingleOptional) {
+        targets.truncate(1);
+    }
     let target_hash = migration_target_set_hash(
         &MigrationHashContext {
             dataset_id: &app.config.dataset_id,
@@ -1167,6 +1188,26 @@ mod tests {
                 .filter(|workflow| workflow.annotation_type == AnnotationType::Skeleton)
                 .count(),
             2
+        );
+
+        let single_optional = build(InspectorPreset::MigrationSingleOptional, &ctx);
+        let selected = single_optional.selected_task().unwrap();
+        let skeleton = selected.skeleton.as_ref().unwrap();
+        assert_eq!(skeleton.keypoints.len(), 1);
+        assert_eq!(skeleton.keypoints[0].name, "center");
+        assert!(!skeleton.keypoints[0].required);
+        assert!(skeleton.allow_hidden);
+        assert!(skeleton.allow_absent);
+        assert_eq!(
+            single_optional
+                .work
+                .current_state
+                .as_ref()
+                .unwrap()
+                .migration_target_sets[&selected.task_id]
+                .targets
+                .len(),
+            1
         );
         assert_eq!(
             migration.selected_workflow().unwrap().label(),

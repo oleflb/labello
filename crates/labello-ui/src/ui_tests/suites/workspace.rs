@@ -2076,6 +2076,96 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
 }
 
 #[test]
+fn skeleton_placement_exposes_explicit_visibility_choices_for_each_keypoint() {
+    let api = Rc::new(SpyApi::new());
+    {
+        let mut state = api.state.borrow_mut();
+        let task = &mut state.metadata.tasks[0];
+        task.annotation_type = AnnotationType::Skeleton;
+        task.prelabel_config_ids.clear();
+        task.skeleton = Some(SkeletonSpec {
+            keypoints: vec![
+                KeypointSpec {
+                    name: "head".to_string(),
+                    required: true,
+                },
+                KeypointSpec {
+                    name: "tail".to_string(),
+                    required: false,
+                },
+            ],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: true,
+        });
+    }
+    let mut harness = loaded_work_harness(api);
+
+    let visible = harness.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place head as visible",
+    );
+    let occluded = harness.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place head as occluded",
+    );
+    assert_eq!(
+        visible.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+    assert_eq!(
+        occluded.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False)
+    );
+    assert!(visible.rect().height() >= 44.0);
+    assert!(occluded.rect().height() >= 44.0);
+
+    click_accesskit_button(&mut harness, "Place head as occluded");
+    assert!(harness.state().work.next_keypoint_hidden);
+    harness.step();
+    assert_eq!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Place head as occluded",
+            )
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    click_at(&mut harness, canvas.center());
+    harness.step();
+    let AnnotationGeometry::Skeleton(skeleton) = &harness.state().work.annotations[0].geometry else {
+        panic!("expected skeleton annotation");
+    };
+    assert_eq!(skeleton.keypoints[0].state, KeypointState::Hidden);
+    assert!(!harness.state().work.next_keypoint_hidden);
+    assert_eq!(
+        harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Place tail as visible",
+            )
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+    let not_present = harness
+        .query_all_by_label_contains("Mark tail as not present")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap();
+    assert!(!not_present.accesskit_node().is_disabled());
+    click_accesskit_button(&mut harness, "Mark tail as not present");
+    let AnnotationGeometry::Skeleton(skeleton) = &harness.state().work.annotations[0].geometry else {
+        panic!("expected skeleton annotation");
+    };
+    assert_eq!(skeleton.keypoints[1].state, KeypointState::Absent);
+    assert!(skeleton.keypoints[1].point.is_none());
+}
+
+#[test]
 fn reviewer_correction_controls_follow_task_config_and_keep_an_isolated_bbox_draft() {
     let disabled_api = Rc::new(SpyApi::new());
     seed_review_annotation(

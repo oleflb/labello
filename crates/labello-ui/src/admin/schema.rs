@@ -649,13 +649,13 @@ fn edit_skeleton(ui: &mut egui::Ui, task_index: usize, skeleton: &mut SkeletonSp
         .id_salt(("skeleton-configuration", task_index))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut skeleton.allow_hidden, "Allow hidden keypoints")
+                ui.checkbox(&mut skeleton.allow_hidden, "Allow occluded keypoints")
                     .on_hover_text(
-                        "Annotators may mark a keypoint as hidden behind another object.",
+                        "Annotators may place an estimated position for an occluded keypoint.",
                     );
-                ui.checkbox(&mut skeleton.allow_absent, "Allow absent keypoints")
+                ui.checkbox(&mut skeleton.allow_absent, "Allow not-present keypoints")
                     .on_hover_text(
-                        "Annotators may mark a keypoint as outside the image or absent.",
+                        "Annotators may record an optional keypoint without a position.",
                     );
             });
 

@@ -25,8 +25,11 @@ Available presets are `annotation`, `setup`, `review`, `review-correction`,
 `import-success`, `import-multiple-descriptors`, `import-yolo-splits`,
 `import-server-folder-picker`, `import-server-descriptor-picker`,
 `import-partial-categories`, `import-recovery-blocked`, `migration-object`,
-`migration-exclusion`, `migration-pass`, `migration-full-image`, and
-`migration-review`. Preset actions
+`migration-single-optional`, `migration-exclusion`, `migration-pass`,
+`migration-full-image`, `migration-review`, `migration-annotated-edit`, and
+`migration-guide-deleted`. The `migration-single-optional` preset reproduces a
+pending imported guide with one optional `center` keypoint and no positioned
+draft input, without a server or dataset. Preset actions
 are intentionally local and deterministic; restart with another preset for a
 clean inspection context.
 

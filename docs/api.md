@@ -175,6 +175,13 @@ full-image cursor. Edit and delete requests identify an active, native,
 group-less skeleton for the selected migration task and supply its exact
 expected version; stale or non-migration annotations are rejected.
 
+New save, add, and edit requests must contain at least one visible or hidden
+keypoint with coordinates. A skeleton containing only absent keypoints returns
+HTTP 400 with the safe invalid-assignment message
+`manual migration skeleton requires at least one positioned keypoint`.
+Idempotent replay is checked first, so an identical retry of a successfully
+recorded historical all-absent command still replays without appending events.
+
 ## Dataset Import Routes
 
 All import routes require a bootstrap-administrator session. Job routes also

@@ -129,6 +129,12 @@ has been recorded.
 - **Workspace:** preserve tested canvas geometry and gestures; keep Pan, zoom,
   and Fit visible; place review phase near the canvas; prefer compact object
   summaries over coordinate-heavy labels.
+- **Skeleton outcomes:** present **Visible** and **Occluded** as selected
+  coordinate-placement modes with one concise dynamic instruction. Present
+  **Not present** as a coordinate-free outcome for one optional keypoint.
+  Keep whole-object exclusion in a separate, always-visible **Exclude object**
+  section. Explain the keypoint-level versus object-level distinction there,
+  and reserve danger styling for the final exclusion action.
 - **Admin:** organize by Overview, People, Images, Schema, Automation, and
   Backups; preserve staged edits between destinations; use wide rows and compact
   cards; retain validation and role protections.

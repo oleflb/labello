@@ -29,6 +29,297 @@ struct MigrationPair {
     targets: Vec<MigrationTarget>,
 }
 
+fn optional_skeleton_spec() -> SkeletonSpec {
+    SkeletonSpec {
+        keypoints: vec![
+            KeypointSpec {
+                name: "center".to_string(),
+                required: false,
+            },
+            KeypointSpec {
+                name: "tail".to_string(),
+                required: false,
+            },
+        ],
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: true,
+    }
+}
+
+fn all_not_present_skeleton() -> SkeletonGeometry {
+    SkeletonGeometry {
+        keypoints: ["center", "tail"]
+            .into_iter()
+            .map(|name| KeypointAnnotation {
+                name: name.to_string(),
+                state: KeypointState::Absent,
+                point: None,
+            })
+            .collect(),
+    }
+}
+
+fn mixed_optional_skeleton() -> SkeletonGeometry {
+    SkeletonGeometry {
+        keypoints: vec![
+            KeypointAnnotation {
+                name: "center".to_string(),
+                state: KeypointState::Hidden,
+                point: Some(NormalizedPoint { x: 0.4, y: 0.5 }),
+            },
+            KeypointAnnotation {
+                name: "tail".to_string(),
+                state: KeypointState::Absent,
+                point: None,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn migration_save_rejects_zero_positions_without_mutating_state() {
+    let fixture =
+        fixture_with_skeleton_spec(ReviewWorkflow::None, 1, optional_skeleton_spec()).await;
+    let assignment = claim_annotator(&fixture).await;
+    let before = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    let events_before = fixture
+        .repository
+        .load_events(&fixture.image_id)
+        .await
+        .unwrap();
+    let expected = expectation(&before.image_state, &fixture.task_id, &fixture.targets[0]);
+
+    let error = fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &expected,
+            all_not_present_skeleton(),
+            "reject-zero-position-save",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StorageError::InvalidAssignment(message)
+            if message
+                == "invalid geometry: manual migration skeleton requires at least one positioned keypoint"
+    ));
+
+    let after = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    assert_eq!(after.image_state, before.image_state);
+    assert_eq!(after.cursor, before.cursor);
+    assert_eq!(
+        fixture
+            .repository
+            .load_events(&fixture.image_id)
+            .await
+            .unwrap(),
+        events_before
+    );
+
+    fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &expected,
+            mixed_optional_skeleton(),
+            "save-mixed-optional",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn migration_add_and_edit_reject_zero_positions_atomically() {
+    let fixture =
+        fixture_with_skeleton_spec(ReviewWorkflow::None, 0, optional_skeleton_spec()).await;
+    let assignment = claim_annotator(&fixture).await;
+    let before = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    assert_eq!(before.cursor, MigrationCursor::FullImage);
+    let events_before = fixture
+        .repository
+        .load_events(&fixture.image_id)
+        .await
+        .unwrap();
+
+    let add_error = fixture
+        .repository
+        .add_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            all_not_present_skeleton(),
+            "reject-zero-position-add",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(add_error, StorageError::InvalidAssignment(message) if message.contains(
+            "manual migration skeleton requires at least one positioned keypoint"
+        ))
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load_image_state(&fixture.image_id)
+            .await
+            .unwrap(),
+        before.image_state
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load_events(&fixture.image_id)
+            .await
+            .unwrap(),
+        events_before
+    );
+
+    let added = fixture
+        .repository
+        .add_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            mixed_optional_skeleton(),
+            "add-mixed-optional",
+        )
+        .await
+        .unwrap();
+    let annotation_id = added.annotation_id.unwrap();
+    let events_after_add = fixture
+        .repository
+        .load_events(&fixture.image_id)
+        .await
+        .unwrap();
+
+    let edit_error = fixture
+        .repository
+        .edit_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            1,
+            all_not_present_skeleton(),
+            "reject-zero-position-edit",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(edit_error, StorageError::InvalidAssignment(message) if message.contains(
+            "manual migration skeleton requires at least one positioned keypoint"
+        ))
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load_events(&fixture.image_id)
+            .await
+            .unwrap(),
+        events_after_add
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .load_image_state(&fixture.image_id)
+            .await
+            .unwrap()
+            .current_annotation(&annotation_id)
+            .unwrap()
+            .version,
+        1
+    );
+}
+
+#[tokio::test]
+async fn historical_all_not_present_save_replays_before_new_validation() {
+    let fixture =
+        fixture_with_skeleton_spec(ReviewWorkflow::None, 1, optional_skeleton_spec()).await;
+    let assignment = claim_annotator(&fixture).await;
+    let before = fixture
+        .repository
+        .current_manual_migration(&fixture.annotator, context(&assignment), None)
+        .await
+        .unwrap();
+    let target = &fixture.targets[0];
+    let expected = expectation(&before.image_state, &fixture.task_id, target);
+    let timestamp = labello_domain::now();
+    let annotation = AnnotationVersion {
+        annotation_id: target.reserved_skeleton_annotation_id.clone(),
+        version: 1,
+        object_group_id: Some(target.object_group_id.clone()),
+        origin: AnnotationOrigin::native(),
+        task_id: fixture.task_id.clone(),
+        class_id: ClassId::from("person"),
+        annotation_type: AnnotationType::Skeleton,
+        revision_source: RevisionSource::Human {
+            action: HumanRevisionKind::Authored,
+        },
+        geometry: AnnotationGeometry::Skeleton(all_not_present_skeleton()),
+        author_user_id: fixture.annotator.clone(),
+        created_at: timestamp,
+        updated_at: timestamp,
+        deleted: false,
+    };
+    fixture
+        .repository
+        .append_migration_command_unlocked(
+            &fixture.image_id,
+            &fixture.annotator,
+            DatasetRole::Annotator,
+            "historical-zero-position",
+            &assignment.assignment_id,
+            vec![EventPayload::AnnotationVersionCreated {
+                annotation,
+                previous_version: None,
+                reason: None,
+            }],
+            0,
+            timestamp,
+        )
+        .await
+        .unwrap();
+    let sequence = fixture
+        .repository
+        .load_image_state(&fixture.image_id)
+        .await
+        .unwrap()
+        .current_sequence;
+
+    let replayed = fixture
+        .repository
+        .save_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &expected,
+            all_not_present_skeleton(),
+            "historical-zero-position",
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.image_state.current_sequence, sequence);
+}
+
 #[tokio::test]
 async fn full_image_migration_accepts_edits_and_binds_a_discovered_skeleton() {
     let fixture = fixture(ReviewWorkflow::None, 0).await;
@@ -2016,6 +2307,27 @@ async fn reviewer_guide_correction_invalidates_submitted_migration_atomically() 
 }
 
 async fn fixture(workflow: ReviewWorkflow, target_count: usize) -> Fixture {
+    fixture_with_skeleton_spec(
+        workflow,
+        target_count,
+        SkeletonSpec {
+            keypoints: vec![KeypointSpec {
+                name: "nose".to_string(),
+                required: true,
+            }],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: false,
+        },
+    )
+    .await
+}
+
+async fn fixture_with_skeleton_spec(
+    workflow: ReviewWorkflow,
+    target_count: usize,
+    skeleton_spec: SkeletonSpec,
+) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let repository = DatasetRepository::new(temp.path());
     let image_id = ImageId::from("img_1");
@@ -2050,15 +2362,7 @@ async fn fixture(workflow: ReviewWorkflow, target_count: usize) -> Fixture {
         annotation_type: AnnotationType::Skeleton,
         class_ids: vec![class_id.clone()],
         instructions: tutorial(),
-        skeleton: Some(SkeletonSpec {
-            keypoints: vec![KeypointSpec {
-                name: "nose".to_string(),
-                required: true,
-            }],
-            edges: Vec::new(),
-            allow_hidden: true,
-            allow_absent: false,
-        }),
+        skeleton: Some(skeleton_spec),
         review: ReviewConfig {
             required_reviews: 1,
             workflow,

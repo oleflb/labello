@@ -3,8 +3,24 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     AnnotationId, AssignmentId, DatasetId, DomainError, DomainResult, EventId, ImageId,
-    MigrationPassId, ObjectGroupId, SCHEMA_VERSION, TaskId, Timestamp, UserId,
+    KeypointState, MigrationPassId, ObjectGroupId, SCHEMA_VERSION, SkeletonGeometry, TaskId,
+    Timestamp, UserId,
 };
+
+pub fn validate_manual_migration_skeleton(skeleton: &SkeletonGeometry) -> DomainResult<()> {
+    if skeleton.keypoints.iter().any(|keypoint| {
+        matches!(
+            keypoint.state,
+            KeypointState::Visible | KeypointState::Hidden
+        ) && keypoint.point.is_some()
+    }) {
+        Ok(())
+    } else {
+        Err(DomainError::InvalidGeometry(
+            "manual migration skeleton requires at least one positioned keypoint".to_string(),
+        ))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -500,10 +516,50 @@ fn upcast_v2_state_annotations(value: &mut serde_json::Value) -> DomainResult<()
 
 #[cfg(test)]
 mod tests {
+    use crate::{KeypointAnnotation, NormalizedPoint};
+
     use super::*;
 
     fn timestamp() -> Timestamp {
         "2026-01-02T03:04:05Z".parse().unwrap()
+    }
+
+    fn migration_skeleton(states: &[KeypointState]) -> SkeletonGeometry {
+        SkeletonGeometry {
+            keypoints: states
+                .iter()
+                .enumerate()
+                .map(|(index, state)| KeypointAnnotation {
+                    name: format!("point-{index}"),
+                    state: state.clone(),
+                    point: (*state != KeypointState::Absent)
+                        .then_some(NormalizedPoint { x: 0.5, y: 0.5 }),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn manual_migration_skeleton_requires_one_positioned_keypoint() {
+        for states in [
+            vec![KeypointState::Visible],
+            vec![KeypointState::Hidden],
+            vec![KeypointState::Visible, KeypointState::Absent],
+        ] {
+            validate_manual_migration_skeleton(&migration_skeleton(&states)).unwrap();
+        }
+
+        let error = validate_manual_migration_skeleton(&migration_skeleton(&[
+            KeypointState::Absent,
+            KeypointState::Absent,
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DomainError::InvalidGeometry(
+                "manual migration skeleton requires at least one positioned keypoint".to_string()
+            )
+        );
     }
 
     #[test]

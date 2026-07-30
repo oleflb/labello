@@ -71,6 +71,65 @@ fn centered_scroll(ui: &mut egui::Ui, max_width: f32, add_contents: impl FnOnce(
     });
 }
 
+pub(crate) fn keypoint_placement_mode(
+    ui: &mut egui::Ui,
+    keypoint_name: &str,
+    occluded: &mut bool,
+    shortcut: &str,
+) {
+    ui.label(RichText::new("Placement").color(theme::TEXT_MUTED));
+    ui.horizontal_wrapped(|ui| {
+        let enabled = ui.is_enabled();
+        let visible_selected = !*occluded;
+        let visible_label = format!("Place {keypoint_name} as visible");
+        let visible = ui
+            .add(
+                egui::Button::new("Visible")
+                    .selected(visible_selected)
+                    .min_size(egui::vec2(88.0, 44.0)),
+            )
+            .on_hover_text("Click the exact keypoint position.");
+        visible.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                enabled,
+                visible_selected,
+                &visible_label,
+            )
+        });
+        if visible.clicked() {
+            *occluded = false;
+        }
+
+        let occluded_selected = *occluded;
+        let occluded_label = format!("Place {keypoint_name} as occluded");
+        let occluded_response = ui
+            .add(
+                egui::Button::new("Occluded")
+                    .selected(occluded_selected)
+                    .shortcut_text(shortcut)
+                    .min_size(egui::vec2(88.0, 44.0)),
+            )
+            .on_hover_text("Click the estimated keypoint position.");
+        occluded_response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                enabled,
+                occluded_selected,
+                &occluded_label,
+            )
+        });
+        if occluded_response.clicked() {
+            *occluded = true;
+        }
+    });
+    ui.small(if *occluded {
+        "Occluded: click the estimated position."
+    } else {
+        "Visible: click the exact position."
+    });
+}
+
 fn action_label(action: &labello_domain::UserAction) -> &'static str {
     use labello_domain::UserAction;
     match action {
@@ -89,8 +148,8 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
         UserAction::SelectNextPrelabel => "Next prelabel",
         UserAction::AcceptPrelabel => "Accept active prelabel",
         UserAction::DiscardPrelabel => "Discard active prelabel",
-        UserAction::ToggleKeypointHidden => "Toggle keypoint hidden",
-        UserAction::MarkKeypointAbsent => "Mark keypoint absent",
+        UserAction::ToggleKeypointHidden => "Toggle occluded keypoint placement",
+        UserAction::MarkKeypointAbsent => "Mark keypoint as not present",
         UserAction::AddMissingObject => "Add or cancel missing migration object",
         UserAction::RetryImageLoad => "Retry image load",
         UserAction::TogglePanMode => "Toggle Pan mode",
@@ -167,8 +226,8 @@ fn action_description(action: labello_domain::UserAction) -> &'static str {
         UserAction::SelectNextPrelabel => "Highlight the next suggestion.",
         UserAction::AcceptPrelabel => "Convert the active suggestion to an annotation.",
         UserAction::DiscardPrelabel => "Hide the active suggestion.",
-        UserAction::ToggleKeypointHidden => "Toggle visibility for the next keypoint.",
-        UserAction::MarkKeypointAbsent => "Skip an allowed optional keypoint.",
+        UserAction::ToggleKeypointHidden => "Toggle occluded placement for the next keypoint.",
+        UserAction::MarkKeypointAbsent => "Record an allowed optional keypoint without a position.",
         UserAction::AddMissingObject => {
             "Begin or cancel a skeleton for an object missing from the imported data."
         }
@@ -306,7 +365,7 @@ fn status_intent(status: SaveStatus) -> theme::Intent {
 fn keypoint_state_label(state: &KeypointState) -> &'static str {
     match state {
         KeypointState::Visible => "visible",
-        KeypointState::Hidden => "hidden",
-        KeypointState::Absent => "absent",
+        KeypointState::Hidden => "occluded",
+        KeypointState::Absent => "not present",
     }
 }

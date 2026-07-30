@@ -429,6 +429,61 @@ fn migration_full_image_can_add_an_object_missing_from_the_import() {
             .is_some()
     );
 }
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn missing_object_uses_its_own_zero_position_explanation() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut app = inspector_presets::build(
+        InspectorPreset::MigrationFullImage,
+        &egui::Context::default(),
+    );
+    let task_id = app.work.selected_task_id.clone().unwrap();
+    app.work
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == task_id)
+        .unwrap()
+        .skeleton = Some(labello_domain::SkeletonSpec {
+        keypoints: vec![labello_domain::KeypointSpec {
+            name: "center".to_string(),
+            required: false,
+        }],
+        edges: Vec::new(),
+        allow_hidden: true,
+        allow_absent: true,
+    });
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+
+    click_accesskit_button(&mut harness, "Add missing object");
+    let not_present = harness
+        .query_all_by_label_contains("Mark center as not present")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap();
+    assert!(not_present.accesskit_node().is_disabled());
+    assert!(
+        harness
+            .query_by_label(
+                "At least one keypoint position is required to add an object."
+            )
+            .is_some()
+    );
+    harness.key_press(egui::Key::N);
+    harness.step();
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
+    assert!(
+        harness
+            .query_by_label_contains("Save missing object")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
 #[cfg(feature = "inspector-presets")]
 #[test]
 fn clicking_a_pending_box_confirms_the_current_skeleton_and_selects_the_clicked_target() {
@@ -1110,10 +1165,35 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     );
     assert!(
         object
-            .query_by_label("Can't annotate this object")
+            .query_by_label("Exclude object")
             .is_some()
     );
-    assert!(object.query_by_label("Reason").is_none());
+    assert!(object.query_by_label("Reason").is_some());
+    assert!(
+        object
+            .query_by_label_contains("Not present” applies")
+            .is_some()
+    );
+    let visible = object.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place head as visible",
+    );
+    let occluded = object.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place head as occluded",
+    );
+    assert_eq!(
+        visible.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+    assert_eq!(
+        occluded.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False)
+    );
+    assert!(visible.rect().height() >= 44.0);
+    assert!(occluded.rect().height() >= 44.0);
+    click_accesskit_button(&mut object, "Place head as occluded");
+    assert!(object.state().work.migration.next_hidden);
     object.key_press(egui::Key::I);
     object.step();
     assert!(object.state().work.drawer.is_none());
@@ -1171,6 +1251,172 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
             "{label} must remain fully visible at the narrowest wide desktop size: {action:?}"
         );
     }
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn single_optional_migration_separates_not_present_from_object_exclusion() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(
+                InspectorPreset::MigrationSingleOptional,
+                &ctx.egui_ctx,
+            )
+        });
+    harness.step();
+
+    let visible = harness.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place center as visible",
+    );
+    let occluded = harness.get_by_role_and_label(
+        egui::accesskit::Role::Button,
+        "Place center as occluded",
+    );
+    assert_eq!(
+        visible.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+    assert_eq!(
+        occluded.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False)
+    );
+    assert!(visible.rect().height() >= 44.0);
+    assert!(occluded.rect().height() >= 44.0);
+    assert!(
+        harness
+            .query_by_label("Visible: click the exact position.")
+            .is_some()
+    );
+
+    let not_present = harness
+        .query_all_by_label_contains("Mark center as not present")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap();
+    assert!(not_present.accesskit_node().is_disabled());
+    harness
+        .state_mut()
+        .trigger_user_action(labello_domain::UserAction::MarkKeypointAbsent);
+    assert_eq!(harness.state().work.migration.keypoint_index, 0);
+    assert!(
+        harness
+            .query_by_label(
+                "At least one keypoint position is required. If none can be placed, use Exclude object below.",
+            )
+            .is_some()
+    );
+    assert!(
+        harness
+            .get_by_label_contains("Save skeleton & advance")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        harness
+            .query_by_label("Exclude object")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Reason").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("Not present” applies")
+            .is_some()
+    );
+
+    harness.key_press(egui::Key::H);
+    harness.step();
+    assert!(harness.state().work.migration.next_hidden);
+    assert!(
+        harness
+            .query_by_label("Occluded: click the estimated position.")
+            .is_some()
+    );
+    harness.key_press(egui::Key::H);
+    harness.step();
+    assert!(!harness.state().work.migration.next_hidden);
+    click_accesskit_button(&mut harness, "Place center as occluded");
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    click_at(&mut harness, canvas.center());
+    let draft = harness.state().work.migration.draft.as_ref().unwrap();
+    assert_eq!(draft.keypoints[0].state, labello_domain::KeypointState::Hidden);
+    assert!(draft.keypoints[0].point.is_some());
+    assert_eq!(harness.state().work.migration.keypoint_index, 1);
+    assert!(!harness.state().work.migration.next_hidden);
+    assert!(!harness.state().work.migration.busy);
+
+    assert!(
+        harness
+            .query_by_label("Exclude object & advance")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
+fn migration_decision_summary_counts_positioned_and_not_present_keypoints() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|ctx| {
+            inspector_presets::build(InspectorPreset::MigrationObject, &ctx.egui_ctx)
+    });
+    harness.step();
+    let draft = harness
+        .state_mut()
+        .work
+        .migration
+        .draft
+        .as_mut()
+        .unwrap();
+    draft.keypoints[0].point = Some(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
+    draft.keypoints[0].state = labello_domain::KeypointState::Visible;
+    harness.state_mut().work.migration.keypoint_index = 1;
+    harness.state_mut().work.migration.draft_dirty = true;
+    harness.step();
+
+    let first_not_present = harness
+        .query_all_by_label_contains("Mark left_hand as not present")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap();
+    assert!(!first_not_present.accesskit_node().is_disabled());
+
+    for index in 0..4 {
+        harness.key_press(egui::Key::N);
+        harness.step();
+        let draft = harness.state().work.migration.draft.as_ref().unwrap();
+        assert_eq!(harness.state().work.migration.keypoint_index, index + 2);
+        assert_eq!(
+            draft
+                .keypoints
+                .iter()
+                .filter(|keypoint| keypoint.point.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            draft
+                .keypoints
+                .iter()
+                .take(harness.state().work.migration.keypoint_index)
+                .filter(|keypoint| {
+                    keypoint.state == labello_domain::KeypointState::Absent
+                        && keypoint.point.is_none()
+                })
+                .count(),
+            index + 1
+        );
+    }
+    harness.step();
+    assert!(
+        !harness
+            .get_by_label_contains("Save skeleton & advance")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 
 #[cfg(feature = "inspector-presets")]

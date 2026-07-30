@@ -1726,6 +1726,31 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
     .await;
     assert_eq!(stale.0, StatusCode::CONFLICT);
 
+    let zero_position = migration_request(
+        &fixture,
+        "annotator",
+        "skeleton",
+        Some("zero-position-skeleton"),
+        &labello_client::SaveMigrationSkeletonRequest {
+            assignment_id: assignment.assignment_id.clone(),
+            pass_id: None,
+            target: first.clone(),
+            skeleton: migration_skeleton_without_position(),
+        },
+    )
+    .await;
+    assert_eq!(zero_position.0, StatusCode::BAD_REQUEST);
+    let safe_error = zero_position.1.to_string();
+    assert!(
+        safe_error.contains(
+            "manual migration skeleton requires at least one positioned keypoint"
+        ),
+        "{safe_error}"
+    );
+    for leaked in ["keypoints", "\"x\"", "\"y\"", "img_migration", "images/"] {
+        assert!(!safe_error.contains(leaked), "{safe_error}");
+    }
+
     let save = labello_client::SaveMigrationSkeletonRequest {
         assignment_id: assignment.assignment_id.clone(),
         pass_id: None,
@@ -2040,6 +2065,27 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
         task_id: fixture.task_id.clone(),
         skeleton: migration_skeleton(0.8),
     };
+    let zero_position_missing = migration_request(
+        &fixture,
+        "annotator",
+        "skeletons",
+        Some("zero-position-missing"),
+        &labello_client::AddMigrationSkeletonRequest {
+            skeleton: migration_skeleton_without_position(),
+            ..add_missing.clone()
+        },
+    )
+    .await;
+    assert_eq!(zero_position_missing.0, StatusCode::BAD_REQUEST);
+    let safe_error = zero_position_missing.1.to_string();
+    assert!(
+        safe_error.contains(
+            "manual migration skeleton requires at least one positioned keypoint"
+        ),
+        "{safe_error}"
+    );
+    assert!(!safe_error.contains("keypoints"), "{safe_error}");
+
     let discovered = successful_migration(
         migration_request(
             &fixture,

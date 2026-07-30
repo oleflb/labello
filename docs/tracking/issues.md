@@ -38,7 +38,10 @@ Only after that continue with the next issue.
 - [x] Review does not have a queue.
   - Completed on 2026-07-30 with cached review and migration queue promotion,
     image-scoped assignment revalidation, and stale-lease race protection.
-- [ ] Improve Place keypoint as hidden UX.
+- [x] Improve Place keypoint as hidden UX.
+  - Completed on 2026-07-30 by separating visible and occluded placement,
+    optional not-present keypoints, and clearly labeled object exclusion, with
+    a one-position minimum for new migration skeletons.
 - [ ] Always be in pan mode when in review
 - [ ] Submit and switch does not work
 - [ ] Review does not have a refocus button.

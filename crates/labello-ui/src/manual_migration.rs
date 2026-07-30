@@ -10,7 +10,7 @@ use eframe::egui::{self, RichText};
 use crate::{
     app::{AppView, LabelloApp, MigrationAction, UiCommand},
     canvas::{CanvasAction, CanvasAnnotationStyle, CanvasInteraction, show_canvas_colored},
-    panels::shortcut_button_label,
+    panels::{keypoint_placement_mode, shortcut_button_label},
     theme,
 };
 
@@ -579,34 +579,22 @@ impl LabelloApp {
             self.work.migration.keypoint_index = 0;
             self.work.migration.draft_dirty = true;
         }
-        let (placed, total, next_name) = self
-            .work
-            .migration
-            .draft
-            .as_ref()
-            .map(|draft| {
-                (
-                    draft
-                        .keypoints
-                        .iter()
-                        .filter(|keypoint| keypoint.point.is_some())
-                        .count(),
-                    draft.keypoints.len(),
-                    draft
-                        .keypoints
-                        .get(self.work.migration.keypoint_index)
-                        .map(|keypoint| keypoint.name.clone()),
-                )
-            })
-            .unwrap_or_default();
+        let (_, _, _, _, next_name) = self.migration_draft_decisions();
+        let decision_summary = self.migration_decision_summary();
+        let legacy_without_positions = self.migration_existing_object_has_no_positions(&group_id);
+        if legacy_without_positions {
+            theme::inline_message(
+                ui,
+                theme::Intent::Warning,
+                "This legacy skeleton has no positioned keypoints. Redraw it or exclude the object before saving a new skeleton version.",
+            );
+        }
         if let Some(name) = next_name.as_ref() {
             ui.label(RichText::new(format!("Place {name}")).strong());
-            ui.small(format!(
-                "{placed} of {total} placed · click its position inside the box"
-            ));
+            ui.small(decision_summary);
         } else {
             ui.label(RichText::new("Skeleton ready").strong());
-            ui.small(format!("{placed} of {total} keypoints placed"));
+            ui.small(decision_summary);
         }
         if self.work.migration.keypoint_index > 0
             && ui
@@ -635,50 +623,49 @@ impl LabelloApp {
                     )
                 })
                 .unwrap_or_default();
-            ui.horizontal_wrapped(|ui| {
-                if allow_hidden {
-                    ui.checkbox(
-                        &mut self.work.migration.next_hidden,
-                        format!("Place {name} as hidden"),
-                    );
-                }
-                if can_absent
-                    && ui
-                        .add(
-                            egui::Button::new(format!("Mark {name} absent")).shortcut_text(
-                                self.shortcut_text(
-                                    ui.ctx(),
-                                    labello_domain::UserAction::MarkKeypointAbsent,
-                                ),
+            if allow_hidden {
+                let hidden_shortcut =
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::ToggleKeypointHidden);
+                keypoint_placement_mode(
+                    ui,
+                    &name,
+                    &mut self.work.migration.next_hidden,
+                    &hidden_shortcut,
+                );
+            }
+            if can_absent {
+                let disabled = self.migration_not_present_would_leave_unpositioned();
+                if ui
+                    .add_enabled(
+                        !disabled,
+                        egui::Button::new(format!("Mark {name} as not present")).shortcut_text(
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::MarkKeypointAbsent,
                             ),
-                        )
-                        .clicked()
+                        ),
+                    )
+                    .on_hover_text("Record this optional keypoint without a position.")
+                    .clicked()
                 {
                     self.skip_migration_keypoint();
                 }
-            });
+                if disabled {
+                    ui.small(
+                        "At least one keypoint position is required. If none can be placed, use Exclude object below.",
+                    );
+                }
+            }
         }
         if show_primary_action {
             self.migration_primary_button(ui, false);
             self.migration_object_navigation_button(ui);
             self.migration_assignment_section(ui);
         }
+        ui.add_space(8.0);
         ui.separator();
-        let exclusion = ui
-            .scope(|ui| {
-                ui.style_mut().animation_time = 0.0;
-                egui::CollapsingHeader::new("Can't annotate this object")
-                    .id_salt(("migration-exclusion", group_id.as_str()))
-                    .show(ui, |ui| {
-                        self.migration_exclusion_actions(ui, &group_id, target_available);
-                    })
-            })
-            .inner;
-        if exclusion.header_response.clicked()
-            && let Some(body) = exclusion.body_response
-        {
-            body.scroll_to_me(Some(egui::Align::Center));
-        }
+        ui.label(RichText::new("Exclude object").strong());
+        self.migration_exclusion_actions(ui, &group_id, target_available);
     }
 
     fn migration_inspection_actions(
@@ -771,15 +758,23 @@ impl LabelloApp {
         group_id: &ObjectGroupId,
         target_available: bool,
     ) {
-        ui.label(
-            RichText::new("Use only when a valid skeleton cannot be placed.")
+        ui.set_width(ui.available_width().min(240.0));
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Use this when no valid skeleton can be created for the entire imported object. “Not present” applies to one optional keypoint instead.",
+                )
                 .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
         );
         let reason_label = ui.label("Reason");
         let previous_reason = self.work.migration.exclusion_reason;
         egui::ComboBox::from_id_salt("migration-exclusion-reason")
-            .width(ui.available_width())
-            .selected_text(exclusion_label(self.work.migration.exclusion_reason))
+            .width(ui.available_width().min(220.0))
+            .selected_text(
+                RichText::new(exclusion_label(self.work.migration.exclusion_reason)).small(),
+            )
             .show_ui(ui, |ui| {
                 for reason in [
                     MigrationExclusionReason::NoValidSkeleton,
@@ -808,15 +803,18 @@ impl LabelloApp {
                 "Note (optional)"
             },
         );
-        if theme::resizable_multiline_text_edit(
-            ui,
-            ui.make_persistent_id("migration-exclusion-note"),
-            &mut self.work.migration.exclusion_note,
-            2,
-            Some("Context for reviewers"),
-        )
-        .labelled_by(note_label.id)
-        .changed()
+        let note_width = ui.available_width().min(240.0);
+        if ui
+            .add_sized(
+                [note_width, 58.0],
+                egui::TextEdit::multiline(&mut self.work.migration.exclusion_note)
+                    .id(ui.make_persistent_id("migration-exclusion-note"))
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(2)
+                    .hint_text("Context for reviewers"),
+            )
+            .labelled_by(note_label.id)
+            .changed()
         {
             self.work.migration.exclusion_dirty = true;
         }
@@ -837,7 +835,7 @@ impl LabelloApp {
         if theme::danger_button(
             ui,
             !self.work.migration.busy && note_valid && target_available,
-            egui::Button::new("Exclude & advance"),
+            egui::Button::new("Exclude object & advance"),
         )
         .clicked()
         {
@@ -934,34 +932,21 @@ impl LabelloApp {
             self.work.migration.keypoint_index = 0;
             self.work.migration.draft_dirty = true;
         }
-        let (placed, total, next_name) = self
-            .work
-            .migration
-            .draft
-            .as_ref()
-            .map(|draft| {
-                (
-                    draft
-                        .keypoints
-                        .iter()
-                        .filter(|keypoint| keypoint.point.is_some())
-                        .count(),
-                    draft.keypoints.len(),
-                    draft
-                        .keypoints
-                        .get(self.work.migration.keypoint_index)
-                        .map(|keypoint| keypoint.name.clone()),
-                )
-            })
-            .unwrap_or_default();
+        let (_, _, _, _, next_name) = self.migration_draft_decisions();
+        let decision_summary = self.migration_decision_summary();
+        if editing && self.migration_existing_missing_object_has_no_positions() {
+            theme::inline_message(
+                ui,
+                theme::Intent::Warning,
+                "This legacy skeleton has no positioned keypoints. Redraw it before saving a new skeleton version.",
+            );
+        }
         if let Some(name) = next_name.as_ref() {
             ui.label(RichText::new(format!("Place {name}")).strong());
-            ui.small(format!(
-                "{placed} of {total} placed · click its position on the image"
-            ));
+            ui.small(decision_summary);
         } else {
             ui.label(RichText::new("Skeleton ready").strong());
-            ui.small(format!("{placed} of {total} keypoints placed"));
+            ui.small(decision_summary);
         }
         if self.work.migration.keypoint_index > 0
             && ui
@@ -990,17 +975,37 @@ impl LabelloApp {
                     )
                 })
                 .unwrap_or_default();
-            ui.horizontal_wrapped(|ui| {
-                if allow_hidden {
-                    ui.checkbox(
-                        &mut self.work.migration.next_hidden,
-                        format!("Place {name} as hidden"),
-                    );
-                }
-                if can_absent && ui.button(format!("Mark {name} absent")).clicked() {
+            if allow_hidden {
+                let hidden_shortcut =
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::ToggleKeypointHidden);
+                keypoint_placement_mode(
+                    ui,
+                    &name,
+                    &mut self.work.migration.next_hidden,
+                    &hidden_shortcut,
+                );
+            }
+            if can_absent {
+                let disabled = self.migration_not_present_would_leave_unpositioned();
+                if ui
+                    .add_enabled(
+                        !disabled,
+                        egui::Button::new(format!("Mark {name} as not present")).shortcut_text(
+                            self.shortcut_text(
+                                ui.ctx(),
+                                labello_domain::UserAction::MarkKeypointAbsent,
+                            ),
+                        ),
+                    )
+                    .on_hover_text("Record this optional keypoint without a position.")
+                    .clicked()
+                {
                     self.skip_migration_keypoint();
                 }
-            });
+                if disabled {
+                    ui.small("At least one keypoint position is required to add an object.");
+                }
+            }
         }
         if show_primary_action {
             self.migration_primary_button(ui, false);
@@ -2241,6 +2246,7 @@ impl LabelloApp {
 
     pub(crate) fn skip_migration_keypoint(&mut self) {
         let index = self.work.migration.keypoint_index;
+        let would_leave_unpositioned = self.migration_not_present_would_leave_unpositioned();
         let allowed = self
             .selected_task()
             .and_then(|task| task.skeleton.as_ref())
@@ -2251,7 +2257,7 @@ impl LabelloApp {
                         .get(index)
                         .is_some_and(|keypoint| !keypoint.required)
             });
-        if allowed {
+        if allowed && !would_leave_unpositioned {
             self.work.migration.keypoint_index += 1;
             self.work.migration.draft_dirty = true;
             self.work.migration.next_hidden = false;
@@ -2310,6 +2316,10 @@ impl LabelloApp {
             return false;
         };
         self.work.migration.keypoint_index >= draft.keypoints.len()
+            && draft
+                .keypoints
+                .iter()
+                .any(|keypoint| keypoint.point.is_some())
             && spec.keypoints.iter().all(|required| {
                 !required.required
                     || draft
@@ -2317,6 +2327,119 @@ impl LabelloApp {
                         .iter()
                         .any(|point| point.name == required.name && point.point.is_some())
             })
+    }
+
+    fn migration_draft_has_no_positions(&self) -> bool {
+        self.work.migration.draft.as_ref().is_none_or(|draft| {
+            draft
+                .keypoints
+                .iter()
+                .all(|keypoint| keypoint.point.is_none())
+        })
+    }
+
+    fn migration_existing_object_has_no_positions(&self, group_id: &ObjectGroupId) -> bool {
+        let Some((state, task_id)) = self
+            .work
+            .current_state
+            .as_ref()
+            .zip(self.work.selected_task_id.as_ref())
+        else {
+            return false;
+        };
+        let Some(MigrationDispositionStatus::Annotated {
+            skeleton_annotation_id,
+            ..
+        }) = state
+            .migration_dispositions
+            .get(task_id)
+            .and_then(|dispositions| dispositions.get(group_id))
+            .map(|disposition| &disposition.status)
+        else {
+            return false;
+        };
+        state
+            .current_annotation(skeleton_annotation_id)
+            .and_then(|annotation| match &annotation.geometry {
+                AnnotationGeometry::Skeleton(skeleton) if !annotation.deleted => Some(skeleton),
+                _ => None,
+            })
+            .is_some_and(|skeleton| {
+                skeleton
+                    .keypoints
+                    .iter()
+                    .all(|keypoint| keypoint.point.is_none())
+            })
+    }
+
+    fn migration_existing_missing_object_has_no_positions(&self) -> bool {
+        let Some((state, annotation_id)) = self
+            .work
+            .current_state
+            .as_ref()
+            .zip(self.work.migration.editing_missing_annotation_id.as_ref())
+        else {
+            return false;
+        };
+        state
+            .current_annotation(annotation_id)
+            .and_then(|annotation| match &annotation.geometry {
+                AnnotationGeometry::Skeleton(skeleton) if !annotation.deleted => Some(skeleton),
+                _ => None,
+            })
+            .is_some_and(|skeleton| {
+                skeleton
+                    .keypoints
+                    .iter()
+                    .all(|keypoint| keypoint.point.is_none())
+            })
+    }
+
+    fn migration_not_present_would_leave_unpositioned(&self) -> bool {
+        let Some(draft) = self.work.migration.draft.as_ref() else {
+            return false;
+        };
+        self.work.migration.keypoint_index + 1 >= draft.keypoints.len()
+            && self.migration_draft_has_no_positions()
+    }
+
+    fn migration_draft_decisions(&self) -> (usize, usize, usize, usize, Option<String>) {
+        let Some(draft) = self.work.migration.draft.as_ref() else {
+            return (0, 0, 0, 0, None);
+        };
+        let decided = self
+            .work
+            .migration
+            .keypoint_index
+            .min(draft.keypoints.len());
+        let positioned = draft
+            .keypoints
+            .iter()
+            .take(decided)
+            .filter(|keypoint| keypoint.point.is_some())
+            .count();
+        let not_present = draft
+            .keypoints
+            .iter()
+            .take(decided)
+            .filter(|keypoint| keypoint.state == KeypointState::Absent && keypoint.point.is_none())
+            .count();
+        let next_name = draft
+            .keypoints
+            .get(self.work.migration.keypoint_index)
+            .map(|keypoint| keypoint.name.clone());
+        (
+            decided,
+            draft.keypoints.len(),
+            positioned,
+            not_present,
+            next_name,
+        )
+    }
+
+    fn migration_decision_summary(&self) -> String {
+        let (decided, total, positioned, not_present, _) = self.migration_draft_decisions();
+        format_migration_decision_summary(decided, total, positioned, not_present)
     }
 
     fn migration_draft_has_no_keypoint_input(&self) -> bool {
@@ -2709,13 +2832,26 @@ fn disposition_intent(status: Option<&MigrationDispositionStatus>) -> theme::Int
 
 fn exclusion_label(reason: MigrationExclusionReason) -> &'static str {
     match reason {
-        MigrationExclusionReason::NoValidSkeleton => "No valid skeleton",
-        MigrationExclusionReason::InsufficientVisibleFeatures => "Insufficient visible features",
-        MigrationExclusionReason::InvalidSourceBox => "Invalid source box",
-        MigrationExclusionReason::DuplicateSourceObject => "Duplicate source object",
-        MigrationExclusionReason::ObjectNotPresent => "Object not present",
+        MigrationExclusionReason::NoValidSkeleton => "No valid skeleton can be created",
+        MigrationExclusionReason::InsufficientVisibleFeatures => "Too little visible information",
+        MigrationExclusionReason::InvalidSourceBox => "Imported box is invalid",
+        MigrationExclusionReason::DuplicateSourceObject => "Duplicate imported object",
+        MigrationExclusionReason::ObjectNotPresent => "Object is not present",
         MigrationExclusionReason::Other => "Other",
     }
+}
+
+fn format_migration_decision_summary(
+    decided: usize,
+    total: usize,
+    positioned: usize,
+    not_present: usize,
+) -> String {
+    let mut summary = format!("{decided} of {total} decided · {positioned} positioned");
+    if not_present > 0 {
+        summary.push_str(&format!(" · {not_present} not present"));
+    }
+    summary
 }
 
 #[cfg(test)]
@@ -2734,6 +2870,18 @@ mod tests {
             assert!(!key.is_empty() && key.len() <= 200);
             assert!(key.bytes().all(|byte| byte.is_ascii_graphic()));
         }
+    }
+
+    #[test]
+    fn migration_decision_summary_reports_positioned_and_not_present_counts() {
+        assert_eq!(
+            format_migration_decision_summary(1, 5, 1, 0),
+            "1 of 5 decided · 1 positioned"
+        );
+        assert_eq!(
+            format_migration_decision_summary(4, 5, 1, 3),
+            "4 of 5 decided · 1 positioned · 3 not present"
+        );
     }
 
     #[test]

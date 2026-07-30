@@ -292,6 +292,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generic_validation_keeps_historical_all_absent_skeletons_replayable() {
+        let mut task = skeleton_task();
+        let spec = task.skeleton.as_mut().unwrap();
+        spec.keypoints[0].required = false;
+        let annotation = skeleton_annotation(vec![
+            keypoint("nose", KeypointState::Absent),
+            keypoint("tail", KeypointState::Absent),
+        ]);
+
+        annotation
+            .validate_for_task(
+                &task,
+                ImageDimensions {
+                    width: 10,
+                    height: 10,
+                },
+            )
+            .unwrap();
+    }
+
     fn skeleton_task() -> TaskDefinition {
         TaskDefinition {
             task_id: TaskId::from("skeleton:person"),

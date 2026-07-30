@@ -645,11 +645,11 @@ async fn api_migration_fixture() -> ApiMigrationFixture {
         skeleton: Some(SkeletonSpec {
             keypoints: vec![KeypointSpec {
                 name: "nose".to_string(),
-                required: true,
+                required: false,
             }],
             edges: Vec::new(),
             allow_hidden: true,
-            allow_absent: false,
+            allow_absent: true,
         }),
         review: ReviewConfig {
             required_reviews: 1,
@@ -901,6 +901,16 @@ fn migration_skeleton(x: f32) -> SkeletonGeometry {
             name: "nose".to_string(),
             state: KeypointState::Visible,
             point: Some(NormalizedPoint { x, y: 0.5 }),
+        }],
+    }
+}
+
+fn migration_skeleton_without_position() -> SkeletonGeometry {
+    SkeletonGeometry {
+        keypoints: vec![KeypointAnnotation {
+            name: "nose".to_string(),
+            state: KeypointState::Absent,
+            point: None,
         }],
     }
 }

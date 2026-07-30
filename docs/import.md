@@ -158,8 +158,16 @@ behavior is the default.
 Box-to-skeleton conversion can use imported boxes as read-only guides for a
 manual migration workflow. Every expected guide must resolve to exactly one
 human-authored skeleton or an audited exclusion, followed by a full-image
-confirmation. A template policy creates derived pending seeds, not
-authoritative skeleton labels.
+confirmation. Within a skeleton, `visible` records an exact positioned
+keypoint, `hidden` records an estimated position for an occluded keypoint, and
+`absent` records one optional keypoint without coordinates. The UI presents
+these outcomes as **Visible**, **Occluded**, and **Not present**. Exclusion is
+object-level: it records that no valid skeleton can be created for the entire
+imported object. Every newly saved, added, or edited manual-migration skeleton
+must contain at least one positioned visible or occluded keypoint. Historical
+all-absent skeleton versions remain replayable, but must be redrawn or the
+object excluded before another skeleton version can be saved. A template
+policy creates derived pending seeds, not authoritative skeleton labels.
 
 ## Persistence And Recovery
 

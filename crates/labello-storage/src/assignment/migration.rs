@@ -8,6 +8,7 @@ use labello_domain::{
     ObjectGroupId, ReviewDecision, ReviewId, ReviewRecord, ReviewTarget, ReviewWorkflow,
     RevisionSource, SkeletonGeometry, TaskDefinition, TaskId, TaskOutcome, TaskState, TaskStatus,
     Timestamp, UserId, migration_confirmation_hash, require_role,
+    validate_manual_migration_skeleton,
 };
 
 use super::{
@@ -222,6 +223,11 @@ impl DatasetRepository {
         annotation
             .validate_for_task(task, image_dimensions)
             .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
+        let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
+            unreachable!("migration annotation geometry is a skeleton");
+        };
+        validate_manual_migration_skeleton(skeleton)
+            .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
         push_simulated(
             &mut state,
             &mut payloads,
@@ -420,6 +426,11 @@ impl DatasetRepository {
         annotation
             .validate_for_task(task, image_dimensions)
             .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
+        let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
+            unreachable!("migration annotation geometry is a skeleton");
+        };
+        validate_manual_migration_skeleton(skeleton)
+            .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
         let mut payloads = Vec::new();
         push_simulated(
             &mut state,
@@ -577,6 +588,11 @@ impl DatasetRepository {
         };
         annotation
             .validate_for_task(task, image_dimensions)
+            .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
+        let AnnotationGeometry::Skeleton(skeleton) = &annotation.geometry else {
+            unreachable!("migration annotation geometry is a skeleton");
+        };
+        validate_manual_migration_skeleton(skeleton)
             .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
         let mut payloads = Vec::new();
         push_simulated(
