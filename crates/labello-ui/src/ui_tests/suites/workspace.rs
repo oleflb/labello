@@ -254,6 +254,11 @@ fn wide_workflow_panel_keeps_its_toggle_beside_fit() {
             .query_by_role_and_label(egui::accesskit::Role::Button, "Person boxes")
             .is_some()
     );
+    let expanded_inspector_id = harness
+        .get_by_label("Inspector")
+        .accesskit_node()
+        .locate()
+        .0;
 
     click_accesskit_button(&mut harness, "Collapse workflow panel");
     assert!(
@@ -267,6 +272,15 @@ fn wide_workflow_panel_keeps_its_toggle_beside_fit() {
     assert!(
         harness.query_by_label("Inspector").is_some(),
         "collapsing the workflow panel should keep the inspector visible"
+    );
+    assert_eq!(
+        harness
+            .get_by_label("Inspector")
+            .accesskit_node()
+            .locate()
+            .0,
+        expanded_inspector_id,
+        "collapsing the workflow panel must not replace the inspector"
     );
     assert!(
         harness

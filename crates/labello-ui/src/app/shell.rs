@@ -45,17 +45,25 @@ impl eframe::App for LabelloApp {
                 )
                 .show(ui, |ui| self.workspace_context_bar(ui, layout));
         }
-        if let Some(action_height) = compact_action_height {
-            egui::Panel::bottom("compact_primary_actions")
-                .min_size(action_height)
-                .frame(theme::top_bar_frame())
-                .show(ui, |ui| {
-                    if layout == LayoutMode::Compact {
-                        self.compact_workspace_actions(ui);
-                    } else {
-                        ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
-                    }
-                });
+        if self.work_view() {
+            if let Some(action_height) = compact_action_height {
+                egui::Panel::bottom("compact_primary_actions")
+                    .min_size(action_height)
+                    .frame(theme::top_bar_frame())
+                    .show(ui, |ui| {
+                        if layout == LayoutMode::Compact {
+                            self.compact_workspace_actions(ui);
+                        } else {
+                            ui.horizontal_wrapped(|ui| self.workspace_actions(ui, layout));
+                        }
+                    });
+            } else {
+                // Preserve the parent UI's child sequence so later panel widget IDs remain stable.
+                egui::Panel::bottom("compact_primary_actions_placeholder")
+                    .exact_size(0.0)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |_| {});
+            }
         }
         let show_wide_inspector = self.work_view()
             && layout == LayoutMode::Wide
@@ -72,6 +80,9 @@ impl eframe::App for LabelloApp {
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| self.task_panel(ui));
                     });
+            } else {
+                // Panel::show consumes one parent auto-ID; keep the Inspector stable.
+                ui.skip_ahead_auto_ids(1);
             }
             if show_wide_inspector {
                 egui::Panel::right("review_panel")
@@ -97,6 +108,9 @@ impl eframe::App for LabelloApp {
                                     .show(ui, |ui| self.right_panel(ui, true));
                             });
                     });
+            } else {
+                // Keep the CentralPanel stable when the optional Inspector is hidden.
+                ui.skip_ahead_auto_ids(1);
             }
         }
         let central_frame = if self.work_view() {

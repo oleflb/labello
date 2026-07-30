@@ -47,8 +47,10 @@ Only after that continue with the next issue.
 - [x] Submit and switch does not work
 - [x] Review does not have a refocus button.
   - Completed on 2026-07-30.
-- [ ] After loading an image or completing an availability check, the workflow
+- [x] After loading an image or completing an availability check, the workflow
   panel UI element borders shortly flash red.
+  - Completed on 2026-07-30 by preserving parent widget-ID sequences while
+    optional workspace action and side panels are hidden.
 - [ ] Center-align the workflow inspector mobile overlay horizontally
 - [ ] Refocus buttons should have a shortcut and look better.
 - [ ] Mobile nav menu left drawer instead of burger menu

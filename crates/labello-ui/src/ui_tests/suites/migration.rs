@@ -86,6 +86,42 @@ fn active_migration_discards_stale_availability_without_rechecking() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn workflow_controls_keep_their_identity_when_a_loaded_image_enables_migration_actions() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    let loaded_state = app.work.current_state.take().unwrap();
+    assert!(!app.manual_migration_active());
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+    let label = harness.state().selected_workflow().unwrap().label();
+    let loading_id = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &label)
+        .accesskit_node()
+        .locate()
+        .0;
+
+    harness.state_mut().work.current_state = Some(loaded_state);
+    harness.step();
+    assert!(harness.state().manual_migration_active());
+    let loaded_id = harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &label)
+        .accesskit_node()
+        .locate()
+        .0;
+
+    assert_eq!(
+        loaded_id, loading_id,
+        "loading a migration image must not replace the workflow controls"
+    );
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn mutable_migration_spy_preserves_failure_and_durable_reload_progression() {
     use crate::inspector_presets::{self, InspectorPreset};
 

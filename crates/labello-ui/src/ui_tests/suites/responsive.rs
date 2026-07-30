@@ -1200,7 +1200,9 @@ fn wide_inspector_uses_the_toolbar_toggle_and_returns_its_width_to_the_canvas() 
     harness.set_size(egui::vec2(1288.0, 900.0));
     harness.step();
 
-    let expanded_canvas_right = harness.get_by_label("Annotation canvas").rect().right();
+    let expanded_canvas = harness.get_by_label("Annotation canvas");
+    let expanded_canvas_right = expanded_canvas.rect().right();
+    let expanded_canvas_id = expanded_canvas.accesskit_node().locate().0;
     let workflow_toggle = harness
         .get_by_role_and_label(
             egui::accesskit::Role::Button,
@@ -1250,6 +1252,15 @@ fn wide_inspector_uses_the_toolbar_toggle_and_returns_its_width_to_the_canvas() 
             <= 1288.0
     );
     let collapsed_canvas_right = harness.get_by_label("Annotation canvas").rect().right();
+    assert_eq!(
+        harness
+            .get_by_label("Annotation canvas")
+            .accesskit_node()
+            .locate()
+            .0,
+        expanded_canvas_id,
+        "collapsing the inspector must not replace the annotation canvas"
+    );
     assert!(
         collapsed_canvas_right - expanded_canvas_right
             >= LayoutMode::INSPECTOR_PANEL_WIDTH - theme::SPACE_4,
