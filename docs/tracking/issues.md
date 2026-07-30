@@ -33,7 +33,8 @@ Only after that continue with the next issue.
 
 ## Current Issues
 
-- [ ] Be able to edit added missing objects after creating them
+- [x] Be able to edit added missing objects after creating them
+  - Completed on 2026-07-30 in `da6ba30`.
 - [ ] Review does not have a queue.
 - [ ] Improve Place keypoint as hidden UX.
 - [ ] Always be in pan mode when in review
