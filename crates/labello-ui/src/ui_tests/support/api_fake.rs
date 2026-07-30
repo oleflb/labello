@@ -668,6 +668,79 @@ impl ImportApi for SpyApi {
         }))
     }
 
+    fn edit_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: labello_client::EditMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        let image_state = state.states.get_mut(image_id).unwrap();
+        let current = image_state
+            .current_annotation(&request.annotation_id)
+            .unwrap()
+            .clone();
+        assert_eq!(current.version, request.expected_version);
+        let mut annotation = current;
+        annotation.version += 1;
+        annotation.geometry =
+            labello_domain::AnnotationGeometry::Skeleton(request.skeleton);
+        annotation.revision_source = labello_domain::RevisionSource::Human {
+            action: labello_domain::HumanRevisionKind::Edited,
+        };
+        annotation.updated_at = labello_domain::now();
+        image_state
+            .annotations
+            .get_mut(&request.annotation_id)
+            .unwrap()
+            .push(annotation);
+        let image_state = image_state.clone();
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            progress: migration_progress(&image_state, &request.task_id),
+            image_state,
+            cursor: Some(labello_domain::MigrationCursor::FullImage),
+            active_pass: request
+                .pass_id
+                .and_then(|pass_id| state.states[image_id].migration_passes.get(&pass_id).cloned()),
+            confirmation: None,
+            assignment: None,
+            annotation_id: Some(request.annotation_id),
+        }))
+    }
+
+    fn delete_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: labello_client::DeleteMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> ApiFuture<'a, labello_client::ManualMigrationCommandResult> {
+        let mut state = self.state.borrow_mut();
+        state.counts.migration_commands += 1;
+        let image_state = state.states.get_mut(image_id).unwrap();
+        let annotation = image_state
+            .annotations
+            .get_mut(&request.annotation_id)
+            .and_then(|versions| versions.last_mut())
+            .unwrap();
+        assert_eq!(annotation.version, request.expected_version);
+        annotation.deleted = true;
+        let image_state = image_state.clone();
+        ready(Ok(labello_client::ManualMigrationCommandResult {
+            progress: migration_progress(&image_state, &request.task_id),
+            image_state,
+            cursor: Some(labello_domain::MigrationCursor::FullImage),
+            active_pass: request
+                .pass_id
+                .and_then(|pass_id| state.states[image_id].migration_passes.get(&pass_id).cloned()),
+            confirmation: None,
+            assignment: None,
+            annotation_id: Some(request.annotation_id),
+        }))
+    }
+
     fn exclude_migration_target<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

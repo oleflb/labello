@@ -142,6 +142,26 @@ impl ImportApi for DemoLabelloApi {
         import_unavailable()
     }
 
+    fn edit_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::EditMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
+    fn delete_migration_skeleton<'a>(
+        &'a self,
+        _dataset_id: &'a DatasetId,
+        _image_id: &'a ImageId,
+        _request: crate::DeleteMigrationSkeletonRequest,
+        _idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        import_unavailable()
+    }
+
     fn exclude_migration_target<'a>(
         &'a self,
         _dataset_id: &'a DatasetId,

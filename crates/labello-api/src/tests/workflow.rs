@@ -1978,10 +1978,87 @@ async fn assembled_manual_migration_routes_enforce_contract_and_replay_end_to_en
     );
     assert_eq!(retry.image_state.current_sequence, sequence);
 
-    let target_hash = discovered.image_state.migration_target_sets[&fixture.task_id]
+    let edit_missing = labello_client::EditMigrationSkeletonRequest {
+        assignment_id: assignment.assignment_id.clone(),
+        pass_id: add_missing.pass_id.clone(),
+        task_id: fixture.task_id.clone(),
+        annotation_id: discovered_id.clone(),
+        expected_version: 1,
+        skeleton: migration_skeleton(0.85),
+    };
+    let edited = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons/edit",
+            Some("edit-missing"),
+            &edit_missing,
+        )
+        .await,
+    );
+    let edited_annotation = edited
+        .image_state
+        .current_annotation(&discovered_id)
+        .unwrap();
+    assert_eq!(edited_annotation.version, 2);
+    assert_eq!(
+        edited_annotation.geometry,
+        AnnotationGeometry::Skeleton(migration_skeleton(0.85))
+    );
+    let sequence = edited.image_state.current_sequence;
+    let retry = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons/edit",
+            Some("edit-missing"),
+            &edit_missing,
+        )
+        .await,
+    );
+    assert_eq!(retry.image_state.current_sequence, sequence);
+
+    let delete_missing = labello_client::DeleteMigrationSkeletonRequest {
+        assignment_id: assignment.assignment_id.clone(),
+        pass_id: add_missing.pass_id.clone(),
+        task_id: fixture.task_id.clone(),
+        annotation_id: discovered_id.clone(),
+        expected_version: 2,
+    };
+    let deleted = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons/delete",
+            Some("delete-missing"),
+            &delete_missing,
+        )
+        .await,
+    );
+    assert!(
+        deleted
+            .image_state
+            .current_annotation(&discovered_id)
+            .unwrap()
+            .deleted
+    );
+    let sequence = deleted.image_state.current_sequence;
+    let retry = successful_migration(
+        migration_request(
+            &fixture,
+            "annotator",
+            "skeletons/delete",
+            Some("delete-missing"),
+            &delete_missing,
+        )
+        .await,
+    );
+    assert_eq!(retry.image_state.current_sequence, sequence);
+
+    let target_hash = deleted.image_state.migration_target_sets[&fixture.task_id]
         .target_set_hash
         .clone();
-    let state_hash = discovered
+    let state_hash = deleted
         .image_state
         .current_migration_state_hash(&fixture.task_id)
         .unwrap();

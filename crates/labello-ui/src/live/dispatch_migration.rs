@@ -21,6 +21,19 @@ impl LabelloApp {
                         api.add_migration_skeleton(&dataset_id, &image_id, body, &idempotency_key)
                             .await
                     }
+                    crate::app::MigrationAction::EditSkeleton(body) => {
+                        api.edit_migration_skeleton(&dataset_id, &image_id, body, &idempotency_key)
+                            .await
+                    }
+                    crate::app::MigrationAction::DeleteSkeleton(body) => {
+                        api.delete_migration_skeleton(
+                            &dataset_id,
+                            &image_id,
+                            body,
+                            &idempotency_key,
+                        )
+                        .await
+                    }
                     crate::app::MigrationAction::Exclude(body) => {
                         api.exclude_migration_target(&dataset_id, &image_id, body, &idempotency_key)
                             .await

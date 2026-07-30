@@ -201,6 +201,11 @@ zoom keys. Press `P` to toggle Pan mode, then left-drag a zoomed image. Press
 `P` or `Escape` to return to annotation input. Space+left-drag, middle-drag,
 touch gestures, and double-click-to-fit remain available.
 
+While placing or revising a skeleton, drag any already placed keypoint on the
+selected object to correct its position. This works for ordinary annotation,
+guided migration drafts, and reviewer correction; read-only review remains
+non-editable.
+
 ## Datasets
 
 A bootstrap admin creates a dataset in the setup view. A data admin can then:

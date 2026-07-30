@@ -258,6 +258,38 @@ impl ImportApi for HttpLabelloApi {
         )
     }
 
+    fn edit_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::EditMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        self.migration_json(
+            dataset_id,
+            image_id,
+            "skeletons/edit",
+            request,
+            idempotency_key,
+        )
+    }
+
+    fn delete_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::DeleteMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> crate::ApiFuture<'a, crate::ManualMigrationCommandResult> {
+        self.migration_json(
+            dataset_id,
+            image_id,
+            "skeletons/delete",
+            request,
+            idempotency_key,
+        )
+    }
+
     fn exclude_migration_target<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

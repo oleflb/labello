@@ -437,7 +437,9 @@ fn is_discovered_migration_skeleton(annotation: &AnnotationVersion) -> bool {
         && matches!(
             annotation.revision_source,
             RevisionSource::Human {
-                action: HumanRevisionKind::Authored | HumanRevisionKind::Edited
+                action: HumanRevisionKind::Authored
+                    | HumanRevisionKind::Edited
+                    | HumanRevisionKind::AcceptedUnchanged
             }
         )
 }

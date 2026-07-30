@@ -1865,10 +1865,19 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
     let canvas = harness.get_by_label("Annotation canvas");
     let rect = canvas.rect();
     click_at(&mut harness, rect.center());
-    click_at(
-        &mut harness,
-        rect.center() + egui::vec2(rect.width() * 0.15, rect.height() * 0.1),
-    );
+    let moved_head = rect.center() + egui::vec2(40.0, -20.0);
+    drag_at(&mut harness, rect.center(), moved_head);
+    assert!(harness.state().work.active_skeleton.is_some());
+    assert_eq!(harness.state().work.skeleton_keypoint_index, 1);
+    let AnnotationGeometry::Skeleton(in_progress) =
+        &harness.state().work.annotations[0].geometry
+    else {
+        panic!("expected in-progress skeleton annotation");
+    };
+    assert!(in_progress.keypoints[0].point.unwrap().x > 0.5);
+    assert!(in_progress.keypoints[0].point.unwrap().y < 0.5);
+    let tail = rect.center() + egui::vec2(rect.width() * 0.15, rect.height() * 0.1);
+    click_at(&mut harness, tail);
 
     assert_eq!(harness.state().work.annotations.len(), 1);
     let AnnotationGeometry::Skeleton(skeleton) = &harness.state().work.annotations[0].geometry else {
@@ -1882,6 +1891,13 @@ fn skeleton_workflow_places_configured_keypoints_in_order() {
             .all(|keypoint| keypoint.point.is_some())
     );
     assert!(harness.state().work.active_skeleton.is_none());
+    drag_at(&mut harness, tail, tail + egui::vec2(-24.0, 28.0));
+    let AnnotationGeometry::Skeleton(completed) = &harness.state().work.annotations[0].geometry
+    else {
+        panic!("expected completed skeleton annotation");
+    };
+    assert!(completed.keypoints[1].point.unwrap().x < 0.65);
+    assert!(completed.keypoints[1].point.unwrap().y > 0.6);
 }
 
 #[test]

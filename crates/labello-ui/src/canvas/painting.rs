@@ -106,16 +106,18 @@ fn paint_canvas(
             AnnotationGeometry::Skeleton(skeleton) => {
                 let color = style.color;
                 for (from, to) in skeleton_edges {
-                    let from = skeleton
-                        .keypoints
-                        .iter()
-                        .find(|keypoint| &keypoint.name == from)
-                        .and_then(|keypoint| keypoint.point);
-                    let to = skeleton
-                        .keypoints
-                        .iter()
-                        .find(|keypoint| &keypoint.name == to)
-                        .and_then(|keypoint| keypoint.point);
+                    let from = skeleton_keypoint_point(
+                        &annotation.annotation_id,
+                        skeleton,
+                        from,
+                        keypoint_preview,
+                    );
+                    let to = skeleton_keypoint_point(
+                        &annotation.annotation_id,
+                        skeleton,
+                        to,
+                        keypoint_preview,
+                    );
                     if let (Some(from), Some(to)) = (from, to) {
                         painter.line_segment(
                             [
@@ -128,11 +130,12 @@ fn paint_canvas(
                 }
                 for (keypoint_index, keypoint) in skeleton.keypoints.iter().enumerate() {
                     if let Some(point) = keypoint.point {
-                        let point = keypoint_preview
-                            .filter(|(id, index, _)| {
-                                *id == &annotation.annotation_id && *index == keypoint_index
-                            })
-                            .map_or(point, |(_, _, preview)| preview);
+                        let point = previewed_keypoint_point(
+                            &annotation.annotation_id,
+                            keypoint_index,
+                            point,
+                            keypoint_preview,
+                        );
                         let center = normalized_to_screen(image_rect, pos2(point.x, point.y));
                         if selected {
                             painter.circle_stroke(center, 7.0, Stroke::new(2.0, Color32::WHITE));
@@ -161,6 +164,40 @@ fn paint_canvas(
         Stroke::new(1.0, theme::BORDER_STRONG),
         StrokeKind::Inside,
     );
+}
+
+fn skeleton_keypoint_point(
+    annotation_id: &AnnotationId,
+    skeleton: &labello_domain::SkeletonGeometry,
+    keypoint_name: &str,
+    keypoint_preview: Option<(&AnnotationId, usize, NormalizedPoint)>,
+) -> Option<NormalizedPoint> {
+    skeleton
+        .keypoints
+        .iter()
+        .enumerate()
+        .find(|(_, keypoint)| keypoint.name == keypoint_name)
+        .and_then(|(keypoint_index, keypoint)| {
+            keypoint.point.map(|point| {
+                previewed_keypoint_point(
+                    annotation_id,
+                    keypoint_index,
+                    point,
+                    keypoint_preview,
+                )
+            })
+        })
+}
+
+fn previewed_keypoint_point(
+    annotation_id: &AnnotationId,
+    keypoint_index: usize,
+    point: NormalizedPoint,
+    keypoint_preview: Option<(&AnnotationId, usize, NormalizedPoint)>,
+) -> NormalizedPoint {
+    keypoint_preview
+        .filter(|(id, index, _)| *id == annotation_id && *index == keypoint_index)
+        .map_or(point, |(_, _, preview)| preview)
 }
 
 fn rounded_corner_mask(viewport: Rect, color: Color32) -> Mesh {

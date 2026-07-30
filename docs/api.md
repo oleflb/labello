@@ -159,6 +159,8 @@ other than comma or semicolon. Responses are
 | --- | --- | --- |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/skeleton` | Annotator | `SaveMigrationSkeletonRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/skeletons` | Annotator | `AddMigrationSkeletonRequest` |
+| `POST /datasets/{dataset_id}/images/{image_id}/migration/skeletons/edit` | Annotator | `EditMigrationSkeletonRequest` |
+| `POST /datasets/{dataset_id}/images/{image_id}/migration/skeletons/delete` | Annotator | `DeleteMigrationSkeletonRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/exclude` | Annotator | `ExcludeMigrationTargetRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/reopen` | Annotator | `ReopenMigrationTargetRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/revisit` | Annotator | `RevisitMigrationTargetRequest` |
@@ -166,6 +168,11 @@ other than comma or semicolon. Responses are
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/keep` | Annotator | `KeepMigrationTargetRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/confirm` | Annotator | `ConfirmMigrationRequest` |
 | `POST /datasets/{dataset_id}/images/{image_id}/migration/review` | Reviewer | `ReviewMigrationRequest` |
+
+Adding, editing, or removing a missing-object skeleton is allowed only at the
+full-image cursor. Edit and delete requests identify an active, native,
+group-less skeleton for the selected migration task and supply its exact
+expected version; stale or non-migration annotations are rejected.
 
 ## Dataset Import Routes
 

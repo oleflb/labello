@@ -47,8 +47,14 @@ impl LabelloApp {
                 interaction.editable = !self.loading.saving;
                 interaction
             });
-            let interaction = correction_interaction
+            let mut interaction = correction_interaction
                 .unwrap_or_else(|| CanvasInteraction::annotations(annotator_editable));
+            if correction_interaction.is_none()
+                && annotator_editable
+                && self.work.tool == Tool::Keypoints
+            {
+                interaction.edit_keypoints = true;
+            }
             let bounding_box_tool = self.work.tool == Tool::BoundingBox;
             let selected_annotation = self.work.selected_annotation.clone();
             if self.view == AppView::Review {
@@ -90,8 +96,8 @@ impl LabelloApp {
                     Some(CanvasAction::PlaceKeypoint(point)) => self.place_keypoint(point),
                     Some(CanvasAction::Select(id)) => self.work.selected_annotation = Some(id),
                     Some(CanvasAction::EditBoundingBox(edit)) => self.edit_bbox(edit),
-                    Some(CanvasAction::SelectKeypoint(_)) | Some(CanvasAction::EditKeypoint(_)) => {
-                    }
+                    Some(CanvasAction::EditKeypoint(edit)) => self.edit_keypoint(edit),
+                    Some(CanvasAction::SelectKeypoint(_)) => {}
                     None => {}
                 }
             } else if self.work.correction_draft.is_some() {

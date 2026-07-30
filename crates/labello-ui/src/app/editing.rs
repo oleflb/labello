@@ -84,6 +84,52 @@ impl LabelloApp {
         self.mark_edited();
     }
 
+    pub(crate) fn edit_keypoint(&mut self, edit: crate::canvas::KeypointEdit) {
+        let annotation_id = edit.annotation_id;
+        let persisted = self.work.persisted_annotations.contains(&annotation_id);
+        let persisted_version = self
+            .work
+            .current_state
+            .as_ref()
+            .and_then(|state| state.current_annotation(&annotation_id))
+            .map(|annotation| annotation.version);
+        let Some(index) = self.work.annotations.iter().position(|annotation| {
+            annotation.annotation_id == annotation_id && !annotation.deleted
+        }) else {
+            return;
+        };
+        let AnnotationGeometry::Skeleton(skeleton) = &self.work.annotations[index].geometry else {
+            return;
+        };
+        let Some(keypoint) = skeleton.keypoints.get(edit.keypoint_index) else {
+            return;
+        };
+        if keypoint.point == Some(edit.point) {
+            return;
+        }
+
+        let user_id = self.config.user_id.clone();
+        self.record_edit();
+        let annotation = &mut self.work.annotations[index];
+        let AnnotationGeometry::Skeleton(skeleton) = &mut annotation.geometry else {
+            return;
+        };
+        let Some(keypoint) = skeleton.keypoints.get_mut(edit.keypoint_index) else {
+            return;
+        };
+        keypoint.point = Some(edit.point);
+        annotation.updated_at = labello_domain::now();
+        if persisted {
+            annotation.version = persisted_version.unwrap_or(annotation.version) + 1;
+            annotation.revision_source = RevisionSource::Human {
+                action: HumanRevisionKind::Edited,
+            };
+            annotation.author_user_id = user_id;
+            self.work.modified_annotations.insert(annotation_id);
+        }
+        self.mark_edited();
+    }
+
     pub(crate) fn place_keypoint(&mut self, point: NormalizedPoint) {
         let Some(task) = self.selected_task().cloned() else {
             return;

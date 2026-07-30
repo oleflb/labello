@@ -699,6 +699,40 @@ mod tests {
     }
 
     #[test]
+    fn skeleton_edge_endpoint_uses_active_keypoint_preview() {
+        let annotation_id = AnnotationId::from("annotation-preview");
+        let other_annotation_id = AnnotationId::from("annotation-other");
+        let original = NormalizedPoint { x: 0.2, y: 0.3 };
+        let preview = NormalizedPoint { x: 0.7, y: 0.8 };
+        let skeleton = labello_domain::SkeletonGeometry {
+            keypoints: vec![labello_domain::KeypointAnnotation {
+                name: "nose".to_string(),
+                state: labello_domain::KeypointState::Visible,
+                point: Some(original),
+            }],
+        };
+
+        assert_eq!(
+            skeleton_keypoint_point(
+                &annotation_id,
+                &skeleton,
+                "nose",
+                Some((&annotation_id, 0, preview)),
+            ),
+            Some(preview)
+        );
+        assert_eq!(
+            skeleton_keypoint_point(
+                &annotation_id,
+                &skeleton,
+                "nose",
+                Some((&other_annotation_id, 0, preview)),
+            ),
+            Some(original)
+        );
+    }
+
+    #[test]
     fn degenerate_viewports_and_non_finite_dashes_have_finite_fallbacks() {
         let degenerate = Rect::from_min_size(pos2(10.0, 20.0), Vec2::ZERO);
         let fitted = fitted_image_rect(degenerate, [0, 0]);

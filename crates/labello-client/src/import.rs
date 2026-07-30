@@ -1122,6 +1122,43 @@ impl fmt::Debug for AddMigrationSkeletonRequest {
     }
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditMigrationSkeletonRequest {
+    pub assignment_id: AssignmentId,
+    #[serde(default)]
+    pub pass_id: Option<MigrationPassId>,
+    pub task_id: TaskId,
+    pub annotation_id: AnnotationId,
+    pub expected_version: u32,
+    pub skeleton: SkeletonGeometry,
+}
+
+impl fmt::Debug for EditMigrationSkeletonRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EditMigrationSkeletonRequest")
+            .field("assignment_id", &self.assignment_id)
+            .field("pass_id", &self.pass_id)
+            .field("task_id", &self.task_id)
+            .field("annotation_id", &self.annotation_id)
+            .field("expected_version", &self.expected_version)
+            .field("skeleton", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteMigrationSkeletonRequest {
+    pub assignment_id: AssignmentId,
+    #[serde(default)]
+    pub pass_id: Option<MigrationPassId>,
+    pub task_id: TaskId,
+    pub annotation_id: AnnotationId,
+    pub expected_version: u32,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExcludeMigrationTargetRequest {
@@ -1430,6 +1467,20 @@ mod tests {
             reason: MigrationExclusionReason::Other,
             note: Some("private review note".to_string()),
         };
+        let edit = EditMigrationSkeletonRequest {
+            assignment_id: AssignmentId::from("asg_1"),
+            pass_id: None,
+            task_id: TaskId::from("skeleton:person"),
+            annotation_id: AnnotationId::from("ann_discovered"),
+            expected_version: 1,
+            skeleton: SkeletonGeometry {
+                keypoints: vec![labello_domain::KeypointAnnotation {
+                    name: "private-keypoint".to_string(),
+                    state: KeypointState::Visible,
+                    point: Some(labello_domain::NormalizedPoint { x: 0.25, y: 0.75 }),
+                }],
+            },
+        };
         let inspection = InspectYoloDescriptorRequest {
             descriptor_file_id: "private/dataset.yaml".to_string(),
         };
@@ -1450,7 +1501,7 @@ mod tests {
         };
 
         let output = format!(
-            "{upload:?} {registration:?} {exclusion:?} {inspection:?} {browse:?} {browse_page:?}"
+            "{upload:?} {registration:?} {exclusion:?} {edit:?} {inspection:?} {browse:?} {browse_page:?}"
         );
         for secret in [
             "secret-digest",
@@ -1458,6 +1509,7 @@ mod tests {
             "private/person/image.jpg",
             "secret-file-digest",
             "private review note",
+            "private-keypoint",
             "private/dataset.yaml",
             "private/release",
             "dataset.yaml",

@@ -463,6 +463,292 @@ impl DatasetRepository {
         clippy::too_many_arguments,
         reason = "the migration command boundary keeps actor, assignment, and version inputs explicit"
     )]
+    pub async fn edit_migration_skeleton(
+        &self,
+        user_id: &UserId,
+        context: AssignmentContext<'_>,
+        pass_id: Option<&MigrationPassId>,
+        annotation_id: &AnnotationId,
+        expected_version: u32,
+        skeleton: SkeletonGeometry,
+        idempotency_key: &str,
+    ) -> StorageResult<ManualMigrationCommandResult> {
+        validate_idempotency_key(idempotency_key)?;
+        let (metadata, image) = self.load_migration_inputs(context.image_id).await?;
+        let (task, _, image_dimensions) = migration_metadata(&metadata, &image, context.task_id)?;
+        require_annotation_context(&metadata, user_id, &context)?;
+        let lock = self.image_lock(context.image_id);
+        let _guard = lock.lock().await;
+        let mut state = self.load_image_state(context.image_id).await?;
+        let primary_id = command_event_id(user_id, context.assignment_id, idempotency_key, None);
+        if let Some(command) = find_command(self, context.image_id, &primary_id).await? {
+            let matches =
+                matches!(
+                    &command.primary.payload,
+                    EventPayload::AnnotationVersionCreated {
+                        annotation,
+                        previous_version: Some(previous_version),
+                        ..
+                    } if annotation.annotation_id == *annotation_id
+                        && *previous_version == expected_version
+                        && annotation.task_id == *context.task_id
+                        && annotation.object_group_id.is_none()
+                        && annotation.geometry == AnnotationGeometry::Skeleton(skeleton.clone())
+                ) && assignment_pass(&command.before, context.assignment_id, context.task_id)
+                    == pass_id;
+            return replay_retry(
+                matches,
+                state,
+                context.task_id,
+                pass_id,
+                Some(context.assignment_id),
+                command.primary.payload.task_annotation_id(),
+            );
+        }
+
+        let now = labello_domain::now();
+        let mut assignment = exact_active_assignment(
+            &state.assignments,
+            context.assignment_id,
+            context.image_id,
+            context.task_id,
+            user_id,
+            &AssignmentKind::Annotation,
+            now,
+        )?
+        .clone();
+        ensure_annotation_status(&state, context.task_id)?;
+        if assignment_pass(&state, context.assignment_id, context.task_id) != pass_id {
+            return Err(conflict(
+                "migration discovery pass does not match the assignment's active pass",
+            ));
+        }
+        if let Some(pass_id) = pass_id {
+            let pass = state
+                .migration_passes
+                .get(pass_id)
+                .ok_or_else(|| conflict(format!("migration pass {pass_id} does not exist")))?;
+            if pass.assignment_id != *context.assignment_id
+                || pass.task_id != *context.task_id
+                || pass.actor_user_id != *user_id
+            {
+                return Err(conflict(
+                    "migration pass does not belong to this assignment, task, and user",
+                ));
+            }
+        }
+        if state.migration_cursor(context.task_id, pass_id)? != MigrationCursor::FullImage {
+            return Err(conflict(
+                "missing objects can be edited only during full-image confirmation",
+            ));
+        }
+        validate_exact_one(&state, task)?;
+
+        let current = current_discovered_skeleton(
+            &state,
+            task,
+            context.task_id,
+            annotation_id,
+            expected_version,
+        )?;
+        let annotation = AnnotationVersion {
+            annotation_id: current.annotation_id.clone(),
+            version: current
+                .version
+                .checked_add(1)
+                .ok_or_else(|| conflict("migration skeleton version overflow"))?,
+            object_group_id: None,
+            origin: current.origin,
+            task_id: current.task_id,
+            class_id: current.class_id,
+            annotation_type: AnnotationType::Skeleton,
+            revision_source: RevisionSource::Human {
+                action: if current.geometry == AnnotationGeometry::Skeleton(skeleton.clone()) {
+                    HumanRevisionKind::AcceptedUnchanged
+                } else {
+                    HumanRevisionKind::Edited
+                },
+            },
+            geometry: AnnotationGeometry::Skeleton(skeleton),
+            author_user_id: user_id.clone(),
+            created_at: current.created_at,
+            updated_at: now,
+            deleted: false,
+        };
+        annotation
+            .validate_for_task(task, image_dimensions)
+            .map_err(|error| StorageError::InvalidAssignment(error.to_string()))?;
+        let mut payloads = Vec::new();
+        push_simulated(
+            &mut state,
+            &mut payloads,
+            user_id,
+            DatasetRole::Annotator,
+            now,
+            EventPayload::AnnotationVersionCreated {
+                annotation: annotation.clone(),
+                previous_version: Some(expected_version),
+                reason: Some("edited object discovered during full-image review".to_string()),
+            },
+        )?;
+        reopen_terminal_migration(&mut state, context.task_id, now, &mut payloads, user_id)?;
+        renew(&mut assignment, now);
+        payloads.push(EventPayload::AssignmentUpdated {
+            assignment: assignment.clone(),
+        });
+        let state = self
+            .append_migration_command_unlocked(
+                context.image_id,
+                user_id,
+                DatasetRole::Annotator,
+                idempotency_key,
+                context.assignment_id,
+                payloads,
+                0,
+                now,
+            )
+            .await?;
+        command_result(
+            state,
+            context.task_id,
+            pass_id,
+            Some(assignment),
+            Some(annotation.annotation_id),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the migration command boundary keeps actor, assignment, and version inputs explicit"
+    )]
+    pub async fn delete_migration_skeleton(
+        &self,
+        user_id: &UserId,
+        context: AssignmentContext<'_>,
+        pass_id: Option<&MigrationPassId>,
+        annotation_id: &AnnotationId,
+        expected_version: u32,
+        idempotency_key: &str,
+    ) -> StorageResult<ManualMigrationCommandResult> {
+        validate_idempotency_key(idempotency_key)?;
+        let (metadata, image) = self.load_migration_inputs(context.image_id).await?;
+        let (task, _, _) = migration_metadata(&metadata, &image, context.task_id)?;
+        require_annotation_context(&metadata, user_id, &context)?;
+        let lock = self.image_lock(context.image_id);
+        let _guard = lock.lock().await;
+        let mut state = self.load_image_state(context.image_id).await?;
+        let primary_id = command_event_id(user_id, context.assignment_id, idempotency_key, None);
+        if let Some(command) = find_command(self, context.image_id, &primary_id).await? {
+            let matches =
+                matches!(
+                    &command.primary.payload,
+                    EventPayload::AnnotationDeleted {
+                        annotation_id: deleted_id,
+                        version,
+                        ..
+                    } if deleted_id == annotation_id && *version == expected_version
+                ) && assignment_pass(&command.before, context.assignment_id, context.task_id)
+                    == pass_id;
+            return replay_retry(
+                matches,
+                state,
+                context.task_id,
+                pass_id,
+                Some(context.assignment_id),
+                Some(annotation_id.clone()),
+            );
+        }
+
+        let now = labello_domain::now();
+        let mut assignment = exact_active_assignment(
+            &state.assignments,
+            context.assignment_id,
+            context.image_id,
+            context.task_id,
+            user_id,
+            &AssignmentKind::Annotation,
+            now,
+        )?
+        .clone();
+        ensure_annotation_status(&state, context.task_id)?;
+        if assignment_pass(&state, context.assignment_id, context.task_id) != pass_id {
+            return Err(conflict(
+                "migration discovery pass does not match the assignment's active pass",
+            ));
+        }
+        if let Some(pass_id) = pass_id {
+            let pass = state
+                .migration_passes
+                .get(pass_id)
+                .ok_or_else(|| conflict(format!("migration pass {pass_id} does not exist")))?;
+            if pass.assignment_id != *context.assignment_id
+                || pass.task_id != *context.task_id
+                || pass.actor_user_id != *user_id
+            {
+                return Err(conflict(
+                    "migration pass does not belong to this assignment, task, and user",
+                ));
+            }
+        }
+        if state.migration_cursor(context.task_id, pass_id)? != MigrationCursor::FullImage {
+            return Err(conflict(
+                "missing objects can be removed only during full-image confirmation",
+            ));
+        }
+        validate_exact_one(&state, task)?;
+        current_discovered_skeleton(
+            &state,
+            task,
+            context.task_id,
+            annotation_id,
+            expected_version,
+        )?;
+
+        let mut payloads = Vec::new();
+        push_simulated(
+            &mut state,
+            &mut payloads,
+            user_id,
+            DatasetRole::Annotator,
+            now,
+            EventPayload::AnnotationDeleted {
+                annotation_id: annotation_id.clone(),
+                version: expected_version,
+                reason: Some(
+                    "removed object discovered during full-image migration review".to_string(),
+                ),
+            },
+        )?;
+        reopen_terminal_migration(&mut state, context.task_id, now, &mut payloads, user_id)?;
+        renew(&mut assignment, now);
+        payloads.push(EventPayload::AssignmentUpdated {
+            assignment: assignment.clone(),
+        });
+        let state = self
+            .append_migration_command_unlocked(
+                context.image_id,
+                user_id,
+                DatasetRole::Annotator,
+                idempotency_key,
+                context.assignment_id,
+                payloads,
+                0,
+                now,
+            )
+            .await?;
+        command_result(
+            state,
+            context.task_id,
+            pass_id,
+            Some(assignment),
+            Some(annotation_id.clone()),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the migration command boundary keeps actor, assignment, and version inputs explicit"
+    )]
     pub async fn exclude_migration_target(
         &self,
         user_id: &UserId,
@@ -1692,7 +1978,9 @@ fn validate_exact_one(state: &ImageState, task: &TaskDefinition) -> StorageResul
             && matches!(
                 annotation.revision_source,
                 RevisionSource::Human {
-                    action: HumanRevisionKind::Authored | HumanRevisionKind::Edited
+                    action: HumanRevisionKind::Authored
+                        | HumanRevisionKind::Edited
+                        | HumanRevisionKind::AcceptedUnchanged
                 }
             );
         if !valid && !discovered {
@@ -1702,6 +1990,35 @@ fn validate_exact_one(state: &ImageState, task: &TaskDefinition) -> StorageResul
         }
     }
     Ok(())
+}
+
+fn current_discovered_skeleton(
+    state: &ImageState,
+    task: &TaskDefinition,
+    task_id: &TaskId,
+    annotation_id: &AnnotationId,
+    expected_version: u32,
+) -> StorageResult<AnnotationVersion> {
+    let current = state
+        .current_annotation(annotation_id)
+        .filter(|annotation| !annotation.deleted)
+        .cloned()
+        .ok_or_else(|| conflict("the added missing-object skeleton is unavailable"))?;
+    if current.version != expected_version
+        || current.task_id != *task_id
+        || current.object_group_id.is_some()
+        || current.class_id != *only_class(task)?
+        || current.annotation_type != AnnotationType::Skeleton
+        || !matches!(
+            current.origin,
+            AnnotationOrigin::Native { legacy_v2: false }
+        )
+    {
+        return Err(conflict(
+            "the added missing-object skeleton expectation is stale or inconsistent",
+        ));
+    }
+    Ok(current)
 }
 
 fn only_class(task: &TaskDefinition) -> StorageResult<&ClassId> {

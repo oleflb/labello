@@ -32,6 +32,7 @@ impl LabelloApp {
                                 pending_activate_target.clone();
                             self.work.migration.pending_revisit_target = None;
                             self.work.migration.adding_missing_object = false;
+                            self.work.migration.editing_missing_annotation_id = None;
                             self.work.migration.progress = Some(result.progress);
                             self.work.migration.active_pass_id =
                                 result.active_pass.map(|pass| pass.pass_id);

@@ -413,6 +413,8 @@ mod tests {
             r#"{"importId":"imp_1","datasetId":"animals","planHash":"plan"}"#.to_string(),
             r#"{"importId":"imp_1","lifecycle":"cancelled"}"#.to_string(),
             migration_result.clone(),
+            migration_result.clone(),
+            migration_result.clone(),
             migration_result,
         ];
         let server = std::thread::spawn(move || {
@@ -570,6 +572,35 @@ mod tests {
         )
         .await
         .unwrap();
+        api.edit_migration_skeleton(
+            &DatasetId::from("animals"),
+            &ImageId::from("img_1"),
+            crate::EditMigrationSkeletonRequest {
+                assignment_id: labello_domain::AssignmentId::from("asg_1"),
+                pass_id: None,
+                task_id: labello_domain::TaskId::from("skeleton:person"),
+                annotation_id: labello_domain::AnnotationId::from("ann_discovered"),
+                expected_version: 1,
+                skeleton: labello_domain::SkeletonGeometry { keypoints: vec![] },
+            },
+            "edit-migration-key",
+        )
+        .await
+        .unwrap();
+        api.delete_migration_skeleton(
+            &DatasetId::from("animals"),
+            &ImageId::from("img_1"),
+            crate::DeleteMigrationSkeletonRequest {
+                assignment_id: labello_domain::AssignmentId::from("asg_1"),
+                pass_id: None,
+                task_id: labello_domain::TaskId::from("skeleton:person"),
+                annotation_id: labello_domain::AnnotationId::from("ann_discovered"),
+                expected_version: 2,
+            },
+            "delete-migration-key",
+        )
+        .await
+        .unwrap();
         api.revisit_migration_target(
             &DatasetId::from("animals"),
             &ImageId::from("img_1"),
@@ -607,6 +638,8 @@ mod tests {
             "POST /imports/imp_1/commit ",
             "POST /imports/imp_1/cancel ",
             "POST /datasets/animals/images/img_1/migration/skeleton ",
+            "POST /datasets/animals/images/img_1/migration/skeletons/edit ",
+            "POST /datasets/animals/images/img_1/migration/skeletons/delete ",
             "POST /datasets/animals/images/img_1/migration/revisit ",
         ];
         for ((headers, _), start) in requests.iter().zip(starts) {
@@ -622,7 +655,9 @@ mod tests {
             (13, "commit-key"),
             (14, "cancel-key"),
             (15, "migration-key"),
-            (16, "revisit-key"),
+            (16, "edit-migration-key"),
+            (17, "delete-migration-key"),
+            (18, "revisit-key"),
         ] {
             let headers = requests[index].0.to_ascii_lowercase();
             assert!(headers.contains("x-csrf-token: csrf-import\r\n"));

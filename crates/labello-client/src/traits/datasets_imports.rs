@@ -151,6 +151,22 @@ pub trait ImportApi {
         idempotency_key: &'a str,
     ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
 
+    fn edit_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::EditMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
+    fn delete_migration_skeleton<'a>(
+        &'a self,
+        dataset_id: &'a DatasetId,
+        image_id: &'a ImageId,
+        request: crate::DeleteMigrationSkeletonRequest,
+        idempotency_key: &'a str,
+    ) -> ApiFuture<'a, crate::ManualMigrationCommandResult>;
+
     fn exclude_migration_target<'a>(
         &'a self,
         dataset_id: &'a DatasetId,

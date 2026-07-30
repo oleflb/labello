@@ -290,9 +290,20 @@ fn migration_full_image_can_add_an_object_missing_from_the_import() {
             .is_disabled()
     );
 
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    click_at(&mut harness, canvas.center());
+    let moved_first = canvas.center() + egui::vec2(36.0, -18.0);
+    drag_at(&mut harness, canvas.center(), moved_first);
+    assert_eq!(harness.state().work.migration.keypoint_index, 1);
+    assert!(
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_some_and(|point| point.x > 0.5 && point.y < 0.5)
+    );
+
     let keypoint_count = {
         let draft = harness.state_mut().work.migration.draft.as_mut().unwrap();
-        for keypoint in &mut draft.keypoints {
+        for keypoint in draft.keypoints.iter_mut().skip(1) {
             keypoint.point = Some(labello_domain::NormalizedPoint { x: 0.5, y: 0.5 });
             keypoint.state = labello_domain::KeypointState::Visible;
         }
@@ -335,6 +346,83 @@ fn migration_full_image_can_add_an_object_missing_from_the_import() {
             .count(),
         1
     );
+    harness.set_size(egui::vec2(390.0, 667.0));
+    harness.step();
+    assert!(harness.query_by_label("Edit added").is_some());
+    click_accesskit_button(&mut harness, "Edit added");
+    harness.step();
+    assert!(harness.state().work.migration.adding_missing_object);
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .migration
+            .editing_missing_annotation_id
+            .as_ref(),
+        Some(&labello_domain::AnnotationId::from("spy-discovered"))
+    );
+    harness.set_size(egui::vec2(1440.0, 900.0));
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Save object changes")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+    let edited_point = labello_domain::NormalizedPoint { x: 0.7, y: 0.6 };
+    harness.state_mut().work.migration.draft.as_mut().unwrap().keypoints[0].point =
+        Some(edited_point);
+    harness.state_mut().work.migration.draft_dirty = true;
+    harness.step();
+    click_accesskit_button(&mut harness, "Save object changes");
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 2);
+    assert!(!harness.state().work.migration.adding_missing_object);
+    let edited = harness
+        .state()
+        .work
+        .current_state
+        .as_ref()
+        .unwrap()
+        .current_annotation(&labello_domain::AnnotationId::from("spy-discovered"))
+        .unwrap();
+    assert_eq!(edited.version, 2);
+    assert!(
+        matches!(
+            &edited.geometry,
+            labello_domain::AnnotationGeometry::Skeleton(skeleton)
+                if skeleton.keypoints[0].point == Some(edited_point)
+        ),
+        "{:?}",
+        edited.geometry
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Add missing object")
+            .is_some()
+    );
+    click_accesskit_button(&mut harness, "Edit added object 1");
+    harness.step();
+    assert!(harness.query_by_label("Remove added object").is_some());
+    click_accesskit_button(&mut harness, "Remove added object");
+    harness.step();
+    step_until(&mut harness, 8, |app| !app.work.migration.busy);
+    assert_eq!(api.counts().migration_commands, 3);
+    assert!(!harness.state().work.migration.adding_missing_object);
+    assert!(
+        harness
+            .state()
+            .work
+            .current_state
+            .as_ref()
+            .unwrap()
+            .current_annotation(&labello_domain::AnnotationId::from("spy-discovered"))
+            .unwrap()
+            .deleted
+    );
+    assert!(harness.query_by_label("Edit added object 1").is_none());
     assert!(
         harness
             .query_by_label_contains("Add missing object")
@@ -639,7 +727,19 @@ fn migration_draft_supports_undo_and_delete() {
 
     place_first_keypoint(harness.state_mut());
     harness.state_mut().work.migration.next_hidden = true;
+    harness.state_mut().work.canvas.fit_view();
     harness.step();
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    drag_at(
+        &mut harness,
+        canvas.center(),
+        canvas.center() + egui::vec2(32.0, -16.0),
+    );
+    assert!(
+        harness.state().work.migration.draft.as_ref().unwrap().keypoints[0]
+            .point
+            .is_some_and(|point| point.x > 0.5 && point.y < 0.5)
+    );
     click_accesskit_button(&mut harness, "Undo last keypoint");
     assert_eq!(harness.state().work.migration.keypoint_index, 0);
     assert!(

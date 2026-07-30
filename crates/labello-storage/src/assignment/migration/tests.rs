@@ -30,7 +30,7 @@ struct MigrationPair {
 }
 
 #[tokio::test]
-async fn full_image_migration_accepts_and_binds_a_discovered_skeleton() {
+async fn full_image_migration_accepts_edits_and_binds_a_discovered_skeleton() {
     let fixture = fixture(ReviewWorkflow::None, 0).await;
     let assignment = fixture
         .repository
@@ -97,7 +97,134 @@ async fn full_image_migration_accepts_and_binds_a_discovered_skeleton() {
         added.image_state.current_sequence
     );
 
-    let target_hash = added.image_state.migration_target_sets[&fixture.task_id]
+    let edited = fixture
+        .repository
+        .edit_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            1,
+            skeleton(0.8),
+            "edit-discovered",
+        )
+        .await
+        .unwrap();
+    let edited_annotation = edited
+        .image_state
+        .current_annotation(&annotation_id)
+        .unwrap();
+    assert_eq!(edited_annotation.version, 2);
+    assert_eq!(
+        edited_annotation.geometry,
+        AnnotationGeometry::Skeleton(skeleton(0.8))
+    );
+    assert!(matches!(
+        edited_annotation.revision_source,
+        RevisionSource::Human {
+            action: HumanRevisionKind::Edited
+        }
+    ));
+    let edit_retry = fixture
+        .repository
+        .edit_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            1,
+            skeleton(0.8),
+            "edit-discovered",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        edit_retry.image_state.current_sequence,
+        edited.image_state.current_sequence
+    );
+    assert!(
+        fixture
+            .repository
+            .edit_migration_skeleton(
+                &fixture.annotator,
+                context(&assignment),
+                None,
+                &annotation_id,
+                1,
+                skeleton(0.9),
+                "stale-edit-discovered",
+            )
+            .await
+            .is_err()
+    );
+
+    let edited_state_hash = edited
+        .image_state
+        .current_migration_state_hash(&fixture.task_id)
+        .unwrap();
+    assert_ne!(
+        edited_state_hash,
+        added
+            .image_state
+            .current_migration_state_hash(&fixture.task_id)
+            .unwrap()
+    );
+
+    let deleted = fixture
+        .repository
+        .delete_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            2,
+            "delete-discovered",
+        )
+        .await
+        .unwrap();
+    assert!(
+        deleted
+            .image_state
+            .current_annotation(&annotation_id)
+            .unwrap()
+            .deleted
+    );
+    let delete_retry = fixture
+        .repository
+        .delete_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            2,
+            "delete-discovered",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_retry.image_state.current_sequence,
+        deleted.image_state.current_sequence
+    );
+    assert!(
+        fixture
+            .repository
+            .delete_migration_skeleton(
+                &fixture.annotator,
+                context(&assignment),
+                None,
+                &annotation_id,
+                1,
+                "stale-delete-discovered",
+            )
+            .await
+            .is_err()
+    );
+    let state_hash = deleted
+        .image_state
+        .current_migration_state_hash(&fixture.task_id)
+        .unwrap();
+    assert_ne!(state_hash, edited_state_hash);
+    let target_hash = deleted.image_state.migration_target_sets[&fixture.task_id]
         .target_set_hash
         .clone();
     let confirmation_hash = migration_confirmation_hash(&target_hash, &state_hash).unwrap();
@@ -118,13 +245,97 @@ async fn full_image_migration_accepts_and_binds_a_discovered_skeleton() {
         TaskStatus::Completed
     );
     assert_eq!(
+        completed.image_state.current_annotation(&annotation_id),
+        deleted.image_state.current_annotation(&annotation_id)
+    );
+}
+
+#[tokio::test]
+async fn unchanged_discovered_skeleton_edit_remains_confirmable() {
+    let fixture = fixture(ReviewWorkflow::None, 0).await;
+    let assignment = fixture
+        .repository
+        .assign_next_image(
+            &fixture.annotator,
+            &fixture.task_id,
+            AssignmentKind::Annotation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let added = fixture
+        .repository
+        .add_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            skeleton(0.7),
+            "add-unchanged",
+        )
+        .await
+        .unwrap();
+    let annotation_id = added.annotation_id.unwrap();
+
+    let unchanged = fixture
+        .repository
+        .edit_migration_skeleton(
+            &fixture.annotator,
+            context(&assignment),
+            None,
+            &annotation_id,
+            1,
+            skeleton(0.7),
+            "edit-unchanged",
+        )
+        .await
+        .unwrap();
+    let annotation = unchanged
+        .image_state
+        .current_annotation(&annotation_id)
+        .unwrap();
+    assert_eq!(annotation.version, 2);
+    assert!(matches!(
+        annotation.revision_source,
+        RevisionSource::Human {
+            action: HumanRevisionKind::AcceptedUnchanged
+        }
+    ));
+
+    let target_hash = unchanged.image_state.migration_target_sets[&fixture.task_id]
+        .target_set_hash
+        .clone();
+    let state_hash = unchanged
+        .image_state
+        .current_migration_state_hash(&fixture.task_id)
+        .unwrap();
+    let confirmation_hash = migration_confirmation_hash(&target_hash, &state_hash).unwrap();
+    let completed = fixture
+        .repository
+        .confirm_and_submit_migration(
+            &fixture.annotator,
+            context(&assignment),
+            &target_hash,
+            &state_hash,
+            &confirmation_hash,
+            "confirm-unchanged",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completed.image_state.task_states[&fixture.task_id].status,
+        TaskStatus::Completed
+    );
+    assert!(matches!(
         completed
             .image_state
             .current_annotation(&annotation_id)
             .unwrap()
-            .geometry,
-        AnnotationGeometry::Skeleton(skeleton(0.7))
-    );
+            .revision_source,
+        RevisionSource::Human {
+            action: HumanRevisionKind::AcceptedUnchanged
+        }
+    ));
 }
 
 #[tokio::test]

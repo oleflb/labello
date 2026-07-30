@@ -156,6 +156,30 @@ pub(super) fn click_at(harness: &mut Harness<'static, LabelloApp>, pos: egui::Po
     harness.step();
 }
 
+pub(super) fn drag_at(
+    harness: &mut Harness<'static, LabelloApp>,
+    start: egui::Pos2,
+    end: egui::Pos2,
+) {
+    harness.event(egui::Event::PointerMoved(start));
+    harness.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.event(egui::Event::PointerMoved(end));
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: end,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+}
+
 pub(super) fn release_and_switch(harness: &mut Harness<'static, LabelloApp>) {
     assert!(harness.query_by_label("Release and switch").is_some());
     harness.state_mut().release_pending_transition();

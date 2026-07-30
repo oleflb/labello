@@ -1451,6 +1451,65 @@ fn editing_a_persisted_box_saves_a_new_annotation_version() {
 }
 
 #[test]
+fn dragging_a_persisted_skeleton_keypoint_saves_a_new_annotation_version() {
+    let api = Rc::new(SpyApi::new());
+    {
+        let mut state = api.state.borrow_mut();
+        let task = &mut state.metadata.tasks[0];
+        task.annotation_type = AnnotationType::Skeleton;
+        task.prelabel_config_ids.clear();
+        task.skeleton = Some(SkeletonSpec {
+            keypoints: vec![KeypointSpec {
+                name: "head".to_string(),
+                required: true,
+            }],
+            edges: Vec::new(),
+            allow_hidden: true,
+            allow_absent: false,
+        });
+    }
+    let mut harness = loaded_work_harness(api.clone());
+    let canvas = harness.get_by_label("Annotation canvas").rect();
+    click_at(&mut harness, canvas.center());
+    click(&mut harness, "Save");
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
+
+    let annotation_id = harness.state().work.annotations[0].annotation_id.clone();
+    drag_at(
+        &mut harness,
+        canvas.center(),
+        canvas.center() + egui::vec2(40.0, -20.0),
+    );
+    let annotation = &harness.state().work.annotations[0];
+    assert_eq!(annotation.version, 2);
+    assert!(matches!(
+        annotation.revision_source,
+        RevisionSource::Human {
+            action: HumanRevisionKind::Edited
+        }
+    ));
+    assert!(harness.state().work.modified_annotations.contains(&annotation_id));
+    assert!(matches!(
+        annotation.geometry,
+        AnnotationGeometry::Skeleton(ref skeleton)
+            if skeleton.keypoints[0]
+                .point
+                .is_some_and(|point| point.x > 0.5 && point.y < 0.5)
+    ));
+
+    harness.state_mut().autosave();
+    step_until(&mut harness, 10, |app| app.work.save_status == SaveStatus::Saved);
+    assert!(api.events().iter().any(|payload| matches!(
+        payload,
+        EventPayload::AnnotationVersionCreated {
+            annotation,
+            previous_version: Some(1),
+            ..
+        } if annotation.annotation_id == annotation_id && annotation.version == 2
+    )));
+}
+
+#[test]
 fn correction_mode_blocks_review_shortcuts_and_saturation_never_discards_the_draft() {
     let api = Rc::new(SpyApi::new());
     seed_review_annotation(
