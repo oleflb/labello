@@ -151,9 +151,10 @@ Keep the hostname consistent throughout the flow. Cookies set for
 `127.0.0.1` are not available to `localhost`, or vice versa. Do not commit the
 client secret to `labello.server.toml`.
 
-GitHub accounts receive an internal ID such as `github_123456`. Add that ID to
-`bootstrapAdmins` if the account should create datasets, or grant it a role on
-an existing dataset through the admin UI.
+GitHub accounts receive an internal ID such as `github_123456`. On first login,
+an account receives the annotator role on each existing dataset where it has no
+role assignment. A data admin can change those roles through the admin UI. Add
+the internal ID to `bootstrapAdmins` if the account should create datasets.
 
 ## Annotation Controls
 

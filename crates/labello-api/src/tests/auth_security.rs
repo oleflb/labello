@@ -583,6 +583,17 @@ async fn oauth_flow_binds_state_to_browser_and_redirects_once_to_valid_return_ta
             token_url: format!("http://{mock_address}/token"),
             user_url: format!("http://{mock_address}/user"),
         });
+    let dataset_id = labello_domain::DatasetId::from("oauth-dataset");
+    state
+        .repo(&dataset_id)
+        .unwrap()
+        .initialize(labello_domain::DatasetMetadata::new(
+            dataset_id.clone(),
+            "OAuth dataset",
+            labello_domain::now(),
+        ))
+        .await
+        .unwrap();
     let app = router(state.clone());
     let return_to = "https://app.example.com/datasets/ds?tab=review";
     let login = app
@@ -702,6 +713,21 @@ async fn oauth_flow_binds_state_to_browser_and_redirects_once_to_valid_return_ta
     assert!(set_cookies.iter().any(|cookie| {
         cookie.starts_with("labello_oauth_flow=;") && cookie.contains("Max-Age=0")
     }));
+    let metadata = state
+        .repo(&dataset_id)
+        .unwrap()
+        .load_dataset_config()
+        .await
+        .unwrap();
+    let oauth_assignment = metadata
+        .role_assignments
+        .iter()
+        .find(|assignment| assignment.user_id == labello_domain::UserId::from("github_42"))
+        .unwrap();
+    assert_eq!(
+        oauth_assignment.roles,
+        std::collections::BTreeSet::from([labello_domain::DatasetRole::Annotator])
+    );
     let session_cookie = set_cookies
         .iter()
         .find(|cookie| cookie.starts_with("labello_session="))
