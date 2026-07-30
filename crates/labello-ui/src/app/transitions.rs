@@ -4,10 +4,17 @@ impl LabelloApp {
             return;
         }
         if self.work.assignment.is_some() {
-            self.work.pending_transition = Some(transition);
+            self.stage_transition(transition);
             return;
         }
         self.execute_transition(transition);
+    }
+
+    fn stage_transition(&mut self, transition: PendingTransition) {
+        self.work.pending_transition = Some(transition);
+        if let Some(ctx) = self.runtime.repaint_ctx.as_ref() {
+            ctx.request_discard("settle assignment transition modal");
+        }
     }
 
     pub(crate) fn execute_transition(&mut self, transition: PendingTransition) {
@@ -107,7 +114,7 @@ impl LabelloApp {
             self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
-        self.work.pending_transition = Some(PendingTransition::NextAssignment);
+        self.stage_transition(PendingTransition::NextAssignment);
         self.request_save(true);
     }
 
@@ -120,14 +127,14 @@ impl LabelloApp {
             && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
                 || (self.manual_migration_active() && self.migration_has_unsaved_input()))
         {
-            self.work.pending_transition = Some(PendingTransition::NextAssignment);
+            self.stage_transition(PendingTransition::NextAssignment);
             return;
         }
         if self.runtime.api.is_none() {
             self.execute_transition(PendingTransition::NextAssignment);
             return;
         }
-        self.work.pending_transition = Some(PendingTransition::NextAssignment);
+        self.stage_transition(PendingTransition::NextAssignment);
         self.request_release();
     }
 
@@ -147,7 +154,7 @@ impl LabelloApp {
             && (matches!(self.work.save_status, SaveStatus::Dirty | SaveStatus::Retry)
                 || (self.manual_migration_active() && self.migration_has_unsaved_input()))
         {
-            self.work.pending_transition = Some(PendingTransition::PreviousAssignment(previous));
+            self.stage_transition(PendingTransition::PreviousAssignment(previous));
             return;
         }
         self.request_reopen_assignment(previous);

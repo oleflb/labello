@@ -44,7 +44,7 @@ Only after that continue with the next issue.
     a one-position minimum for new migration skeletons.
 - [x] Always be in pan mode when in review
   - Completed on 2026-07-30.
-- [ ] Submit and switch does not work
+- [x] Submit and switch does not work
 - [ ] Review does not have a refocus button.
 - [ ] After loading an image or completing an availability check, the workflow
   panel UI element borders shortly flash red.

@@ -1659,6 +1659,33 @@ fn dirty_skip_requires_an_explicit_discard_or_submit_choice() {
 }
 
 #[test]
+fn dirty_skip_can_submit_and_switch_with_a_pointer_click() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    let original = harness
+        .state()
+        .work
+        .assignment
+        .as_ref()
+        .unwrap()
+        .image_id
+        .clone();
+    click(&mut harness, "Accept");
+
+    click(&mut harness, "Skip");
+    click(&mut harness, "Submit and switch");
+    step_until(&mut harness, 16, |app| {
+        app.work
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.image_id != original)
+    });
+
+    assert_eq!(api.counts().complete_assignment, 1);
+    assert_eq!(api.counts().release_assignment, 0);
+}
+
+#[test]
 fn dataset_summary_roles_survive_sanitized_metadata_and_show_supported_tabs() {
     let api = Rc::new(SpyApi::new());
     api.sanitize_metadata_roles();
@@ -1996,8 +2023,7 @@ fn dirty_workflow_changes_save_before_loading_the_new_assignment() {
         harness.state().work.selected_task_id.as_ref(),
         Some(&TaskId::from("bounding_box:person"))
     );
-    harness.state_mut().submit_pending_transition();
-    harness.step();
+    click(&mut harness, "Submit and switch");
     step_until(&mut harness, 12, |app| {
         app.selected_class_id() == Some(&ClassId::from("vehicle"))
             && app.work.current.is_some()
