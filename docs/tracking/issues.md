@@ -45,7 +45,8 @@ Only after that continue with the next issue.
 - [x] Always be in pan mode when in review
   - Completed on 2026-07-30.
 - [x] Submit and switch does not work
-- [ ] Review does not have a refocus button.
+- [x] Review does not have a refocus button.
+  - Completed on 2026-07-30.
 - [ ] After loading an image or completing an availability check, the workflow
   panel UI element borders shortly flash red.
 - [ ] Center-align the workflow inspector mobile overlay horizontally

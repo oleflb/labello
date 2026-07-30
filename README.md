@@ -204,7 +204,8 @@ touch gestures, and double-click-to-fit remain available.
 Approval review keeps Pan mode active so primary drag moves the focused image
 without an extra mode switch. Starting a reviewer correction returns primary
 drag to object editing; Space+left-drag and middle-drag still pan while
-correcting.
+correcting. The review inspector can refocus the active object using its current
+correction geometry without leaving the assignment.
 
 While placing or revising a skeleton, drag any already placed keypoint on the
 selected object to correct its position. This works for ordinary annotation,

@@ -1484,6 +1484,38 @@ fn skip_releases_then_claims_another_assignment() {
 }
 
 #[test]
+fn review_refocus_restores_the_active_object_view() {
+    let api = Rc::new(SpyApi::new());
+    seed_review_annotation(
+        &api,
+        AnnotationGeometry::BoundingBox(BoundingBox {
+            x: 0.2,
+            y: 0.2,
+            width: 0.2,
+            height: 0.2,
+        }),
+        false,
+    );
+    let mut harness = loaded_review_harness(api);
+
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+    click(&mut harness, "Fit");
+    assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
+
+    click_accesskit_button(&mut harness, "Refocus object");
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+
+    harness.state_mut().work.review_index = 1;
+    harness.step();
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Refocus object")
+            .is_none(),
+        "the full-image review phase must not offer an object refocus action"
+    );
+}
+
+#[test]
 fn previous_assignment_reopens_the_exact_skipped_image_from_compact_actions() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api.clone());
