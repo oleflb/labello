@@ -1477,6 +1477,26 @@ fn migration_save_uses_the_contextual_submit_shortcut() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_review_refocus_restores_the_active_guide_view() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let app =
+        inspector_presets::build(InspectorPreset::MigrationReview, &egui::Context::default());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+    click(&mut harness, "Fit");
+    assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
+
+    click_accesskit_button(&mut harness, "Refocus object");
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn migration_review_decisions_are_visible_and_keep_their_shortcuts_on_mobile() {
     use crate::inspector_presets::{self, InspectorPreset};
 

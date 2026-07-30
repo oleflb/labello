@@ -1031,6 +1031,13 @@ impl LabelloApp {
         ui.label(RichText::new("Migration review").strong());
         if let Some(target) = targets.get(self.work.migration.review_index) {
             let status = self.migration_disposition(&target.object_group_id);
+            let guide = self
+                .work
+                .current_state
+                .as_ref()
+                .and_then(|state| state.current_annotation(&target.guide_annotation_id))
+                .filter(|guide| !guide.deleted)
+                .cloned();
             theme::compact_metric(
                 ui,
                 "Review target",
@@ -1052,6 +1059,14 @@ impl LabelloApp {
                 }
             } else {
                 ui.label("Review the skeleton against the read-only canonical guide.");
+            }
+            if let Some(guide) = guide
+                && ui
+                    .small_button("Refocus object")
+                    .on_hover_text("Center and zoom the active migration object on the canvas.")
+                    .clicked()
+            {
+                self.work.canvas.focus_annotation(&guide);
             }
             let review_target = self.work.current_state.as_ref().and_then(|state| {
                 let disposition = state
