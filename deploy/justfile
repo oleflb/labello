@@ -1,0 +1,16 @@
+set dotenv-load := true
+set dotenv-filename := ".env"
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
+init-env:
+    if [[ ! -e .env ]]; then cp deploy.example.env .env; fi
+
+install:
+    ./install.sh
+
+deploy:
+    ./deploy.sh
+
+check:
+    bash -n install.sh deploy.sh
+    grep -Fxq 'ExecStart=/opt/labello/current/labello-server' labello.service; tmp_dir="$(mktemp -d)"; trap 'rm -rf "${tmp_dir}"' EXIT; sed 's#ExecStart=/opt/labello/current/labello-server#ExecStart=/bin/true#' labello.service > "${tmp_dir}/labello.service"; systemd-analyze verify "${tmp_dir}/labello.service"; sed -e "s/@LABELLO_APP_DOMAIN@/${LABELLO_APP_DOMAIN}/g" -e "s/@LABELLO_API_DOMAIN@/${LABELLO_API_DOMAIN}/g" Caddyfile.template > "${tmp_dir}/Caddyfile"; caddy validate --config "${tmp_dir}/Caddyfile" --adapter caddyfile

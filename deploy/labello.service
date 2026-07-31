@@ -1,0 +1,25 @@
+[Unit]
+Description=Labello image annotation API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=labello
+Group=labello
+WorkingDirectory=/var/lib/labello
+Environment=LABELLO_CONFIG=/etc/labello/labello.server.toml
+EnvironmentFile=/etc/labello/labello.env
+ExecStart=/opt/labello/current/labello-server
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=300s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/labello
+
+[Install]
+WantedBy=multi-user.target

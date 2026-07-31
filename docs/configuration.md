@@ -83,6 +83,12 @@ public artifact and must never contain OAuth credentials, cookies, tokens, or
 other secrets. Static hosting must return a real 404 for an absent
 `labello.client.json`, rather than rewriting that path to `index.html`.
 
+The Debian single-host installation writes the public runtime file to
+`/etc/labello/labello.client.json`. Edit that installed file when the API URL
+must change; the next `just deploy` copies its exact bytes into the new
+immutable browser release. Editing it does not alter the already active
+release.
+
 ## Complete Configuration
 
 The uncommented values below are the defaults. GitHub OAuth has no default

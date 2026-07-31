@@ -1,0 +1,8 @@
+bind = "127.0.0.1:8080"
+datasetsRoot = "/var/lib/labello/datasets"
+bootstrapAdmins = ["REPLACE_ME"]
+browserOrigins = ["https://@LABELLO_APP_DOMAIN@"]
+sessionCookieSecure = true
+
+[developmentAuth]
+localAdminLogin = false

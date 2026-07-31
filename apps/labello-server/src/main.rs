@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn shutdown_signal() {
-    match tokio::signal::ctrl_c().await {
+    match wait_for_shutdown_signal().await {
         Ok(()) => tracing::info!(event = "server.shutdown.started", "shutdown requested"),
         Err(error) => tracing::error!(
             event = "server.shutdown.signal_failed",
@@ -118,6 +118,24 @@ async fn shutdown_signal() {
             "could not install shutdown signal handler"
         ),
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        received = terminate.recv() => received.ok_or_else(|| {
+            std::io::Error::other("SIGTERM signal stream ended unexpectedly")
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 fn load_or_create_config() -> anyhow::Result<ServerConfig> {

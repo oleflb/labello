@@ -306,6 +306,24 @@ See the current [architecture and ownership map](docs/architecture.md), the
 The API server does not serve the browser distribution. Build and deploy
 `apps/labello-wasm/dist` separately.
 
+For a production installation on one dedicated Debian host, configure the two
+public hostnames in `deploy/.env`, then run the four-recipe interface from the
+deployment directory:
+
+```sh
+cd deploy
+just init-env
+just install
+# Complete /etc/labello/labello.server.toml and /etc/labello/labello.env.
+just check
+just deploy
+```
+
+This builds the API and browser into one immutable release, activates them
+together, and uses systemd plus the distro-managed Caddy service. See the
+[single-host runbook](docs/operations.md#debian-single-host-runbook) for DNS,
+backup, failure, and data-aware rollback requirements.
+
 `apps/egui-mcp-inspector` is a standalone native development tool outside the
 main workspace. It reuses `labello-ui` with deterministic demo state by default
 and has an opt-in live mode for local development servers.
@@ -425,8 +443,8 @@ See the [inspector README](apps/egui-mcp-inspector/README.md) for details.
   retention lifecycle.
 - `GET /health` is liveness only; there is no readiness endpoint covering the
   authentication store, dataset-root mount, write capacity, or free space.
-- Graceful shutdown is wired to Ctrl-C, but there is no application drain
-  deadline or documented SIGTERM handler.
+- Graceful shutdown handles Ctrl-C/`SIGINT` and Unix `SIGTERM`, but there is no
+  application-level drain deadline.
 - Import format support is tested under configured limits, but official
   COCO-scale operation remains a separate performance gate.
 - Import does not merge into existing datasets and does not support prediction

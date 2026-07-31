@@ -3,5 +3,6 @@
 /labello.server.toml
 /apps/labello-wasm/dist/
 /apps/labello-wasm/labello.client.json
+/deploy/.env
 *.tmp
 .worktrees/

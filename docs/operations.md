@@ -88,13 +88,12 @@ probe by modifying a dataset.
 
 ## Graceful Shutdown
 
-The server installs a Ctrl-C handler and passes it to Axum graceful shutdown.
-After Ctrl-C, `server.shutdown.started` is emitted, Axum stops accepting new
-connections, and the process waits for active connections before emitting
-`server.stopped`. There is no application-level drain deadline and no
-documented SIGTERM handler. A process supervisor must therefore send the
-supported interrupt signal and allow enough time for the longest accepted
-request.
+The server handles Ctrl-C/`SIGINT` and, on Unix, `SIGTERM`, and passes either
+signal to Axum graceful shutdown. After a supported signal,
+`server.shutdown.started` is emitted, Axum stops accepting new connections,
+and the process waits for active connections before emitting `server.stopped`.
+There is no application-level drain deadline, so a process supervisor must
+allow enough time for the longest accepted request.
 
 Import preflight and commit work is owned by the request performing it, not a
 detached durable worker. Do not force-kill the process while a write or import
@@ -177,6 +176,103 @@ Retain logs according to local audit policy while preserving the redaction
 rules above. Restrict access to logs because safe identifiers and aggregate
 activity still reveal operational metadata.
 
+### Debian Single-Host Runbook
+
+The supported repository deployment targets one dedicated Debian host. Install
+`caddy`, `git`, `curl`, `just`, `sudo`, `util-linux`, GNU core/find utilities,
+and the normal native build toolchain through host administration. Install and
+maintain Rustup/Cargo, the `wasm32-unknown-unknown` Rust target, and Trunk for
+the non-root deployment operator. The repository scripts verify these tools
+but do not install or download them.
+
+Create DNS A/AAAA records for two distinct hostnames before installation: one
+for the browser and one for the API. Both must resolve to the host, and ports
+80 and 443 must reach the distro-managed Caddy service so it can obtain and
+renew certificates.
+
+From the deployment checkout:
+
+```sh
+cd deploy
+just init-env
+# Edit .env and set the browser domain, API domain, Git remote, and branch.
+just install
+sudoedit /etc/labello/labello.server.toml
+sudoedit /etc/labello/labello.env
+# Replace every REPLACE_ME value, then:
+just check
+just deploy
+```
+
+`just install` is idempotent. It updates the tracked unit and Caddy site but
+does not overwrite an existing server configuration or secret environment
+file. The fixed runtime layout is:
+
+```text
+/opt/labello/current -> releases/<release-id>
+/opt/labello/previous -> releases/<previous-release-id>
+/opt/labello/releases/<release-id>/{labello-server,REVISION,web/}
+/var/lib/labello/datasets/
+/etc/labello/{labello.server.toml,labello.env,labello.client.json}
+/etc/systemd/system/labello.service
+/etc/caddy/Caddyfile
+```
+
+The deployment operator owns `/opt/labello` and its releases. The `labello`
+system user privately owns `/var/lib/labello` and runs only the API. Runtime
+configuration is root-owned and readable by the `labello` group where needed.
+Configured filesystem import roots are outside the service's writable paths;
+they must be reachable by `labello` through ordinary Unix permissions and are
+read-only under the systemd sandbox.
+
+Caddy serves `/opt/labello/current/web` on the browser hostname and proxies the
+API hostname to `127.0.0.1:8080`. It follows the `current` symlink, so normal
+deployments do not reload Caddy. Static serving has no SPA fallback: a missing
+file, especially `labello.client.json`, must return a real 404. Caddy applies
+`no-store` to that runtime file, revalidates `index.html`, and compresses
+ordinary static assets.
+
+`just deploy` locks against concurrent runs, fast-forwards the configured
+branch to its fetched remote tip, builds only the release server and browser,
+packages both with the installed public client configuration, and atomically
+activates one immutable release. It then checks the exact local and public API
+health response, the public index, and the exact public client-configuration
+bytes for up to 60 seconds.
+
+Build and packaging failures leave the active release and service untouched.
+If failure occurs after activation, the script leaves `current`, `previous`,
+the failed release, and journal evidence in place, stops Labello to prevent a
+restart loop, and does not roll back. Startup may already have migrated data,
+so automatic binary rollback is unsafe.
+
+Backups are an external operator responsibility. Before any upgrade that may
+change persistent schemas, stop writes and create and verify a complete backup
+of `/var/lib/labello/datasets` plus matching server configuration and secrets.
+The deploy command neither creates nor verifies a backup.
+
+For a data-aware rollback, keep Labello stopped, preserve the failed dataset
+root for diagnosis, restore the complete backup that matches the intended old
+release, atomically point `current` at that release, then start Labello and
+verify startup logs, both health paths, authentication, and representative
+dataset reads. Do not run an older binary against data touched by a newer one
+unless reverse compatibility is explicitly documented.
+
+Old releases are never deleted automatically. After confirming that a release
+is neither `current` nor `previous` and that its diagnostic value is no longer
+needed, the deployment operator may remove that one named directory manually.
+
+Useful inspection commands are:
+
+```sh
+systemctl status labello.service caddy.service
+journalctl -u labello.service -n 200 --no-pager
+readlink -f /opt/labello/current /opt/labello/previous
+cat /opt/labello/current/REVISION
+curl --fail http://127.0.0.1:8080/health
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy.service
+```
+
 ## Capacity Planning
 
 Measure actual data; configured limits are rejection ceilings, not reserved
@@ -225,8 +321,8 @@ procedure:
 
 1. Stop new user traffic.
 2. Confirm no import, ingest, snapshot, or workflow write is active.
-3. Send Ctrl-C and wait for `server.stopped`; do not copy merely after
-   `server.shutdown.started`.
+3. Stop the systemd service (or send Ctrl-C) and wait for `server.stopped`; do
+   not copy merely after `server.shutdown.started`.
 4. Copy or snapshot the complete dataset root while the server is stopped.
 5. Record the Labello version, configuration checksum, backup timestamp, and
    backup-tool verification result outside the archive.
