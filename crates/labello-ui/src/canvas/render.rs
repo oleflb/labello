@@ -41,11 +41,11 @@ pub fn show_canvas(
 /// and retains viewport state in `state`; no separate available-size or viewport
 /// argument is required.
 ///
-/// A plain wheel or pinch zooms around the pointer. Middle-button drag,
-/// space+primary drag, and a two-finger translation pan. A double-click resets
-/// the view. A single pointer or stylus keeps its annotation behavior: it moves
-/// or resizes a selected box, creates a box with the bounding-box tool, or places
-/// a skeleton keypoint.
+/// A plain wheel or pinch zooms around the pointer. Middle-button drag, the
+/// configured modifier plus primary drag, and a two-finger translation pan. A
+/// double-click resets the view. A single pointer or stylus keeps its annotation
+/// behavior: it moves or resizes a selected box, creates a box with the
+/// bounding-box tool, or places a skeleton keypoint.
 #[allow(
     clippy::too_many_arguments,
     reason = "the public canvas adapter keeps each independent rendering input explicit"

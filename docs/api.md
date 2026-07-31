@@ -118,6 +118,12 @@ redacted logs. Clients must display the `x-request-id`, not raw internal state.
 | `PUT /datasets/{dataset_id}/keybindings` | Any role, same user | `KeybindingSet` → normalized `KeybindingSet` |
 | `POST /datasets/{dataset_id}/prelabel-suggestions` | Annotator; enabled config | `PrelabelSuggestionRequest` → `PrelabelSuggestion[]` |
 
+`KeybindingSet.bindings` contains the primary chord for every active action.
+`panDragModifier` selects the modifier used with primary-button drag to pan and
+defaults to `control`. Middle-button drag is always available. Older requests
+that omit `panDragModifier` remain valid and receive the default during
+deserialization.
+
 Role mutation retains bootstrap-administrator protections implemented by the
 handler; a data administrator cannot use this route to bypass those rules.
 

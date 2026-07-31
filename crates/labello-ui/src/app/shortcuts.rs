@@ -23,6 +23,7 @@ impl LabelloApp {
         self.work.shortcut_settings.draft = Some(draft);
         self.work.shortcut_settings.error = None;
         self.work.shortcut_settings.recording = None;
+        self.work.shortcut_settings.recording_pan_drag = false;
         self.work.shortcut_settings.confirm_discard = false;
         self.work.drawer = None;
         self.work.show_tutorial = false;
@@ -371,9 +372,11 @@ impl LabelloApp {
                 Drawer::Workflow => labello_domain::UserAction::ToggleWorkflowPanel,
                 Drawer::Inspector => labello_domain::UserAction::ToggleInspectorPanel,
             };
-            let chord = self.work.keybindings.bindings.get(&action).cloned();
-            if chord
-                .as_ref()
+            if self
+                .work
+                .keybindings
+                .bindings
+                .get(&action)
                 .is_some_and(|chord| consume_keyboard_shortcut(ctx, chord))
             {
                 self.trigger_user_action(action);

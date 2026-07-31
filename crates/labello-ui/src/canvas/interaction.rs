@@ -17,7 +17,7 @@ fn canvas_hover_cursor(
     if middle_down {
         return Some(egui::CursorIcon::Grabbing);
     }
-    if state.pan_mode() || state.space_pan || state.primary_pan {
+    if state.pan_mode() || state.modifier_pan || state.primary_pan {
         return Some(if primary_down {
             egui::CursorIcon::Grabbing
         } else {
@@ -105,7 +105,7 @@ fn handle_view_gestures(
         state.pan += touch.translation_delta;
         state.clamp_to_viewport(viewport, fitted_image);
         state.cancel_drag();
-        state.space_pan = false;
+        state.modifier_pan = false;
         return true;
     }
 
@@ -115,26 +115,31 @@ fn handle_view_gestures(
         return true;
     }
 
-    let (space_down, primary_down, primary_pressed, pointer_delta) = ui.input(|input| {
+    let (pan_modifier_down, primary_down, primary_pressed, pointer_delta) = ui.input(|input| {
         (
-            input.key_down(Key::Space),
+            match state.pan_drag_modifier {
+                labello_domain::PanDragModifier::Control => input.modifiers.ctrl,
+                labello_domain::PanDragModifier::Alt => input.modifiers.alt,
+                labello_domain::PanDragModifier::Shift => input.modifiers.shift,
+                labello_domain::PanDragModifier::Command => input.modifiers.mac_cmd,
+            },
             input.pointer.primary_down(),
             input.pointer.primary_pressed(),
             input.pointer.delta(),
         )
     });
     if primary_pressed && response.is_pointer_button_down_on() {
-        state.space_pan = space_down;
+        state.modifier_pan = pan_modifier_down;
         state.primary_pan = state.pan_mode();
     }
-    if state.space_pan || state.primary_pan {
+    if state.modifier_pan || state.primary_pan {
         if primary_down {
             state.pan += pointer_delta;
             state.clamp_to_viewport(viewport, fitted_image);
         }
         state.cancel_drag();
         if !primary_down {
-            state.space_pan = false;
+            state.modifier_pan = false;
             state.primary_pan = false;
         }
         return true;

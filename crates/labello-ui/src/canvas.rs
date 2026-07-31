@@ -6,7 +6,7 @@ use egui::{
 };
 use labello_domain::{
     AnnotationGeometry, AnnotationId, AnnotationVersion, BoundingBox, NormalizedPoint,
-    PrelabelSuggestion,
+    PanDragModifier, PrelabelSuggestion,
 };
 
 use crate::theme;
@@ -122,7 +122,8 @@ pub struct CanvasState {
     draft_keypoint: Option<NormalizedPoint>,
     zoom: f32,
     pan: Vec2,
-    space_pan: bool,
+    modifier_pan: bool,
+    pan_drag_modifier: PanDragModifier,
     pan_mode: bool,
     pan_mode_required: bool,
     primary_pan: bool,
@@ -139,7 +140,8 @@ impl Default for CanvasState {
             draft_keypoint: None,
             zoom: MIN_ZOOM,
             pan: Vec2::ZERO,
-            space_pan: false,
+            modifier_pan: false,
+            pan_drag_modifier: PanDragModifier::default(),
             pan_mode: false,
             pan_mode_required: false,
             primary_pan: false,
@@ -195,6 +197,10 @@ impl CanvasState {
         self.zoom > MIN_ZOOM
     }
 
+    pub fn set_pan_drag_modifier(&mut self, modifier: PanDragModifier) {
+        self.pan_drag_modifier = modifier;
+    }
+
     pub fn toggle_pan_mode(&mut self) {
         if self.pan_mode_required {
             return;
@@ -217,7 +223,7 @@ impl CanvasState {
             return;
         }
         self.cancel_drag();
-        self.space_pan = false;
+        self.modifier_pan = false;
         self.primary_pan = false;
         self.pan_mode = false;
         self.pan_mode_required = required;
@@ -619,21 +625,33 @@ mod tests {
         start: Pos2,
         end: Pos2,
     ) {
+        drag_at_with_modifiers(harness, button, start, end, Modifiers::NONE);
+    }
+
+    fn drag_at_with_modifiers(
+        harness: &mut Harness<'_, InteractiveTestState>,
+        button: PointerButton,
+        start: Pos2,
+        end: Pos2,
+        modifiers: Modifiers,
+    ) {
+        harness.input_mut().modifiers = modifiers;
         harness.event(Event::PointerMoved(start));
         harness.event(Event::PointerButton {
             pos: start,
             button,
             pressed: true,
-            modifiers: Modifiers::NONE,
+            modifiers,
         });
         harness.event(Event::PointerMoved(end));
         harness.event(Event::PointerButton {
             pos: end,
             button,
             pressed: false,
-            modifiers: Modifiers::NONE,
+            modifiers,
         });
         harness.step();
+        harness.input_mut().modifiers = Modifiers::NONE;
     }
 
     fn stepped_primary_drag(
@@ -1322,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn middle_and_space_primary_drags_pan_without_annotating() {
+    fn middle_and_configured_primary_drags_pan_without_annotating() {
         let mut harness = canvas_harness(true);
         harness.state_mut().canvas.zoom_in();
         harness.state_mut().canvas.zoom_in();
@@ -1337,17 +1355,47 @@ mod tests {
         assert!(harness.state().actions.is_empty());
 
         let pan_before = harness.state().canvas.pan;
-        harness.key_down(Key::Space);
-        drag_at(
+        drag_at_with_modifiers(
             &mut harness,
             PointerButton::Primary,
             center,
             center - vec2(30.0, 10.0),
+            Modifiers::CTRL,
+        );
+        assert!(harness.state().canvas.pan.x < pan_before.x);
+        assert!(harness.state().actions.is_empty());
+
+        harness
+            .state_mut()
+            .canvas
+            .set_pan_drag_modifier(PanDragModifier::Alt);
+        let pan_before = harness.state().canvas.pan;
+        drag_at_with_modifiers(
+            &mut harness,
+            PointerButton::Primary,
+            center,
+            center + vec2(20.0, 5.0),
+            Modifiers::ALT,
+        );
+        assert!(harness.state().canvas.pan.x > pan_before.x);
+        assert!(harness.state().actions.is_empty());
+
+        harness.key_down(Key::Space);
+        drag_at(
+            &mut harness,
+            PointerButton::Primary,
+            center - vec2(20.0, 20.0),
+            center + vec2(20.0, 20.0),
         );
         harness.key_up(Key::Space);
         harness.step();
-        assert!(harness.state().canvas.pan.x < pan_before.x);
-        assert!(harness.state().actions.is_empty());
+        assert!(
+            matches!(
+                harness.state().actions.last(),
+                Some(CanvasAction::CreateBoundingBox(_))
+            ),
+            "Space must no longer turn a primary drag into a Pan gesture"
+        );
     }
 
     #[test]

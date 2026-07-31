@@ -8,6 +8,9 @@ use crate::{
 
 impl LabelloApp {
     pub(crate) fn workspace_canvas(&mut self, ui: &mut egui::Ui) {
+        self.work
+            .canvas
+            .set_pan_drag_modifier(self.work.keybindings.pan_drag_modifier);
         if self.manual_migration_active() {
             self.migration_workspace_canvas(ui);
             return;

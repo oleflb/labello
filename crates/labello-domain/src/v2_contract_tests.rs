@@ -525,12 +525,14 @@ fn current_schema_version_fields_are_present_at_persistence_boundaries() {
     };
     let offline_sync =
         OfflineSyncRequest::new(DatasetId::from("ds_1"), UserId::from("user_1"), Vec::new());
+    let keybindings_value = serde_json::to_value(keybindings).unwrap();
+    assert_eq!(keybindings_value["panDragModifier"], json!("control"));
 
     for value in [
         serde_json::to_value(config).unwrap(),
         serde_json::to_value(index).unwrap(),
         serde_json::to_value(state).unwrap(),
-        serde_json::to_value(keybindings).unwrap(),
+        keybindings_value,
         serde_json::to_value(snapshot).unwrap(),
         serde_json::to_value(offline_bundle).unwrap(),
         serde_json::to_value(offline_sync).unwrap(),

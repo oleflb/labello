@@ -79,6 +79,10 @@ mod tests {
         assert_eq!(loaded.bindings[&UserAction::PreviousImage].key, "ArrowLeft");
         assert_eq!(loaded.bindings[&UserAction::RefocusObject].key, "R");
         assert_eq!(loaded.bindings.len(), UserAction::ACTIVE.len());
+        assert_eq!(
+            loaded.pan_drag_modifier,
+            labello_domain::PanDragModifier::Control
+        );
 
         repo.save_keybindings(&loaded).await.unwrap();
         assert_eq!(repo.load_keybindings(&user_id).await.unwrap(), loaded);

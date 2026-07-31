@@ -233,12 +233,35 @@ impl std::fmt::Display for KeyChord {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PanDragModifier {
+    #[default]
+    Control,
+    Alt,
+    Shift,
+    Command,
+}
+
+impl std::fmt::Display for PanDragModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Control => "Ctrl",
+            Self::Alt => "Alt",
+            Self::Shift => "Shift",
+            Self::Command => "Cmd",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KeybindingSet {
     pub schema_version: u32,
     pub user_id: UserId,
     pub bindings: BTreeMap<UserAction, KeyChord>,
+    #[serde(default)]
+    pub pan_drag_modifier: PanDragModifier,
 }
 
 impl KeybindingSet {
@@ -284,41 +307,44 @@ impl KeybindingSet {
             schema_version: SCHEMA_VERSION,
             user_id,
             bindings,
+            pan_drag_modifier: PanDragModifier::default(),
         }
     }
 
     pub fn normalize(&mut self) {
         let defaults = Self::defaults_for(self.user_id.clone());
         let mut normalized = BTreeMap::new();
+        let mut occupied = Vec::new();
         for (action, chord) in std::mem::take(&mut self.bindings) {
             if action.is_active() {
-                let chord = available_chord(action, chord.normalized(), &normalized);
+                let chord = available_chord(action, chord.normalized(), &occupied);
+                occupied.push((action, chord.clone()));
                 normalized.insert(action, chord);
             }
         }
         for (action, chord) in defaults.bindings {
-            if !normalized.contains_key(&action) {
-                let chord = available_chord(action, chord, &normalized);
-                normalized.insert(action, chord);
+            if let std::collections::btree_map::Entry::Vacant(entry) = normalized.entry(action) {
+                let chord = available_chord(action, chord, &occupied);
+                occupied.push((action, chord.clone()));
+                entry.insert(chord);
             }
         }
         self.bindings = normalized;
     }
 
     pub fn conflicts(&self) -> Vec<(KeyChord, Vec<UserAction>)> {
+        let bindings = self
+            .bindings
+            .iter()
+            .filter(|(action, _)| action.is_active())
+            .collect::<Vec<_>>();
         let mut conflicts = Vec::new();
-        for (index, (action, chord)) in self.bindings.iter().enumerate() {
-            if !action.is_active() {
-                continue;
-            }
+        for (index, (action, chord)) in bindings.iter().enumerate() {
             let chord = chord.normalized();
-            let mut actions = vec![*action];
-            for (other, other_chord) in self.bindings.iter().skip(index + 1) {
-                if other.is_active()
-                    && action.can_conflict_with(*other)
-                    && chord == other_chord.normalized()
-                {
-                    actions.push(*other);
+            let mut actions = vec![**action];
+            for (other, other_chord) in bindings.iter().skip(index + 1) {
+                if action.can_conflict_with(**other) && chord == other_chord.normalized() {
+                    actions.push(**other);
                 }
             }
             if actions.len() > 1 {
@@ -372,7 +398,7 @@ impl KeybindingSet {
 fn available_chord(
     action: UserAction,
     preferred: KeyChord,
-    bindings: &BTreeMap<UserAction, KeyChord>,
+    bindings: &[(UserAction, KeyChord)],
 ) -> KeyChord {
     let available = |candidate: &KeyChord| {
         bindings.iter().all(|(other, chord)| {
@@ -491,6 +517,7 @@ mod tests {
             bindings.bindings[&UserAction::RefocusObject],
             bindings.bindings[&UserAction::RetryImageLoad]
         );
+        assert_eq!(bindings.pan_drag_modifier, PanDragModifier::Control);
     }
 
     #[test]
@@ -511,6 +538,7 @@ mod tests {
             "ArrowLeft"
         );
         assert_eq!(bindings.bindings.len(), UserAction::ACTIVE.len());
+        assert_eq!(bindings.pan_drag_modifier, PanDragModifier::Control);
         assert!(bindings.validate().is_ok());
     }
 
@@ -536,5 +564,15 @@ mod tests {
             bindings.bindings[&UserAction::UndoEdit],
             bindings.bindings[&UserAction::RedoEdit]
         );
+    }
+
+    #[test]
+    fn legacy_wire_data_gets_the_default_pan_drag_modifier() {
+        let defaults = KeybindingSet::defaults_for(UserId::from("user_1"));
+        let mut legacy = serde_json::to_value(&defaults).unwrap();
+        legacy.as_object_mut().unwrap().remove("panDragModifier");
+        let loaded: KeybindingSet = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(loaded.pan_drag_modifier, PanDragModifier::Control);
     }
 }

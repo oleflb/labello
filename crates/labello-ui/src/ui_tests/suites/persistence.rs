@@ -670,6 +670,89 @@ fn keybindings_are_editable_and_persisted() {
 }
 
 #[test]
+fn pan_drag_shortcut_is_listed_and_persists() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api.clone());
+    click_application_menu_item(&mut harness, "Settings");
+    harness.state_mut().work.shortcut_settings.search = "pan".to_string();
+    harness.set_size(egui::vec2(720.0, 700.0));
+    harness.step();
+    harness.step();
+
+    let pan_drag_name = harness
+        .query_all_by_value("Pan drag")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Label)
+        .expect("Pan drag name")
+        .rect();
+    let pan_drag_control = harness
+        .query_all_by_label_contains("Record shortcut for Pan drag: Ctrl")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("Pan drag recorder")
+        .rect();
+    let left_drag_hint = harness
+        .query_all_by_value("+ left-click drag")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Label)
+        .expect("implicit left-click drag hint")
+        .rect();
+    let middle_drag_hint = harness
+        .query_all_by_value("· middle-drag also pans")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Label)
+        .expect("fixed middle-drag hint")
+        .rect();
+    let reset_control = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Reset Pan drag shortcut")
+        .next()
+        .expect("Pan drag reset")
+        .rect();
+    assert!(
+        pan_drag_control.top() < left_drag_hint.bottom()
+            && left_drag_hint.top() < pan_drag_control.bottom()
+            && pan_drag_name.top() < middle_drag_hint.bottom()
+            && middle_drag_hint.top() < pan_drag_name.bottom()
+            && pan_drag_name.right() <= middle_drag_hint.left()
+            && middle_drag_hint.right() < pan_drag_control.left()
+            && pan_drag_control.right() < reset_control.right(),
+        "Pan drag name and hint should lead the right-aligned controls: \
+         name={pan_drag_name:?} middle={middle_drag_hint:?} \
+         control={pan_drag_control:?} left={left_drag_hint:?} reset={reset_control:?}"
+    );
+
+    click_accesskit_button(&mut harness, "Record shortcut for Pan drag: Ctrl");
+    assert!(harness.state().work.shortcut_settings.recording_pan_drag);
+    harness.input_mut().modifiers = egui::Modifiers::ALT;
+    harness.step();
+    harness.input_mut().modifiers = egui::Modifiers::NONE;
+    assert!(!harness.state().work.shortcut_settings.recording_pan_drag);
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .shortcut_settings
+            .draft
+            .as_ref()
+            .expect("settings draft")
+            .pan_drag_modifier,
+        labello_domain::PanDragModifier::Alt
+    );
+    assert!(
+        harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                "Record shortcut for Pan drag: Alt"
+            )
+            .is_some()
+    );
+
+    click_accesskit_button(&mut harness, "Save changes");
+    step_until(&mut harness, 8, |app| !app.loading.keybindings);
+    assert_eq!(api.counts().save_keybindings, 1);
+    assert_eq!(
+        harness.state().work.keybindings.pan_drag_modifier,
+        labello_domain::PanDragModifier::Alt
+    );
+}
+
+#[test]
 fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
     let api = Rc::new(SpyApi::new());
     let mut app = LabelloApp::default();

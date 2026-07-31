@@ -324,6 +324,21 @@ fn format_chord(ctx: &egui::Context, chord: &labello_domain::KeyChord) -> String
     ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
 }
 
+fn pan_drag_modifier_from_input(
+    modifiers: egui::Modifiers,
+) -> Option<labello_domain::PanDragModifier> {
+    if modifiers.ctrl {
+        Some(labello_domain::PanDragModifier::Control)
+    } else if modifiers.alt {
+        Some(labello_domain::PanDragModifier::Alt)
+    } else if modifiers.shift {
+        Some(labello_domain::PanDragModifier::Shift)
+    } else if modifiers.mac_cmd {
+        Some(labello_domain::PanDragModifier::Command)
+    } else {
+        None
+    }
+}
 fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Setup => "Setup",

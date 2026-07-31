@@ -403,6 +403,7 @@ pub(crate) struct ShortcutSettingsState {
     pub(crate) error: Option<String>,
     pub(crate) search: String,
     pub(crate) recording: Option<labello_domain::UserAction>,
+    pub(crate) recording_pan_drag: bool,
     pub(crate) confirm_discard: bool,
 }
 

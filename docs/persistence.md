@@ -56,7 +56,7 @@ or external integrations.
 | `annotations/<image-id>/events.jsonl` | Authoritative append-only audit and workflow history | Replay in sequence; never truncate, reorder, merge, or edit by hand |
 | `annotations/<image-id>/state.json` | Derived, rebuildable cache | Rebuilt automatically when absent, stale by event sequence, or on a supported older schema |
 | `labello.schema.json` | Generated schema bundle | Regenerated during supported artifact migration; do not treat it as annotation authority |
-| `users/<user-id>/keybindings.toml` | Authoritative user preference, not workflow state | Back up separately from Labello snapshots; normalize/migrate through storage |
+| `users/<user-id>/keybindings.toml` | Authoritative keyboard and pan-drag user shortcuts, not workflow state | Back up separately from Labello snapshots; normalize missing current bindings through storage |
 | `.labello/imports/<import-id>/manifest.json` | Authoritative committed import provenance | Must match the dataset and directory import ID |
 | `.labello/imports/<import-id>/source-objects.jsonl` | Authoritative committed source-object audit record | Preserve with its manifest and event history |
 | `.labello/migrations/...` | Durable migration journal and staged generation | Recovery state until migration completion; do not remove during an interrupted migration |

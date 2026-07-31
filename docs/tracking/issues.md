@@ -60,7 +60,10 @@ Only after that continue with the next issue.
 - [x] Mobile nav menu left drawer instead of burger menu
   - Completed on 2026-07-31 with a modal overflow-responsive navigation drawer,
     bounded short-viewport layout, dismissal behavior, and focus restoration.
-- [ ] Add an additional configurable shortcut for panning
+- [x] Add an additional configurable shortcut for panning
+  - Completed on 2026-07-31 with a persisted modifier for primary-button Pan
+    drag (`Ctrl+left-drag` by default) and the fixed middle-drag gesture listed
+    alongside it.
 - [ ] Search for assigned keys in the shortcut window
 - [ ] When in the overview after finishing all objects in the current image, all object should be clickable to directly edit them again.
 - [ ] Move statistics from separate view into an overlay, to not have to leave the current assignment. 

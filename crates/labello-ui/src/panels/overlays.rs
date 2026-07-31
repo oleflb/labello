@@ -305,6 +305,38 @@ impl LabelloApp {
             self.work.shortcut_settings.baseline = Some(draft.clone());
             self.work.shortcut_settings.draft = Some(draft);
         }
+        if !self.loading.keybindings && self.work.shortcut_settings.recording_pan_drag {
+            let (escape, modifiers) = ctx.input_mut(|input| {
+                let escape = input
+                    .events
+                    .iter()
+                    .rposition(|event| {
+                        matches!(
+                            event,
+                            egui::Event::Key {
+                                key: egui::Key::Escape,
+                                pressed: true,
+                                repeat: false,
+                                ..
+                            }
+                        )
+                    })
+                    .map(|index| {
+                        input.events.remove(index);
+                        true
+                    })
+                    .unwrap_or(false);
+                (escape, input.modifiers)
+            });
+            if escape {
+                self.work.shortcut_settings.recording_pan_drag = false;
+            } else if let Some(modifier) = pan_drag_modifier_from_input(modifiers) {
+                if let Some(draft) = self.work.shortcut_settings.draft.as_mut() {
+                    draft.pan_drag_modifier = modifier;
+                }
+                self.work.shortcut_settings.recording_pan_drag = false;
+            }
+        }
         if !self.loading.keybindings
             && let Some(action) = self.work.shortcut_settings.recording
         {
@@ -328,16 +360,14 @@ impl LabelloApp {
                 if key == egui::Key::Escape {
                     self.work.shortcut_settings.recording = None;
                 } else if let Some(draft) = self.work.shortcut_settings.draft.as_mut() {
-                    draft.bindings.insert(
-                        action,
-                        labello_domain::KeyChord {
-                            key: key.name().to_string(),
-                            ctrl: false,
-                            shift: modifiers.shift,
-                            alt: modifiers.alt,
-                            command: modifiers.command || modifiers.ctrl,
-                        },
-                    );
+                    let chord = labello_domain::KeyChord {
+                        key: key.name().to_string(),
+                        ctrl: false,
+                        shift: modifiers.shift,
+                        alt: modifiers.alt,
+                        command: modifiers.command || modifiers.ctrl,
+                    };
+                    draft.bindings.insert(action, chord);
                     self.work.shortcut_settings.recording = None;
                 }
             }
@@ -347,7 +377,9 @@ impl LabelloApp {
         let max_height = (screen.height() - 48.0).max(180.0);
         let width = (screen.width() - 48.0).clamp(240.0, 720.0);
         let mut record = None;
-        let mut reset_action = None;
+        let mut record_pan_drag = false;
+        let mut reset_binding = None;
+        let mut reset_pan_drag = false;
         let mut save = false;
         let mut cancel = false;
         let mut reset_all = false;
@@ -427,9 +459,17 @@ impl LabelloApp {
                             .draft
                             .as_ref()
                             .and_then(|draft| draft.bindings.get(&action))
+                            .cloned()
                         else {
                             continue;
                         };
+                        let pan_drag_modifier = self
+                            .work
+                            .shortcut_settings
+                            .draft
+                            .as_ref()
+                            .filter(|_| action == labello_domain::UserAction::TogglePanMode)
+                            .map(|draft| draft.pan_drag_modifier);
                         let recording = self.work.shortcut_settings.recording == Some(action);
                         let conflict = conflicting_actions.contains(&action);
                         theme::card_frame().show(ui, |ui| {
@@ -454,12 +494,12 @@ impl LabelloApp {
                                             )
                                         });
                                         if reset_response.clicked() {
-                                            reset_action = Some(action);
+                                            reset_binding = Some(action);
                                         }
                                         let text = if recording {
                                             "Press shortcut…".to_string()
                                         } else {
-                                            format_chord(ctx, chord)
+                                            format_chord(ctx, &chord)
                                         };
                                         let record_response = ui
                                             .add_enabled(
@@ -483,6 +523,87 @@ impl LabelloApp {
                                     },
                                 );
                             });
+                            if let Some(pan_drag_modifier) = pan_drag_modifier {
+                                let name_and_hint = |ui: &mut egui::Ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Pan drag");
+                                        ui.small(
+                                            RichText::new("· middle-drag also pans")
+                                                .color(theme::MUTED),
+                                        );
+                                    });
+                                };
+                                let mut controls = |ui: &mut egui::Ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let reset_response = ui.add_enabled(
+                                                !self.loading.keybindings,
+                                                egui::Button::new("Reset")
+                                                    .min_size(egui::vec2(64.0, 44.0)),
+                                            );
+                                            reset_response.widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Button,
+                                                    !self.loading.keybindings,
+                                                    "Reset Pan drag shortcut",
+                                                )
+                                            });
+                                            if reset_response.clicked() {
+                                                reset_pan_drag = true;
+                                            }
+                                            ui.label(
+                                                RichText::new("+ left-click drag")
+                                                    .color(theme::MUTED),
+                                            );
+                                            let recording =
+                                                self.work.shortcut_settings.recording_pan_drag;
+                                            let text = if recording {
+                                                if compact_footer {
+                                                    "Press…".to_string()
+                                                } else {
+                                                    "Press shortcut…".to_string()
+                                                }
+                                            } else {
+                                                pan_drag_modifier.to_string()
+                                            };
+                                            let record_response = ui
+                                                .add_enabled(
+                                                    !self.loading.keybindings,
+                                                    egui::Button::new(&text)
+                                                        .selected(recording)
+                                                        .min_size(egui::vec2(
+                                                            if compact_footer { 64.0 } else { 140.0 },
+                                                            44.0,
+                                                        )),
+                                                )
+                                                .on_hover_text("Record shortcut for Pan drag");
+                                            record_response.widget_info(|| {
+                                                egui::WidgetInfo::selected(
+                                                    egui::WidgetType::Button,
+                                                    !self.loading.keybindings,
+                                                    recording,
+                                                    format!(
+                                                        "Record shortcut for Pan drag: {text}"
+                                                    ),
+                                                )
+                                            });
+                                            if record_response.clicked() {
+                                                record_pan_drag = true;
+                                            }
+                                        },
+                                    );
+                                };
+                                if compact_footer {
+                                    name_and_hint(ui);
+                                    controls(ui);
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        name_and_hint(ui);
+                                        controls(ui);
+                                    });
+                                }
+                            }
                             if conflict {
                                 ui.label(
                                     RichText::new("Conflicts in this context").color(theme::DANGER),
@@ -581,29 +702,42 @@ impl LabelloApp {
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Window, true, "Settings"));
         if let Some(action) = record {
             self.work.shortcut_settings.recording = Some(action);
+            self.work.shortcut_settings.recording_pan_drag = false;
         }
-        if let Some(action) = reset_action {
-            let default = labello_domain::KeybindingSet::defaults_for(self.config.user_id.clone())
-                .bindings
-                .get(&action)
-                .cloned();
+        if record_pan_drag {
+            self.work.shortcut_settings.recording = None;
+            self.work.shortcut_settings.recording_pan_drag = true;
+        }
+        if let Some(action) = reset_binding {
+            let defaults =
+                labello_domain::KeybindingSet::defaults_for(self.config.user_id.clone());
+            let default = defaults.bindings.get(&action).cloned();
             if let (Some(draft), Some(default)) =
                 (self.work.shortcut_settings.draft.as_mut(), default)
             {
                 draft.bindings.insert(action, default);
             }
         }
+        if reset_pan_drag
+            && let Some(draft) = self.work.shortcut_settings.draft.as_mut()
+        {
+            draft.pan_drag_modifier = labello_domain::PanDragModifier::default();
+            self.work.shortcut_settings.recording_pan_drag = false;
+        }
         if reset_all {
             self.work.shortcut_settings.draft = Some(labello_domain::KeybindingSet::defaults_for(
                 self.config.user_id.clone(),
             ));
             self.work.shortcut_settings.recording = None;
+            self.work.shortcut_settings.recording_pan_drag = false;
         }
         if save {
             self.request_keybindings_save();
         }
         let dirty = self.work.shortcut_settings.draft != self.work.shortcut_settings.baseline;
         if cancel || (!self.loading.keybindings && response.should_close()) {
+            self.work.shortcut_settings.recording = None;
+            self.work.shortcut_settings.recording_pan_drag = false;
             if dirty {
                 self.work.shortcut_settings.confirm_discard = true;
                 self.work.show_settings = true;
@@ -630,6 +764,8 @@ impl LabelloApp {
                         self.work.shortcut_settings.draft = None;
                         self.work.shortcut_settings.baseline = None;
                         self.work.shortcut_settings.error = None;
+                        self.work.shortcut_settings.recording = None;
+                        self.work.shortcut_settings.recording_pan_drag = false;
                         self.work.show_settings = false;
                     }
                 });
