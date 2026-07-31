@@ -64,7 +64,9 @@ Only after that continue with the next issue.
   - Completed on 2026-07-31 with a persisted modifier for primary-button Pan
     drag (`Ctrl+left-drag` by default) and the fixed middle-drag gesture listed
     alongside it.
-- [ ] Search for assigned keys in the shortcut window
+- [x] Search for assigned keys in the shortcut window
+  - Completed on 2026-07-31 with chord, modifier, key-alias, conflict, and
+    assignment-status search across keyboard and Pan-drag shortcuts.
 - [ ] When in the overview after finishing all objects in the current image, all object should be clickable to directly edit them again.
 - [ ] Move statistics from separate view into an overlay, to not have to leave the current assignment. 
 - [ ] Current activity live stats in the bottom bar. 

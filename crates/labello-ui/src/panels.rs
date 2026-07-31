@@ -339,6 +339,84 @@ fn pan_drag_modifier_from_input(
         None
     }
 }
+
+fn shortcut_matches_query(
+    ctx: &egui::Context,
+    action: labello_domain::UserAction,
+    chord: Option<&labello_domain::KeyChord>,
+    pan_drag_modifier: Option<labello_domain::PanDragModifier>,
+    conflict: bool,
+    query: &str,
+) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+
+    let label = action_label(&action);
+    let category = action_category(action);
+    let description = action_description(action);
+    let mut searchable = format!("{label} {category} {description}").to_ascii_lowercase();
+    if let Some(chord) = chord {
+        let normalized = chord.normalized();
+        searchable.push(' ');
+        searchable.push_str(&format_chord(ctx, &normalized).to_ascii_lowercase());
+        searchable.push(' ');
+        searchable.push_str(&normalized.to_string().to_ascii_lowercase());
+        searchable.push(' ');
+        searchable.push_str(&normalized.key.to_ascii_lowercase());
+        searchable.push(' ');
+        searchable.push_str(shortcut_key_aliases(&normalized.key));
+        if normalized.ctrl || normalized.command {
+            searchable.push_str(" primary ctrl control command cmd meta super");
+        }
+        if normalized.shift {
+            searchable.push_str(" shift");
+        }
+        if normalized.alt {
+            searchable.push_str(" alt option");
+        }
+    }
+    if let Some(modifier) = pan_drag_modifier {
+        searchable.push_str(" left drag left-drag primary mouse button middle drag middle-drag");
+        searchable.push(' ');
+        searchable.push_str(&modifier.to_string().to_ascii_lowercase());
+        match modifier {
+            labello_domain::PanDragModifier::Control => {
+                searchable.push_str(" ctrl control");
+            }
+            labello_domain::PanDragModifier::Alt => searchable.push_str(" alt option"),
+            labello_domain::PanDragModifier::Shift => searchable.push_str(" shift"),
+            labello_domain::PanDragModifier::Command => {
+                searchable.push_str(" command cmd meta super");
+            }
+        }
+    }
+
+    let assigned = chord.is_some();
+    query.split_whitespace().all(|term| match term {
+        "assigned" => assigned,
+        "unassigned" => !assigned,
+        "conflict" | "conflicts" | "conflicting" => conflict,
+        _ => searchable.contains(term),
+    })
+}
+
+fn shortcut_key_aliases(key: &str) -> &'static str {
+    match key.to_ascii_lowercase().as_str() {
+        "arrowleft" => "left arrow",
+        "arrowright" => "right arrow",
+        "arrowup" => "up arrow",
+        "arrowdown" => "down arrow",
+        "," => "comma",
+        "." => "period dot",
+        "+" => "plus",
+        "-" => "minus",
+        "?" => "question mark",
+        _ => "",
+    }
+}
+
 fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Setup => "Setup",

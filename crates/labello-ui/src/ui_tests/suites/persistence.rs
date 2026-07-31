@@ -753,6 +753,125 @@ fn pan_drag_shortcut_is_listed_and_persists() {
 }
 
 #[test]
+fn shortcut_search_includes_assigned_keys_modifiers_and_status() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    click_application_menu_item(&mut harness, "Settings");
+
+    harness.state_mut().work.shortcut_settings.search = "control left-drag".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Toggle Pan mode")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_none()
+    );
+
+    harness.state_mut().work.shortcut_settings.search = "middle-drag".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Toggle Pan mode")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_none()
+    );
+
+    harness.state_mut().work.shortcut_settings.search = "space".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Undo annotation edit")
+            .is_none()
+    );
+
+    harness.state_mut().work.shortcut_settings.search = "assigned control z".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Undo annotation edit")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_none()
+    );
+
+    let draft = harness
+        .state_mut()
+        .work
+        .shortcut_settings
+        .draft
+        .as_mut()
+        .expect("settings draft");
+    let conflicting_chord =
+        draft.bindings[&labello_domain::UserAction::MarkKeypointAbsent].clone();
+    draft
+        .bindings
+        .insert(labello_domain::UserAction::NextImage, conflicting_chord);
+    harness.state_mut().work.shortcut_settings.search = "conflict".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Mark keypoint as not present")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Undo annotation edit")
+            .is_none()
+    );
+
+    harness
+        .state_mut()
+        .work
+        .shortcut_settings
+        .draft
+        .as_mut()
+        .expect("settings draft")
+        .bindings
+        .remove(&labello_domain::UserAction::FitImage);
+    harness.state_mut().work.shortcut_settings.search = "unassigned".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("Record shortcut for Fit image: Unassigned")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Record shortcut for Submit and next")
+            .is_none()
+    );
+
+    harness.state_mut().work.shortcut_settings.search = "no-such-shortcut".to_string();
+    harness.step();
+    assert!(
+        harness
+            .query_by_label("No shortcuts match your search.")
+            .is_some()
+    );
+}
+
+#[test]
 fn failed_shortcut_save_keeps_the_draft_and_shows_the_error_in_settings() {
     let api = Rc::new(SpyApi::new());
     let mut app = LabelloApp::default();

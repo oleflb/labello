@@ -404,7 +404,7 @@ impl LabelloApp {
                 ui.add_sized(
                     [ui.available_width(), theme::COMPACT_TEXT_FIELD_HEIGHT],
                     theme::singleline_text_edit(&mut self.work.shortcut_settings.search)
-                        .hint_text("Search by action or category"),
+                        .hint_text("Search actions, categories, or keys"),
                 )
                 .labelled_by(search_label.id);
                 ui.add_space(8.0);
@@ -433,36 +433,20 @@ impl LabelloApp {
                 } else {
                     (screen.height() - 300.0).clamp(180.0, 520.0)
                 };
+                let mut visible_action_count = 0;
                 let mut action_list = |ui: &mut egui::Ui| {
                     let mut current_category = "";
                     for action in labello_domain::UserAction::ACTIVE {
                         let label = action_label(&action);
                         let category = action_category(action);
                         let description = action_description(action);
-                        if !query.is_empty()
-                            && !label.to_ascii_lowercase().contains(&query)
-                            && !category.to_ascii_lowercase().contains(&query)
-                            && !description.to_ascii_lowercase().contains(&query)
-                        {
-                            continue;
-                        }
-                        if category != current_category {
-                            if !current_category.is_empty() {
-                                ui.add_space(8.0);
-                            }
-                            current_category = category;
-                            ui.heading(RichText::new(category).size(16.0));
-                        }
-                        let Some(chord) = self
+                        let chord = self
                             .work
                             .shortcut_settings
                             .draft
                             .as_ref()
                             .and_then(|draft| draft.bindings.get(&action))
-                            .cloned()
-                        else {
-                            continue;
-                        };
+                            .cloned();
                         let pan_drag_modifier = self
                             .work
                             .shortcut_settings
@@ -472,6 +456,24 @@ impl LabelloApp {
                             .map(|draft| draft.pan_drag_modifier);
                         let recording = self.work.shortcut_settings.recording == Some(action);
                         let conflict = conflicting_actions.contains(&action);
+                        if !shortcut_matches_query(
+                            ctx,
+                            action,
+                            chord.as_ref(),
+                            pan_drag_modifier,
+                            conflict,
+                            &query,
+                        ) {
+                            continue;
+                        }
+                        visible_action_count += 1;
+                        if category != current_category {
+                            if !current_category.is_empty() {
+                                ui.add_space(8.0);
+                            }
+                            current_category = category;
+                            ui.heading(RichText::new(category).size(16.0));
+                        }
                         theme::card_frame().show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.vertical(|ui| {
@@ -499,7 +501,10 @@ impl LabelloApp {
                                         let text = if recording {
                                             "Press shortcut…".to_string()
                                         } else {
-                                            format_chord(ctx, &chord)
+                                            chord
+                                                .as_ref()
+                                                .map(|chord| format_chord(ctx, chord))
+                                                .unwrap_or_else(|| "Unassigned".to_string())
                                         };
                                         let record_response = ui
                                             .add_enabled(
@@ -619,6 +624,9 @@ impl LabelloApp {
                     egui::ScrollArea::vertical()
                         .max_height(scroll_height)
                         .show(ui, |ui| action_list(ui));
+                }
+                if visible_action_count == 0 && !query.is_empty() {
+                    ui.label(RichText::new("No shortcuts match your search.").color(theme::MUTED));
                 }
                 if !conflicts.is_empty() {
                     theme::inline_message(
