@@ -331,6 +331,12 @@ impl LabelloApp {
             UserAction::FitImage if self.work_view() && self.work.current.is_some() => {
                 self.work.canvas.fit_view()
             }
+            UserAction::RefocusObject
+                if self.work.current.is_some()
+                    && (self.view == AppView::Review || self.manual_migration_active()) =>
+            {
+                self.refocus_active_object();
+            }
             UserAction::AcceptReviewObject if self.view == AppView::Review => {
                 if self.work.correction_draft.is_none() {
                     self.request_review(labello_domain::ReviewDecision::Approved);

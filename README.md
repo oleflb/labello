@@ -199,14 +199,16 @@ staged until `Save changes` is selected.
 The canvas zooms with two-finger touchpad movement, pinch, or the configured
 zoom keys. Press `P` to toggle Pan mode, then left-drag a zoomed image. Press
 `P` or `Escape` to return to annotation input. Space+left-drag, middle-drag,
-touch gestures, and double-click-to-fit remain available.
+touch gestures, and double-click-to-fit remain available. Use Refocus in the
+workspace context bar, or press its configurable shortcut (`R` by default), to
+center and zoom to the active review object or guided-migration guide.
 
 Approval review keeps Pan mode active so primary drag moves the focused image
 without an extra mode switch. Starting a reviewer correction returns primary
 drag to object editing; Space+left-drag and middle-drag still pan while
-correcting. The review inspector can refocus the active object using its current
-correction geometry without leaving the assignment. Guided migration review can
-likewise refocus its active canonical guide.
+correcting. Refocus uses the active object's current correction geometry without
+leaving the assignment. Guided migration review likewise refocuses its active
+canonical guide.
 
 While placing or revising a skeleton, drag any already placed keypoint on the
 selected object to correct its position. This works for ordinary annotation,

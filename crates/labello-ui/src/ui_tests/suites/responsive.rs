@@ -596,6 +596,7 @@ fn compact_long_work_context_preserves_canvas_and_controls() {
                 height,
             );
         }
+        assert!(harness.query_by_label_contains("Refocus object").is_none());
         let workflow = harness
             .get_by_label("A deliberately long workflow name for compact layout testing")
             .rect();
@@ -734,6 +735,10 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
     harness.step();
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
     click(&mut harness, "Fit");
+    harness.key_press(egui::Key::R);
+    harness.step();
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+    click(&mut harness, "Fit");
 
     for (width, height) in viewport_sizes() {
         harness.set_size(egui::vec2(width, height));
@@ -748,6 +753,15 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 height,
             );
         }
+        let context = harness.get_by_label("Workspace context bar").rect();
+        let refocus = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Refocus object R")
+            .rect();
+        assert!(
+            refocus.top() >= context.top() && refocus.bottom() <= context.bottom(),
+            "Refocus must stay in the second top bar at {width}x{height}: \
+             refocus={refocus:?} context={context:?}",
+        );
         let layout = LayoutMode::for_width(width);
         let (approve, reject) = if layout != LayoutMode::Wide {
             ("Accept", "Reject")
@@ -788,7 +802,6 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
                 "review decisions must fill the bottom bar at {width}x{height}: \
                  approve={approve_rect:?} reject={reject_rect:?}",
             );
-            let context = harness.get_by_label("Workspace context bar").rect();
             for label in ["Workflow", "Inspector"] {
                 let panel = harness
                     .get_by_role_and_label(egui::accesskit::Role::Button, label)
@@ -816,7 +829,15 @@ fn review_primary_decisions_stay_visible_at_supported_viewports() {
 
     harness.set_size(egui::vec2(320.0, 320.0));
     harness.step();
-    for label in ["Pan", "Zoom out", "Zoom in", "Fit", "Accept", "Reject"] {
+    for label in [
+        "Pan",
+        "Zoom out",
+        "Zoom in",
+        "Fit",
+        "Refocus object R",
+        "Accept",
+        "Reject",
+    ] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
     }
 

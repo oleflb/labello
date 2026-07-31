@@ -287,6 +287,9 @@ impl LabelloApp {
 
     fn canvas_controls(&mut self, ui: &mut egui::Ui, layout: LayoutMode) {
         ui.horizontal(|ui| {
+            let show_refocus = self.view == AppView::Review || self.manual_migration_active();
+            let dense = show_refocus
+                && (layout != LayoutMode::Wide || ui.ctx().content_rect().width() < 1366.0);
             let pan_shortcut =
                 self.shortcut_text(ui.ctx(), labello_domain::UserAction::TogglePanMode);
             let pan_required = self.work.canvas.pan_mode_required();
@@ -325,10 +328,12 @@ impl LabelloApp {
                 self.trigger_user_action(labello_domain::UserAction::ZoomOut);
             }
 
-            ui.add_sized(
-                [48.0, 44.0],
-                egui::Label::new(format!("{:.0}%", self.work.canvas.current_zoom() * 100.0)),
-            );
+            if !dense {
+                ui.add_sized(
+                    [48.0, 44.0],
+                    egui::Label::new(format!("{:.0}%", self.work.canvas.current_zoom() * 100.0)),
+                );
+            }
 
             let zoom_in_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::ZoomIn);
             let can_zoom_in = self.work.canvas.can_zoom_in();
@@ -344,6 +349,36 @@ impl LabelloApp {
                 self.trigger_user_action(labello_domain::UserAction::ZoomIn);
             }
 
+            if show_refocus {
+                let refocus_shortcut =
+                    self.shortcut_text(ui.ctx(), labello_domain::UserAction::RefocusObject);
+                let can_refocus = self.refocus_annotation().is_some();
+                let refocus_label = format!("Refocus object {refocus_shortcut}");
+                let button = if dense {
+                    egui::Button::new(egui::RichText::new("◎").size(20.0))
+                        .min_size(egui::vec2(44.0, 44.0))
+                } else {
+                    egui::Button::new("Refocus")
+                        .shortcut_text(&refocus_shortcut)
+                        .min_size(egui::vec2(0.0, 44.0))
+                };
+                let response = theme::quiet_button(ui, can_refocus, button)
+                    .on_disabled_hover_text("Select an object to refocus.")
+                    .on_hover_text(format!(
+                        "Refocus object ({refocus_shortcut}). Center and zoom to the active object."
+                    ));
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        can_refocus,
+                        refocus_label.clone(),
+                    )
+                });
+                if response.clicked() {
+                    self.trigger_user_action(labello_domain::UserAction::RefocusObject);
+                }
+            }
+
             let fit_shortcut = self.shortcut_text(ui.ctx(), labello_domain::UserAction::FitImage);
             let fit = egui::Button::new("Fit").min_size(egui::vec2(44.0, 44.0));
             if ui
@@ -353,6 +388,7 @@ impl LabelloApp {
             {
                 self.trigger_user_action(labello_domain::UserAction::FitImage);
             }
+
             if layout == LayoutMode::Wide {
                 self.workflow_panel_toggle(ui);
                 self.inspector_panel_toggle(ui);

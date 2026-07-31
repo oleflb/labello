@@ -503,11 +503,6 @@ impl LabelloApp {
         });
         let target_available = self.migration_expectation(&group_id).is_some();
         let guide_valid = guide.as_ref().is_some_and(|guide| !guide.deleted);
-        if let Some(guide) = guide.as_ref().filter(|guide| !guide.deleted)
-            && ui.small_button("Refocus box").clicked()
-        {
-            self.work.canvas.focus_annotation(guide);
-        }
         let dependency = self
             .work
             .current_state
@@ -1031,13 +1026,6 @@ impl LabelloApp {
         ui.label(RichText::new("Migration review").strong());
         if let Some(target) = targets.get(self.work.migration.review_index) {
             let status = self.migration_disposition(&target.object_group_id);
-            let guide = self
-                .work
-                .current_state
-                .as_ref()
-                .and_then(|state| state.current_annotation(&target.guide_annotation_id))
-                .filter(|guide| !guide.deleted)
-                .cloned();
             theme::compact_metric(
                 ui,
                 "Review target",
@@ -1059,14 +1047,6 @@ impl LabelloApp {
                 }
             } else {
                 ui.label("Review the skeleton against the read-only canonical guide.");
-            }
-            if let Some(guide) = guide
-                && ui
-                    .small_button("Refocus object")
-                    .on_hover_text("Center and zoom the active migration object on the canvas.")
-                    .clicked()
-            {
-                self.work.canvas.focus_annotation(&guide);
             }
             let review_target = self.work.current_state.as_ref().and_then(|state| {
                 let disposition = state
@@ -2136,6 +2116,16 @@ impl LabelloApp {
             self.work.migration.pending_activate_target = Some(clicked_group_id);
             self.request_skip_migration_target(active_group_id);
         }
+    }
+
+    pub(crate) fn current_migration_guide(&self) -> Option<AnnotationVersion> {
+        let (_, target) = self.migration_active_target()?;
+        self.work
+            .current_state
+            .as_ref()?
+            .current_annotation(&target.guide_annotation_id)
+            .filter(|guide| !guide.deleted)
+            .cloned()
     }
 
     fn migration_active_target(&self) -> Option<(ObjectGroupId, labello_domain::MigrationTarget)> {

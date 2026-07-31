@@ -124,6 +124,31 @@ impl LabelloApp {
         annotation.task_id == task.task_id && &annotation.class_id == class_id
     }
 
+    pub(crate) fn refocus_annotation(&self) -> Option<labello_domain::AnnotationVersion> {
+        if self.manual_migration_active() {
+            return self.current_migration_guide();
+        }
+        if self.view != AppView::Review {
+            return None;
+        }
+        let mut annotation = self.current_review_annotation()?.clone();
+        if let Some(draft) = self
+            .work
+            .correction_draft
+            .as_ref()
+            .filter(|draft| draft.annotation_id == annotation.annotation_id)
+        {
+            annotation.geometry = draft.edited_geometry.clone();
+        }
+        Some(annotation)
+    }
+
+    pub(crate) fn refocus_active_object(&mut self) {
+        if let Some(annotation) = self.refocus_annotation() {
+            self.work.canvas.focus_annotation(&annotation);
+        }
+    }
+
     pub(crate) fn has_dataset_role(&self, role: DatasetRole) -> bool {
         self.datasets
             .summaries

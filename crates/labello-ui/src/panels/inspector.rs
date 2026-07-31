@@ -258,7 +258,6 @@ impl LabelloApp {
         let (phase, value, explanation) = self.review_phase();
         theme::compact_metric(ui, phase, value);
         ui.label(explanation);
-        self.review_refocus_button(ui);
         if self.can_correct_review_object() {
             ui.add_space(8.0);
             if ui
@@ -271,27 +270,6 @@ impl LabelloApp {
         }
         if show_primary_actions {
             ui.horizontal_wrapped(|ui| self.review_decision_buttons(ui, false, false));
-        }
-    }
-
-    fn review_refocus_button(&mut self, ui: &mut egui::Ui) {
-        let Some(mut annotation) = self.current_review_annotation().cloned() else {
-            return;
-        };
-        if let Some(draft) = self
-            .work
-            .correction_draft
-            .as_ref()
-            .filter(|draft| draft.annotation_id == annotation.annotation_id)
-        {
-            annotation.geometry = draft.edited_geometry.clone();
-        }
-        if ui
-            .small_button("Refocus object")
-            .on_hover_text("Center and zoom the active review object on the canvas.")
-            .clicked()
-        {
-            self.work.canvas.focus_annotation(&annotation);
         }
     }
 
@@ -361,7 +339,6 @@ impl LabelloApp {
         ui.separator();
         ui.heading("Correction mode");
         ui.label("Only the highlighted existing object can be edited.");
-        self.review_refocus_button(ui);
 
         let skeleton_keypoints = self.work.correction_draft.as_ref().and_then(|draft| {
             let AnnotationGeometry::Skeleton(skeleton) = &draft.edited_geometry else {

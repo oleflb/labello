@@ -156,6 +156,7 @@ fn action_label(action: &labello_domain::UserAction) -> &'static str {
         UserAction::ZoomIn => "Zoom in",
         UserAction::ZoomOut => "Zoom out",
         UserAction::FitImage => "Fit image",
+        UserAction::RefocusObject => "Refocus active object",
         UserAction::PreviousImage => "Previous assignment",
         UserAction::SaveAnnotations => "Save annotations",
         UserAction::DeleteAnnotation => "Delete annotation",
@@ -192,7 +193,8 @@ fn action_category(action: labello_domain::UserAction) -> &'static str {
         UserAction::TogglePanMode
         | UserAction::ZoomIn
         | UserAction::ZoomOut
-        | UserAction::FitImage => "Canvas",
+        | UserAction::FitImage
+        | UserAction::RefocusObject => "Canvas",
         UserAction::OpenTutorial
         | UserAction::ToggleWorkflowPanel
         | UserAction::ToggleInspectorPanel
@@ -236,6 +238,7 @@ fn action_description(action: labello_domain::UserAction) -> &'static str {
         UserAction::ZoomIn => "Increase canvas magnification.",
         UserAction::ZoomOut => "Decrease canvas magnification.",
         UserAction::FitImage => "Fit and center the image.",
+        UserAction::RefocusObject => "Center and zoom to the active review or migration object.",
         UserAction::AcceptReviewObject => "Approve the current review object.",
         UserAction::RejectReviewObject => "Reject the current review object.",
         UserAction::PreviousImage => "Return to the last skipped or submitted assignment.",

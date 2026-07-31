@@ -615,6 +615,18 @@ fn keybindings_are_editable_and_persisted() {
     assert!(harness.query_by_label("Keyboard shortcuts").is_none());
     click_application_menu_item(&mut harness, "Settings");
     assert!(harness.query_by_label("Keyboard shortcuts").is_some());
+    assert!(harness.query_by_label("Refocus active object").is_some());
+    assert_eq!(
+        harness
+            .state()
+            .work
+            .shortcut_settings
+            .draft
+            .as_ref()
+            .unwrap()
+            .bindings[&labello_domain::UserAction::RefocusObject],
+        labello_domain::KeyChord::new("R")
+    );
     click_accesskit_button(&mut harness, "Record shortcut for Submit and next");
     assert_eq!(
         harness.state().work.shortcut_settings.recording,

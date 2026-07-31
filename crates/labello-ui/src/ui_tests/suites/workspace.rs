@@ -1498,6 +1498,24 @@ fn skip_releases_then_claims_another_assignment() {
 }
 
 #[test]
+fn annotation_workspace_does_not_offer_refocus() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    harness.state_mut().create_bbox(BoundingBox {
+        x: 0.2,
+        y: 0.2,
+        width: 0.2,
+        height: 0.2,
+    });
+    harness.step();
+    assert!(harness.query_by_label_contains("Refocus object").is_none());
+
+    harness.key_press(egui::Key::R);
+    harness.step();
+    assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
+}
+
+#[test]
 fn review_refocus_restores_the_active_object_view() {
     let api = Rc::new(SpyApi::new());
     seed_review_annotation(
@@ -1508,24 +1526,59 @@ fn review_refocus_restores_the_active_object_view() {
             width: 0.2,
             height: 0.2,
         }),
-        false,
+        true,
     );
     let mut harness = loaded_review_harness(api);
+    harness.state_mut().work.keybindings.bindings.insert(
+        labello_domain::UserAction::RefocusObject,
+        labello_domain::KeyChord::new("F"),
+    );
+    harness.step();
 
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
+    let refocus = harness.get_by_label("Refocus object F");
+    assert!(refocus.rect().height() >= 44.0);
+
     click(&mut harness, "Fit");
     assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
-
-    click_accesskit_button(&mut harness, "Refocus object");
+    harness.key_press(egui::Key::F);
+    harness.step();
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
+
+    click(&mut harness, "Fit");
+    click_accesskit_button(&mut harness, "Refocus object F");
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
+
+    let review_zoom = harness.state().work.canvas.current_zoom();
+    harness.state_mut().start_correction();
+    harness
+        .state_mut()
+        .work
+        .correction_draft
+        .as_mut()
+        .unwrap()
+        .edited_geometry = AnnotationGeometry::BoundingBox(BoundingBox {
+        x: 0.45,
+        y: 0.45,
+        width: 0.02,
+        height: 0.02,
+    });
+    click(&mut harness, "Fit");
+    harness.key_press(egui::Key::F);
+    harness.step();
+    assert!(
+        harness.state().work.canvas.current_zoom() > review_zoom,
+        "review correction refocus must use the draft geometry"
+    );
 
     harness.state_mut().work.review_index = 1;
     harness.step();
     assert!(
         harness
-            .query_by_role_and_label(egui::accesskit::Role::Button, "Refocus object")
-            .is_none(),
-        "the full-image review phase must not offer an object refocus action"
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Refocus object F")
+            .accesskit_node()
+            .is_disabled(),
+        "the stable context-bar control must be disabled during full-image review"
     );
 }
 

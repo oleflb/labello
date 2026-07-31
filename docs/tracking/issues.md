@@ -54,7 +54,9 @@ Only after that continue with the next issue.
 - [x] Center-align the workflow inspector mobile overlay horizontally
   - Completed on 2026-07-31 by aligning Workflow center-left and Inspector
     center-right across responsive layouts.
-- [ ] Refocus buttons should have a shortcut and look better.
+- [x] Refocus buttons should have a shortcut and look better.
+  - Completed on 2026-07-31 with a configurable Refocus Object action,
+    touch-sized controls, shortcut labels, and clearer accessible descriptions.
 - [ ] Mobile nav menu left drawer instead of burger menu
 - [ ] Add an additional configurable shortcut for panning
 - [ ] Search for assigned keys in the shortcut window

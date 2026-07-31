@@ -33,6 +33,7 @@ pub enum UserAction {
     ZoomIn,
     ZoomOut,
     FitImage,
+    RefocusObject,
     PreviousImage,
     SaveAnnotations,
     DeleteAnnotation,
@@ -56,7 +57,7 @@ pub enum ActionContext {
 }
 
 impl UserAction {
-    pub const ACTIVE: [Self; 29] = [
+    pub const ACTIVE: [Self; 30] = [
         Self::NextImage,
         Self::PreviousImage,
         Self::UndoEdit,
@@ -84,6 +85,7 @@ impl UserAction {
         Self::ZoomIn,
         Self::ZoomOut,
         Self::FitImage,
+        Self::RefocusObject,
         Self::AcceptReviewObject,
         Self::RejectReviewObject,
     ];
@@ -99,9 +101,11 @@ impl UserAction {
             | Self::ToggleInspectorPanel
             | Self::OpenSettings
             | Self::SkipAssignment => ActionContext::WorkWorkspace,
-            Self::TogglePanMode | Self::ZoomIn | Self::ZoomOut | Self::FitImage => {
-                ActionContext::WorkImage
-            }
+            Self::TogglePanMode
+            | Self::ZoomIn
+            | Self::ZoomOut
+            | Self::FitImage
+            | Self::RefocusObject => ActionContext::WorkImage,
             Self::SelectPreviousWorkflow | Self::SelectNextWorkflow => {
                 ActionContext::AnnotateWorkspace
             }
@@ -273,6 +277,7 @@ impl KeybindingSet {
         bindings.insert(UserAction::ZoomIn, KeyChord::new("+"));
         bindings.insert(UserAction::ZoomOut, KeyChord::new("-"));
         bindings.insert(UserAction::FitImage, KeyChord::new("0"));
+        bindings.insert(UserAction::RefocusObject, KeyChord::new("R"));
         bindings.insert(UserAction::AcceptReviewObject, KeyChord::new("Y"));
         bindings.insert(UserAction::RejectReviewObject, KeyChord::new("N"));
         Self {
@@ -477,6 +482,14 @@ mod tests {
         assert_eq!(
             bindings.bindings[&UserAction::AddMissingObject],
             KeyChord::new("M")
+        );
+        assert_eq!(
+            bindings.bindings[&UserAction::RefocusObject],
+            KeyChord::new("R")
+        );
+        assert_eq!(
+            bindings.bindings[&UserAction::RefocusObject],
+            bindings.bindings[&UserAction::RetryImageLoad]
         );
     }
 

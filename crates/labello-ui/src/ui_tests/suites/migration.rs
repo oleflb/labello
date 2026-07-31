@@ -1457,6 +1457,41 @@ fn migration_decision_summary_counts_positioned_and_not_present_keypoints() {
 
 #[cfg(feature = "inspector-presets")]
 #[test]
+fn migration_refocus_is_touch_sized_and_uses_its_configured_shortcut() {
+    use crate::inspector_presets::{self, InspectorPreset};
+
+    let mut app =
+        inspector_presets::build(InspectorPreset::MigrationObject, &egui::Context::default());
+    app.work.keybindings.bindings.insert(
+        labello_domain::UserAction::RefocusObject,
+        labello_domain::KeyChord::new("F"),
+    );
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_eframe(|_| app);
+    harness.step();
+
+    let refocus = harness.get_by_label("Refocus object F");
+    let context = harness.get_by_label("Workspace context bar").rect();
+    assert!(refocus.rect().height() >= 44.0);
+    assert!(refocus.rect().top() >= context.top() && refocus.rect().bottom() <= context.bottom());
+
+    harness.state_mut().work.canvas.fit_view();
+    harness.step();
+    assert_eq!(harness.state().work.canvas.zoom(), 1.0);
+    harness.key_press(egui::Key::F);
+    harness.step();
+    assert!(harness.state().work.canvas.zoom() > 1.0);
+
+    harness.state_mut().work.canvas.fit_view();
+    harness.step();
+    click_accesskit_button(&mut harness, "Refocus object F");
+    harness.step();
+    assert!(harness.state().work.canvas.zoom() > 1.0);
+}
+
+#[cfg(feature = "inspector-presets")]
+#[test]
 fn migration_save_uses_the_contextual_submit_shortcut() {
     use crate::inspector_presets::{self, InspectorPreset};
     use crate::manual_migration::ManualMigrationState;
@@ -1516,18 +1551,31 @@ fn migration_save_uses_the_contextual_submit_shortcut() {
 fn migration_review_refocus_restores_the_active_guide_view() {
     use crate::inspector_presets::{self, InspectorPreset};
 
-    let app =
+    let mut app =
         inspector_presets::build(InspectorPreset::MigrationReview, &egui::Context::default());
+    app.work.keybindings.bindings.insert(
+        labello_domain::UserAction::RefocusObject,
+        labello_domain::KeyChord::new("F"),
+    );
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .build_eframe(|_| app);
     harness.step();
 
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
+    let refocus = harness.get_by_label("Refocus object F");
+    let context = harness.get_by_label("Workspace context bar").rect();
+    assert!(refocus.rect().height() >= 44.0);
+    assert!(refocus.rect().top() >= context.top() && refocus.rect().bottom() <= context.bottom());
+
     click(&mut harness, "Fit");
     assert_eq!(harness.state().work.canvas.current_zoom(), 1.0);
+    harness.key_press(egui::Key::F);
+    harness.step();
+    assert!(harness.state().work.canvas.current_zoom() > 1.0);
 
-    click_accesskit_button(&mut harness, "Refocus object");
+    click(&mut harness, "Fit");
+    click_accesskit_button(&mut harness, "Refocus object F");
     assert!(harness.state().work.canvas.current_zoom() > 1.0);
 }
 

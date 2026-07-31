@@ -299,11 +299,8 @@ fn import_and_migration_presets_are_accessible_at_desktop_mobile_and_short_sizes
             .is_some()
     );
     assert!(annotated.query_by_label("Reopen excluded target").is_none());
-    assert!(
-        annotated
-            .query_by_label("Refocus box")
-            .is_some()
-    );
+    let refocus = annotated.get_by_label("Refocus object R");
+    assert!(refocus.rect().height() >= 44.0);
 }
 
 #[test]
