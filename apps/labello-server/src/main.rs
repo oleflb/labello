@@ -2,62 +2,14 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, bail};
 use labello_api::{ApiState, GithubOAuthConfig, router};
+use labello_config::{GithubOAuthFileConfig, ServerConfig};
 use labello_domain::UserId;
 use labello_storage::ImportService;
-use serde::{Deserialize, Serialize};
 
 mod import_config;
 mod logging;
 
-use import_config::{ImportFileConfig, import_root_owners, storage_import_config};
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ServerConfig {
-    bind: String,
-    datasets_root: String,
-    bootstrap_admins: Vec<String>,
-    browser_origins: Vec<String>,
-    session_cookie_secure: bool,
-    development_auth: DevelopmentAuthConfig,
-    github_oauth: Option<GithubOAuthFileConfig>,
-    #[serde(default)]
-    import: Option<ImportFileConfig>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DevelopmentAuthConfig {
-    local_admin_login: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct GithubOAuthFileConfig {
-    client_id: String,
-    client_secret: String,
-    redirect_uri: String,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            bind: "127.0.0.1:8080".to_string(),
-            datasets_root: "datasets".to_string(),
-            bootstrap_admins: vec!["admin".to_string()],
-            browser_origins: vec![
-                "http://127.0.0.1:8081".to_string(),
-                "http://localhost:8081".to_string(),
-            ],
-            session_cookie_secure: false,
-            development_auth: DevelopmentAuthConfig {
-                local_admin_login: true,
-            },
-            github_oauth: None,
-            import: None,
-        }
-    }
-}
+use import_config::{import_root_owners, storage_import_config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -127,7 +79,8 @@ fn load_or_create_config() -> anyhow::Result<ServerConfig> {
     if path.exists() {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read server config {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("invalid server config {}", path.display()))
+        ServerConfig::parse(&text)
+            .with_context(|| format!("invalid server config {}", path.display()))
     } else {
         let config = ServerConfig::default();
         if let Some(parent) = path.parent()
@@ -207,7 +160,7 @@ mod tests {
 
     use labello_storage::ImportLimits;
 
-    use crate::import_config::{ImportLimitsFileConfig, ImportRootFileConfig};
+    use labello_config::{ImportFileConfig, ImportLimitsFileConfig, ImportRootFileConfig};
 
     use super::*;
 
@@ -308,6 +261,10 @@ localAdminLogin = false
 
     #[test]
     fn import_limits_default_individually_and_convert_exactly() {
+        assert_eq!(
+            labello_config::MAX_IMAGE_VALIDATION_WORKERS,
+            labello_storage::MAX_IMAGE_VALIDATION_WORKERS
+        );
         let configured = format!(
             "{CONFIG}\n[import]\nenabled = true\nserverRoots = []\nretainRawSource = false\nfailedRetentionHours = 24\nsuccessfulMetadataRetentionDays = 30\n\n[import.limits]\nconcurrentBuildJobs = 3\n"
         );
@@ -440,6 +397,8 @@ diagnosticExamplesPerCode = 7
             ),
         ] {
             let invalid = format!("{configured}{field} = {value}\n");
+            let parse_error = ServerConfig::parse(&invalid).unwrap_err().to_string();
+            assert!(parse_error.contains(expected), "{field}: {parse_error}");
             let config: ServerConfig = toml::from_str(&invalid).unwrap();
             let error = storage_import_config(config.import.as_ref())
                 .unwrap_err()

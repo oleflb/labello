@@ -2,6 +2,7 @@
 members = [
     "crates/labello-api",
     "crates/labello-client",
+    "crates/labello-config",
     "crates/labello-domain",
     "crates/labello-storage",
     "crates/labello-ui",

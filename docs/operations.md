@@ -142,7 +142,9 @@ issue as unavailable until its instrumentation is implemented.
 
 ## Production Deployment
 
-Run the service under a dedicated, unprivileged account. That account needs:
+Run the service under a dedicated, unprivileged account. Keep a second,
+unprivileged build account isolated from the service group, production data,
+backups, and runtime configuration. The service account needs:
 
 - read/write/create/rename/sync access to `datasetsRoot` and all managed
   descendants;
@@ -176,6 +178,251 @@ serving disables its SPA fallback for the same reason.
 Retain logs according to local audit policy while preserving the redaction
 rules above. Restrict access to logs because safe identifiers and aggregate
 activity still reveal operational metadata.
+
+### Git-Based Systemd Updates
+
+The [`deploy/justfile`](../deploy/justfile) provides the supported `setup`,
+`start`, and `update` recipes for a single-host systemd installation. Create a
+separate system build account before setup. For example, when using the
+defaults from [`deploy/deploy.example.env`](../deploy/deploy.example.env):
+
+```sh
+sudo useradd --system --no-create-home \
+  --home-dir /nonexistent \
+  --user-group --shell /usr/bin/nologin labello-build
+```
+
+The build account must not be the service account or belong to the service
+group. `LABELLO_BUILD_ROOT` must not expose the dataset root, configured import
+roots, backup directory, client/server configuration, or OAuth environment.
+The passwd home is unused: setup keeps `HOME`, Cargo, Rustup, and Trunk state
+below `LABELLO_BUILD_ROOT/home`. Copy the example to the Git-ignored
+`deploy/.env` and configure every installation path, both existing accounts,
+pinned build versions, systemd units, branch, health URL, and backup behavior
+there:
+
+```sh
+# Clone as the service account at the intended LABELLO_REPO_DIR first.
+cd deploy
+just init-env
+# Edit .env, then:
+just setup
+just start
+# Later, to deploy a newer main revision:
+just update
+```
+
+Give only the service account read access to the Git remote, preferably
+through a read-only deployment key. The configured `LABELLO_REPO_DIR` must be
+the checkout containing the invoked recipes. The build account does not need
+Git credentials or access to that checkout: the updater streams a pinned
+commit archive into its isolated build directory.
+
+The deployment `.env` contains no OAuth secret by default. `just setup`
+installs the canonical public-client and server-TOML examples plus a separate
+secret server-environment template at the configured paths, then stops so the
+operator can make them production-safe. The server and client examples in
+`deploy/` are symlinks to the maintained root and WASM examples, so they cannot
+drift into separate contracts. On the next run, setup installs the exact
+`LABELLO_RUST_TOOLCHAIN`, its `wasm32-unknown-unknown` target, and the exact
+`LABELLO_TRUNK_VERSION` below `LABELLO_BUILD_ROOT/home`. Trunk comes from the
+matching official x86-64 or AArch64 Linux release archive. Both its archive
+and extracted executable must match the local digests in
+[`deploy/trunk.sha256`](../deploy/trunk.sha256); setup verifies an existing,
+downloaded, and finally installed candidate before it can be trusted or copied.
+This avoids both mutable release checksums and a host-compiler-dependent tool
+build. The same verified Trunk executable is copied into the deployment root
+for both build and runtime use.
+Setup creates dedicated release, isolated-build, backup, dataset, and
+configuration directories and installs both systemd units without enabling or
+starting them. Existing managed directories are never re-owned or chmodded:
+their expected owner, group, and mode are checked and a mismatch stops setup.
+`/`, root-level/shared configuration parents, symlink directories, paths below
+`/home`, `/root`, or `/run/user` that systemd hides with `ProtectHome`, and any
+overlap in either direction between the writable dataset root and deployment
+controls are rejected. The build root may not contain, or be contained by,
+production data, backups, configuration, source, deployment, or tool paths.
+The isolated builder must also be unable to write any ancestor of a protected
+path. The parent of each new managed tree must resolve through real
+directories. Setup creates missing
+private path components one at a time with the configured account ownership,
+including the private build-tool state directory, but never creates a new
+top-level directory. Existing ancestors and managed directories are never
+re-owned or chmodded.
+
+`just start` builds the clean revision already checked out in
+`LABELLO_REPO_DIR`; it never fetches or moves the branch. When a release is
+already active, `start` may rebuild or restart only that release's commit. It
+refuses a different checked-out commit; use the full backup-restore procedure
+below for a downgrade. It validates and reuses an existing immutable release
+only when that release matches the current commit, browser configuration,
+pinned tool versions, and artifact checksums.
+It then activates that release, restarts both units, and checks the API followed
+by the web application. This also replaces legacy releases whose `REVISION`
+metadata predates the current integrity contract. A failed API or web startup
+disables and stops both units, preventing a partial service or restart loop.
+Run the recipes as the configured service account; they use `sudo` for the
+isolated-account build, systemd, and root-owned configuration operations.
+`just`, the rustup executable configured by `LABELLO_RUSTUP_BIN`, Git, curl,
+GNU tar, and ordinary Linux core utilities must already be installed. Python
+is not required: setup builds and installs the small, separately locked Rust
+deployment validator from `deploy/deployment-validator`.
+
+The generated API unit runs
+`<LABELLO_DEPLOY_ROOT>/current/labello-server` and uses `KillSignal=SIGINT`.
+The latter is required because the current server has a documented Ctrl-C
+handler but no documented SIGTERM handler. The service receives the configured
+server/configuration paths, bind address, and dataset root as environment
+overrides. Keep the bind and dataset root only in `deploy/.env`; setup rejects
+duplicate overrides in the server runtime environment so the generated unit
+cannot silently use different values. OAuth and logging values come from that
+required server environment file; a missing file prevents systemd startup.
+Bootstrap administrators, browser origins,
+secure-cookie policy, and local-login policy remain in `labello.server.toml`
+because the server has no environment overrides for those fields. Browser
+`apiBaseUrl` likewise remains in the public `labello.client.json`.
+
+The generated web unit runs the deployment-owned Trunk executable against
+`<LABELLO_DEPLOY_ROOT>/current/web/index.html` on the configured
+`LABELLO_WEB_BIND`. It uses offline, no-autoreload, no-error-reporting, and
+no-SPA modes, writes Trunk's transient distribution to
+`/run/labello-web`, and serves the immutable release assets. A deployment-only
+Trunk post-build hook copies the complete prebuilt distribution—including the
+JavaScript loader, WASM module, static assets, and client configuration—into
+that transient directory; processing the prebuilt HTML alone would omit those
+local files. The no-SPA setting preserves a real 404 for a missing
+`labello.client.json`. Put a TLS reverse proxy in front of this listener for an
+internet-facing deployment.
+
+Before any builder-controlled Cargo command, setup reads every canonical
+`[[import.serverRoots]].path` through a dependency-free bootstrap parser and
+checks that the isolated builder cannot access it. The installed validator then
+parses the same paths through the runtime schema and setup requires both results
+to match. Setup validates that the service account can traverse and read each
+root, changes `ProtectHome` to `tmpfs`, and generates one
+`BindReadOnlyPaths=` entry per root. The service can then read those explicit
+import sources—including roots below `/home`—but cannot write them or inspect
+the rest of the home hierarchy. For unambiguous systemd generation, each root
+must use one canonical absolute path containing only ordinary path characters.
+Root IDs use the runtime's unique opaque-ID policy, and canonical roots must
+not overlap the dataset root or one another. These checks complete before
+either service is stopped.
+Host permissions or ACLs must also deny the isolated build account read and
+traversal access; ownership by the service account/group with mode `0750` is a
+typical arrangement. Setup reports the numbered import-root entry but never
+prints or silently changes an external source path.
+
+Setup, start, and update all use one JSON/TOML/env validator before changing
+service state. Its JSON and TOML types and browser URL rules are the same types
+used by the server and WASM runtime, including unknown-field, query, fragment,
+path-prefix, safe-identifier, and import-limit semantic rejection. The shared
+import-limit validator is also run during server startup, so values such as
+zero worker counts cannot pass deployment validation and then fail at runtime.
+Parse failures report only a sanitized category and line/column when available;
+they never echo a source line that could contain a secret. Authentication
+defaults to `LABELLO_AUTH_MODE=github` when the variable is unset or empty. This
+internet-facing mode requires exactly one nonempty, non-placeholder assignment
+for each `GITHUB_*` value, HTTPS client and browser origins, secure session
+cookies, a unique nonempty bootstrap-administrator list that does not contain
+the default `admin`, disabled local login, and explicit
+`LABELLO_BIND` and `LABELLO_WEB_BIND` values. Those binds may use loopback for
+a same-host proxy, a private address for a remote proxy, or a wildcard address
+when a firewall restricts backend access. Both are parsed as real IP socket
+addresses before unit rendering. The two health URLs are parsed as absolute
+HTTP(S) URLs and only need to reach their corresponding listeners from the
+Labello host; credentials, queries, and fragments are rejected. The recipes
+disable ambient proxies and all non-HTTP curl protocols, and successful checks
+log only their safe probe labels. Point the web probe at
+`labello.client.json`, as in the example,
+because start and update require both units to remain active and require the
+served bytes to match the configured client file exactly. An API endpoint or a
+Trunk process serving stale or incomplete output therefore cannot pass the web
+health check.
+
+`LABELLO_AUTH_MODE=loopback` is only for direct local or SSH-tunnel access. It
+requires every `GITHUB_*` assignment to be absent or commented, loopback-only
+bind/client/browser addresses, enabled local administrator login, and a cookie
+security setting that matches the loopback client URL scheme. The API and web
+binds default to `127.0.0.1:8080` and `127.0.0.1:8081`; explicit loopback
+overrides are respected. Never expose loopback mode through a public reverse
+proxy.
+
+`just update` requires an active release. It validates configuration, fetches
+one configured remote branch tip, fast-forwards the clean deployment checkout,
+and pins the fetched commit. The commit is exported without Git credentials to
+the isolated build account. Dependency fetching runs in a transient cgroup that
+denies loopback access except for the systemd-resolved DNS stub and terminates
+all descendants. Tests, Cargo builds, Trunk, and artifact collection run in
+transient systemd services with a private
+network namespace, a strict filesystem view, and cgroup-wide descendant
+cleanup. Cargo and Trunk both use locked, offline dependency resolution during
+those build steps and the configured pinned versions. Completed artifacts are
+streamed into a service-owned handoff; root never copies from a builder-writable
+path.
+
+Each immutable release lives below
+`<LABELLO_DEPLOY_ROOT>/releases/<commit>-<input-hash>`. The input hash includes
+the public `labello.client.json`, pinned Rust and Trunk versions, and Trunk
+binary checksum. `REVISION` records and revalidates those values, so retrying a
+commit with changed browser configuration cannot silently reuse stale assets.
+It also records the transferred server and final browser-tree checksums and
+rechecks them before an existing immutable release is reused or restarted. The
+same installed Rust verifier owns this contract for both `just start` and
+`just update`. The active symlink must resolve to a direct child of the release
+directory, and identity comparisons use complete resolved paths. A new release
+is completely verified under its unique staging name before it is published at
+its reusable final name, so a failed verification cannot poison later retries.
+Release files and directories are durably synced before publication, and the
+release-directory entry is synced before activation.
+Failed fetches, tests, or builds do not affect the active `current` symlink.
+The same atomic symlink activates the matching server binary and browser assets
+together; its containing directory is durably synced before either service is
+started. Before either `start` or `update` stops a service, it regenerates both
+complete unit files from current configuration and requires the installed,
+loaded units to match byte-for-byte with no drop-ins or pending daemon reload.
+Updates stop the web unit before the API, then start and health-check the API
+before starting and checking the web unit.
+
+`just start` fast-paths an exact active-release restart: it still verifies the
+release and installed unit contract, but does not create a redundant backup or
+rewrite the identical activation symlink.
+
+The default update is interactive. Set `LABELLO_BUILD_ONLY=true` in the
+invocation environment to fetch and build without entering maintenance. Set
+`LABELLO_ASSUME_YES=true` only after an operator or an external maintenance
+workflow has confirmed that new traffic is stopped and no import, ingest,
+snapshot, or workflow write is active. Labello has no endpoint that can make
+that confirmation for the recipe.
+
+Before activating a start or an update, the default path creates a
+complete uncompressed tar archive of the canonical, non-symlink
+`datasetsRoot`, verifies that the archive
+can be listed, records the archive and server-configuration checksums in a
+neighboring manifest, and then switches the `current` symlink atomically. An
+update performs this after graceful shutdown. Set
+`LABELLO_BACKUP_HOOK=/absolute/path/to/executable` to use a filesystem snapshot
+or an external backup tool instead. The hook receives the dataset root, backup
+directory, previous release ID, and complete target release ID. It must not
+return success until it has created, verified, and durably committed a
+consistent complete-root backup. Failed archive creation removes its temporary
+archive and manifest so
+disk-full retries do not accumulate partial backups. Final default archive and
+manifest names remain cleanup-tracked until both files and their containing
+directory are durably synced. The recipe does not recursively inspect or sync
+an external backup tool's output.
+
+Run `just test-deployment` from `deploy/` to exercise the non-privileged release
+transition, interrupted backup publication, strict unit rendering, and Rust
+deployment-validator tests.
+
+If an error occurs after stopping either unit but before activation, the recipe
+restores every unit that was active before the attempt, including a web unit
+stopped before an API-stop failure. If an error occurs after activation, it
+disables and stops both services: startup may already have migrated persistent
+artifacts, so an automatic binary-only rollback would be unsafe and a reboot
+must not restart the failed release. Inspect the journal and use the full-root
+rollback procedure below. The updater deliberately does not delete old
+releases or backups; retention is an operator decision.
 
 ## Capacity Planning
 

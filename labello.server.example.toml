@@ -1,5 +1,7 @@
 # Copy this file to labello.server.toml and adjust it for your environment.
 # The uncommented values are Labello's defaults.
+# LABELLO_BIND and LABELLO_DATASETS_ROOT override the corresponding values.
+# GitHub OAuth may instead be supplied through the three GITHUB_* variables.
 
 bind = "127.0.0.1:8080"
 datasetsRoot = "datasets"
@@ -56,6 +58,7 @@ localAdminLogin = true
 # [[import.serverRoots]]
 # id = "curated-releases"
 # path = "/srv/labello-imports"
+# deploy/ setup exposes each configured server root to systemd read-only.
 # Empty allows every bootstrap administrator; otherwise only listed IDs see and may use the root.
 # allowedOwners = ["admin"]
 

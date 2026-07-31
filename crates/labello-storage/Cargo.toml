@@ -10,6 +10,7 @@ base64.workspace = true
 blake3.workspace = true
 image.workspace = true
 infer.workspace = true
+labello-config = { path = "../labello-config" }
 labello-domain = { path = "../labello-domain" }
 mime_guess.workspace = true
 parking_lot.workspace = true

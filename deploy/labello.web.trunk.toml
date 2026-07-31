@@ -1,0 +1,14 @@
+[build]
+target = "index.html"
+public_url = "./"
+
+[serve]
+no_spa = true
+
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+    "-c",
+    'cp -a -- "$TRUNK_SOURCE_DIR/." "$TRUNK_STAGING_DIR/"',
+]

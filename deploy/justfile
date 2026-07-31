@@ -1,0 +1,28 @@
+set dotenv-path := '.env'
+
+import 'setup.just'
+import 'start.just'
+import 'update.just'
+
+# List deployment recipes.
+default:
+    @just --justfile "{{ justfile() }}" --list
+
+# Create the local path/service configuration file.
+init-env:
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+    env_file="{{ justfile_directory() }}/.env"
+    example="{{ justfile_directory() }}/deploy.example.env"
+    if [[ -e "$env_file" ]]; then
+      printf 'Deployment environment already exists: %s\n' "$env_file" >&2
+      exit 1
+    fi
+    cp -- "$example" "$env_file"
+    chmod 0600 "$env_file"
+    printf 'Created %s; edit every REPLACE_ME value before running setup.\n' "$env_file"
+
+# Run non-privileged deployment lifecycle and validator tests.
+test-deployment:
+    bash "{{ justfile_directory() }}/tests/deployment-helpers.sh"
+    cargo test --manifest-path "{{ justfile_directory() }}/deployment-validator/Cargo.toml"

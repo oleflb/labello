@@ -2115,6 +2115,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "labello-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "url",
+]
+
+[[package]]
 name = "labello-domain"
 version = "0.1.0"
 dependencies = [
@@ -2134,9 +2144,9 @@ dependencies = [
  "anyhow",
  "axum",
  "labello-api",
+ "labello-config",
  "labello-domain",
  "labello-storage",
- "serde",
  "tokio",
  "toml 0.8.23",
  "tracing",
@@ -2151,6 +2161,7 @@ dependencies = [
  "blake3",
  "image",
  "infer",
+ "labello-config",
  "labello-domain",
  "mime_guess",
  "parking_lot",
@@ -2199,13 +2210,12 @@ dependencies = [
  "console_error_panic_hook",
  "eframe",
  "js-sys",
+ "labello-config",
  "labello-domain",
  "labello-ui",
- "serde",
  "serde_json",
  "tracing",
  "tracing-wasm",
- "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

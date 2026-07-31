@@ -488,20 +488,17 @@ fn validate_config(datasets_root: &Path, config: &ImportConfig) -> StorageResult
     let datasets = std::fs::canonicalize(datasets_root).with_path(datasets_root)?;
     let server_state = datasets.join(SERVER_STATE_DIR);
     let mut roots = Vec::new();
-    let mut ids = BTreeSet::new();
+    if labello_config::validate_import_root_ids(
+        config.import_roots.iter().map(|root| root.root_id.as_str()),
+    )
+    .is_err()
+    {
+        return Err(import_error(
+            "import_root_invalid",
+            "import root IDs must be unique safe opaque IDs",
+        ));
+    }
     for root in &config.import_roots {
-        if root.root_id.is_empty()
-            || !root
-                .root_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            || !ids.insert(root.root_id.clone())
-        {
-            return Err(import_error(
-                "import_root_invalid",
-                "import root IDs must be unique safe opaque IDs",
-            ));
-        }
         let canonical = std::fs::canonicalize(&root.path).with_path(&root.path)?;
         if !canonical.is_dir()
             || canonical.starts_with(&datasets)

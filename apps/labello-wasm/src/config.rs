@@ -1,32 +1,4 @@
-use serde::Deserialize;
-
-const MAX_BROWSER_CONFIG_BYTES: usize = 16 * 1024;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct BrowserConfig {
-    api_base_url: Option<String>,
-}
-
-impl BrowserConfig {
-    fn parse(text: &str) -> Result<Self, String> {
-        if text.len() > MAX_BROWSER_CONFIG_BYTES {
-            return Err("browser runtime configuration exceeds 16 KiB".to_string());
-        }
-        let mut config: Self = serde_json::from_str(text)
-            .map_err(|_| "browser runtime configuration is invalid".to_string())?;
-        config.api_base_url = config
-            .api_base_url
-            .as_deref()
-            .map(validate_api_base_url)
-            .transpose()?;
-        Ok(config)
-    }
-
-    pub(crate) fn api_base_url(&self) -> Option<&str> {
-        self.api_base_url.as_deref()
-    }
-}
+pub(crate) use labello_config::BrowserConfig;
 
 pub(crate) fn resolve_api_base_url(
     query_override: Option<&str>,
@@ -38,35 +10,6 @@ pub(crate) fn resolve_api_base_url(
         .or_else(|| runtime_config.api_base_url())
         .map(str::to_string)
         .unwrap_or_else(|| default_api_url(protocol, hostname))
-}
-
-fn validate_api_base_url(value: &str) -> Result<String, String> {
-    let authority = value
-        .split_once("://")
-        .map(|(_, authority)| authority)
-        .unwrap_or_default();
-    if authority.is_empty() || authority.starts_with('/') {
-        return Err(
-            "browser runtime apiBaseUrl must use http or https and include a host".to_string(),
-        );
-    }
-    let url = url::Url::parse(value)
-        .map_err(|_| "browser runtime apiBaseUrl must be an absolute URL".to_string())?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(
-            "browser runtime apiBaseUrl must use http or https and include a host".to_string(),
-        );
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("browser runtime apiBaseUrl must not contain credentials".to_string());
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("browser runtime apiBaseUrl must not contain a query or fragment".to_string());
-    }
-    if url.path() != "/" && !url.path().ends_with('/') {
-        return Err("browser runtime apiBaseUrl path prefixes must end with a slash".to_string());
-    }
-    Ok(url.to_string())
 }
 
 fn default_api_url(protocol: &str, hostname: &str) -> String {
@@ -118,7 +61,7 @@ pub(crate) async fn load() -> Result<BrowserConfig, wasm_bindgen::JsValue> {
     .map_err(|_| config_error("cannot read browser runtime configuration"))?
     .as_string()
     .ok_or_else(|| config_error("browser runtime configuration response is not text"))?;
-    BrowserConfig::parse(&text).map_err(|error| config_error(&error))
+    BrowserConfig::parse(&text).map_err(|error| config_error(&error.to_string()))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -128,7 +71,8 @@ fn config_error(message: &str) -> wasm_bindgen::JsValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserConfig, MAX_BROWSER_CONFIG_BYTES, resolve_api_base_url};
+    use super::{BrowserConfig, resolve_api_base_url};
+    use labello_config::MAX_BROWSER_CONFIG_BYTES;
 
     #[test]
     fn empty_or_null_config_preserves_the_legacy_default() {

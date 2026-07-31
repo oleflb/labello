@@ -279,6 +279,9 @@ labello-domain
 |-- labello-storage --+
 |-- labello-client ---+-- labello-api -- labello-server
 +---------------------+-- labello-ui --- labello-wasm
+labello-config --+--> labello-storage
+                 +--> labello-server
+                 +--> labello-wasm
 ```
 
 | Package | Responsibility |
@@ -286,6 +289,7 @@ labello-domain
 | `labello-domain` | Shared domain types, validation, events, and workflow logic |
 | `labello-storage` | Filesystem persistence, ingestion, assignment, statistics, and snapshots |
 | `labello-client` | API contracts plus HTTP and demo implementations |
+| `labello-config` | Side-effect-free runtime schemas and shared configuration policy |
 | `labello-api` | Axum routes, authentication, authorization, and workflow orchestration |
 | `labello-ui` | Shared egui annotation and administration UI |
 | `labello-server` | Tokio/Axum API executable |

@@ -15,17 +15,25 @@ Internal dependencies are intentionally acyclic:
 
 | Crate | Internal dependencies |
 | --- | --- |
+| `labello-config` | None |
 | `labello-domain` | None |
-| `labello-storage` | `labello-domain` |
+| `labello-storage` | `labello-config`, `labello-domain` |
 | `labello-client` | `labello-domain` |
 | `labello-api` | `labello-client`, `labello-domain`, `labello-storage` |
 | `labello-ui` | `labello-client`, `labello-domain` |
-| `labello-server` | `labello-api`, `labello-domain`, `labello-storage` |
-| `labello-wasm` | `labello-domain`, `labello-ui` |
+| `labello-server` | `labello-api`, `labello-config`, `labello-domain`, `labello-storage` |
+| `labello-wasm` | `labello-config`, `labello-domain`, `labello-ui` |
 
 Domain code cannot depend on HTTP, filesystems, browser APIs, or UI types.
 Storage cannot depend on client or API transport types. The executable apps
 compose existing crates rather than own workflow policy.
+
+`labello-config` owns the strict, side-effect-free server and browser runtime
+configuration schemas, sanitized parse diagnostics, and browser API-base URL
+rules. It also owns pure import-root ID and configured-limit policy shared with
+storage. The production binaries and the separately built deployment validator
+consume these same types so deployment acceptance cannot drift from startup or
+storage acceptance.
 
 ## Domain
 
