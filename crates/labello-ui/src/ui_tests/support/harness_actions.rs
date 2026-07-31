@@ -103,7 +103,7 @@ pub(super) fn click_application_menu_item(harness: &mut Harness<'static, Labello
         harness.step();
         return;
     }
-    click(harness, "More application actions");
+    click(harness, "Open navigation");
     click_accesskit_button(harness, label);
 }
 

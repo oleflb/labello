@@ -361,6 +361,7 @@ impl LabelloApp {
             || self.work.pending_transition.is_some()
             || self.work.show_settings
             || self.runtime.persistence.recovery.is_some()
+            || self.navigation.drawer_open
             || egui::Popup::is_any_open(ctx)
         {
             return;

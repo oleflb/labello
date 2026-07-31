@@ -318,7 +318,7 @@ fn long_status_messages_keep_their_complete_accessible_text() {
             .get_by_role_and_label(egui::accesskit::Role::Button, &status_label)
             .rect();
         let left_action = harness
-            .query_by_label("More application actions")
+            .query_by_label("Open navigation")
             .or_else(|| {
                 harness
                     .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate")
@@ -411,6 +411,7 @@ fn desktop_app_bar_shows_direct_navigation_and_accessible_icon_actions() {
         );
     }
     assert!(harness.query_by_label("More application actions").is_none());
+    assert!(harness.query_by_label("Open navigation").is_none());
     assert!(harness.query_by_label("Navigation").is_none());
     assert!(harness.query_by_label("Workspace").is_none());
     assert!(harness.query_by_label("Desktop navigation").is_none());
@@ -426,6 +427,66 @@ fn desktop_app_bar_shows_direct_navigation_and_accessible_icon_actions() {
         );
     }
     assert!(harness.get_by_label("Admin User").rect().width() <= 96.5);
+}
+
+#[test]
+fn app_bar_switches_atomically_to_the_navigation_drawer_when_contents_do_not_fit() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+    let destinations = ["Annotate", "Review", "Statistics", "Admin"];
+    let actions = ["Open setup", "Open tutorial", "Open settings", "Sign out"];
+    let mut saw_drawer = false;
+    let mut saw_direct = false;
+
+    for width in [600.0, 800.0, 900.0, 1000.0, 1100.0, 1280.0] {
+        harness.set_size(egui::vec2(width, 800.0));
+        harness.step();
+        let drawer_bar = harness.query_by_label("Open navigation").is_some();
+        saw_drawer |= drawer_bar;
+        saw_direct |= !drawer_bar;
+        assert!(
+            harness.query_by_label("More application actions").is_none(),
+            "legacy overflow menu returned at width {width}",
+        );
+
+        for label in destinations.iter().chain(actions.iter()) {
+            assert_eq!(
+                harness.query_by_label(label).is_some(),
+                !drawer_bar,
+                "{label} visibility did not switch atomically at width {width}",
+            );
+        }
+        assert_eq!(
+            harness.query_by_label("Admin User").is_some(),
+            !drawer_bar,
+            "account visibility did not switch atomically at width {width}",
+        );
+        assert!(harness.query_by_label("Dataset Demo Dataset").is_some());
+        assert!(harness.query_by_label("Status: Idle").is_some());
+    }
+    assert!(saw_drawer && saw_direct);
+
+    harness.set_size(egui::vec2(900.0, 800.0));
+    harness.step();
+    click_accesskit_button(&mut harness, "Open navigation");
+    for label in [
+        "Annotate",
+        "Review",
+        "Statistics",
+        "Admin",
+        "Setup",
+        "Tutorial",
+        "Settings",
+        "Sign out",
+    ] {
+        assert!(
+            harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, label)
+                .is_some(),
+            "drawer is missing {label}",
+        );
+    }
+    assert!(harness.query_by_label("Admin User").is_some());
 }
 
 #[test]

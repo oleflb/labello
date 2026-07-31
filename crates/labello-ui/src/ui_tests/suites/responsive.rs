@@ -363,7 +363,7 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
         assert!(status_badge.height() > 0.0);
         let layout = LayoutMode::for_width(width);
         let menu = harness
-            .query_by_label("More application actions")
+            .query_by_label("Open navigation")
             .or_else(|| {
                 harness
                     .query_all_by_role_and_label(egui::accesskit::Role::Button, "Annotate")
@@ -491,12 +491,20 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
 
     assert_eq!(
         harness
-            .query_all_by_role_and_label(egui::accesskit::Role::Button, "More application actions")
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Open navigation")
             .count(),
         1
     );
-    click(&mut harness, "More application actions");
-    assert!(harness.query_by_label("Navigation").is_none());
+    assert!(harness.query_by_label("More application actions").is_none());
+    click(&mut harness, "Open navigation");
+    let drawer = harness
+        .query_by_role_and_label(egui::accesskit::Role::Window, "Application navigation")
+        .expect("navigation should open as an accessible window");
+    assert!(
+        drawer.accesskit_node().is_modal(),
+        "navigation should expose modal semantics",
+    );
+    assert!(harness.query_by_label("Close navigation").is_some());
     assert!(harness.query_by_label("Workspace").is_none());
     assert!(harness.query_by_label("Status").is_none());
     for label in [
@@ -534,6 +542,14 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     assert_visible_controls_clamped(&harness, 320.0, 568.0);
     harness.key_press(egui::Key::Escape);
     harness.step();
+    assert!(!harness.state().navigation.drawer_open);
+    harness.step();
+    assert!(
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Open navigation")
+            .is_focused(),
+        "dismissing the drawer should restore focus to its trigger",
+    );
 
     harness.set_size(egui::vec2(320.0, 320.0));
     harness.step();
@@ -552,6 +568,33 @@ fn responsive_workspace_has_one_action_set_and_a_usable_canvas() {
     ] {
         assert_control_inside(&harness, label, egui::accesskit::Role::Button, 320.0, 320.0);
     }
+    click(&mut harness, "Open navigation");
+    for _ in 0..12 {
+        harness.step();
+    }
+    let short_drawer = harness
+        .get_by_role_and_label(egui::accesskit::Role::Window, "Application navigation")
+        .rect();
+    assert!(
+        short_drawer.left() >= 0.0
+            && short_drawer.right() <= 320.0
+            && short_drawer.top() >= 0.0
+            && short_drawer.bottom() <= 320.0,
+        "short compact navigation must stay within the viewport: {short_drawer:?}",
+    );
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Sign out")
+        .scroll_to_me();
+    for _ in 0..4 {
+        harness.step();
+    }
+    assert_control_inside(
+        &harness,
+        "Sign out",
+        egui::accesskit::Role::Button,
+        320.0,
+        320.0,
+    );
 }
 
 #[test]
@@ -651,7 +694,7 @@ fn setup_geometry_stays_clamped_at_supported_viewports() {
         let setup_control = if harness.query_by_label("Open setup").is_some() {
             "Open setup"
         } else {
-            "More application actions"
+            "Open navigation"
         };
         assert_control_inside(
             &harness,
@@ -1404,7 +1447,8 @@ fn stats_and_responsive_layouts_render_without_losing_primary_actions() {
 
     harness.set_size(egui::vec2(390.0, 760.0));
     harness.step();
-    assert!(harness.query_by_label("More application actions").is_some());
+    assert!(harness.query_by_label("Open navigation").is_some());
+    assert!(harness.query_by_label("More application actions").is_none());
 
     harness.set_size(egui::vec2(1280.0, 820.0));
     harness.step();

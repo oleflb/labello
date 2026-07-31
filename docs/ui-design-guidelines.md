@@ -40,6 +40,10 @@ and history.
   collapse siblings or push primary controls offscreen.
 - Keep global identity, dataset, navigation, status, and account controls in the
   app shell. Keep assignment context and commands in the work toolbar.
+- When every global destination, action, and account element cannot fit in the
+  app bar, replace all of them with one modal left-drawer trigger. The drawer
+  owns its dismiss action, closes after navigation, and restores focus to its
+  trigger when dismissed without navigation.
 - Render each action once per layout. Keep primary work actions visible and move
   secondary actions to overflow when space is limited.
 - Wide work views use workflow, canvas, and inspector panes; Medium and Compact

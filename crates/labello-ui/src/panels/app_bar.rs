@@ -78,17 +78,7 @@ impl LabelloApp {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
 
-        let mut actions = vec![
-            AppBarAction::Setup,
-            AppBarAction::Settings,
-            AppBarAction::SignOut,
-        ];
-        if self.work_view() && self.selected_task().is_some() {
-            actions.insert(1, AppBarAction::Tutorial);
-        }
-        if account.is_none() {
-            actions.retain(|action| *action != AppBarAction::SignOut);
-        }
+        let actions = self.app_bar_actions();
 
         let status_width = if layout == LayoutMode::Compact {
             64.0
@@ -96,22 +86,7 @@ impl LabelloApp {
             76.0
         };
         let spacing = ui.spacing().item_spacing.x;
-        let mut right_remaining = (right_rect.width() - status_width).max(0.0);
-        let mut visible_action_count = 0;
-        for _ in &actions {
-            let required = 44.0 + spacing;
-            if right_remaining + 0.5 < required {
-                break;
-            }
-            right_remaining -= required;
-            visible_action_count += 1;
-        }
-        let show_account = account.is_some()
-            && visible_action_count == actions.len()
-            && right_remaining >= 96.0 + spacing;
-        let hidden_account = account.is_some() && !show_account;
-        let hidden_actions = actions[visible_action_count..].to_vec();
-        let review_actions_in_overflow =
+        let review_actions_in_drawer =
             layout != LayoutMode::Wide && self.view == AppView::Review;
 
         let destinations = self.primary_navigation_destinations();
@@ -121,76 +96,80 @@ impl LabelloApp {
             .map(|(_, label)| navigation_width(label))
             .sum::<f32>()
             + spacing * destinations.len().saturating_sub(1) as f32;
-        let mut overflow_needed = !hidden_actions.is_empty()
-            || hidden_account
-            || review_actions_in_overflow
-            || total_navigation_width > left_rect.width();
-        let available_navigation_width =
-            (left_rect.width() - if overflow_needed { 44.0 + spacing } else { 0.0 }).max(0.0);
-        let mut direct_count = 0;
-        let mut used_width = 0.0;
-        for (_, label) in &destinations {
-            let width = navigation_width(label);
-            let required = width + if direct_count == 0 { 0.0 } else { spacing };
-            if used_width + required > available_navigation_width + 0.5 {
-                break;
-            }
-            used_width += required;
-            direct_count += 1;
-        }
-        if direct_count < destinations.len() {
-            overflow_needed = true;
-        }
-        let hidden_destinations = destinations[direct_count..].to_vec();
+        let required_right_width = status_width
+            + actions.len() as f32 * (44.0 + spacing)
+            + account
+                .as_ref()
+                .map_or(0.0, |_| 96.0 + spacing);
+        let drawer_navigation = review_actions_in_drawer
+            || total_navigation_width > left_rect.width() + 0.5
+            || required_right_width > right_rect.width() + 0.5;
 
-        if overflow_needed {
-            let overflow_button =
-                egui::Button::new(RichText::new("...").size(18.0)).min_size(egui::vec2(44.0, 44.0));
-            let overflow_response = left_ui.add(overflow_button);
-            let menu_height = (left_ui.ctx().content_rect().height() - 80.0).max(132.0);
-            egui::Popup::menu(&overflow_response).show(|ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("application-overflow-scroll")
-                    .max_height(menu_height)
-                    .show(ui, |ui| {
-                        self.application_overflow_contents(
-                            ui,
-                            &hidden_destinations,
-                            &hidden_actions,
-                            review_actions_in_overflow,
-                            hidden_account.then_some(account.as_deref()).flatten(),
-                        );
-                    });
-            });
-            let overflow_response =
-                overflow_response.on_hover_text("Open additional application actions.");
-            overflow_response.widget_info(|| {
-                egui::WidgetInfo::labeled(
+        if drawer_navigation {
+            let drawer_open = self.navigation.drawer_open;
+            let trigger = left_ui
+                .push_id("application-navigation-trigger", |ui| {
+                    ui.add_sized(
+                        [44.0, 44.0],
+                        egui::Button::new("").selected(drawer_open),
+                    )
+                })
+                .inner
+                .on_hover_text(if drawer_open {
+                    "Close application navigation."
+                } else {
+                    "Open application navigation."
+                });
+            trigger.widget_info(|| {
+                egui::WidgetInfo::selected(
                     egui::WidgetType::Button,
                     true,
-                    "More application actions",
+                    drawer_open,
+                    if drawer_open {
+                        "Close navigation"
+                    } else {
+                        "Open navigation"
+                    },
                 )
             });
-        }
-        for (view, label) in destinations.into_iter().take(direct_count) {
-            if left_ui
-                .add_sized(
-                    [navigation_width(label), 44.0],
-                    egui::Button::selectable(self.view == view, label),
-                )
-                .clicked()
+            Self::paint_navigation_icon(
+                &left_ui,
+                trigger.rect,
+                left_ui.style().interact(&trigger).fg_stroke.color,
+            );
+            if !drawer_open
+                && std::mem::take(&mut self.navigation.restore_drawer_trigger_focus)
             {
-                self.open_view(view);
+                trigger.request_focus();
             }
-        }
-
-        for action in actions.iter().take(visible_action_count).rev() {
-            self.app_bar_icon_button(&mut right_ui, *action);
-        }
-        if show_account && let Some(account) = account.as_ref() {
-            right_ui
-                .add_sized([96.0, 44.0], egui::Label::new(account).truncate())
-                .on_hover_text(account);
+            if trigger.clicked() {
+                self.navigation.drawer_open = !drawer_open;
+                self.navigation.restore_drawer_trigger_focus = false;
+                self.work.drawer = None;
+                self.work.show_tutorial = false;
+            }
+        } else {
+            self.navigation.drawer_open = false;
+            self.navigation.restore_drawer_trigger_focus = false;
+            for (view, label) in destinations {
+                if left_ui
+                    .add_sized(
+                        [navigation_width(label), 44.0],
+                        egui::Button::selectable(self.view == view, label),
+                    )
+                    .clicked()
+                {
+                    self.open_view(view);
+                }
+            }
+            for action in actions.iter().rev() {
+                self.app_bar_icon_button(&mut right_ui, *action);
+            }
+            if let Some(account) = account.as_ref() {
+                right_ui
+                    .add_sized([96.0, 44.0], egui::Label::new(account).truncate())
+                    .on_hover_text(account);
+            }
         }
         self.status_pill(&mut right_ui, runtime_status, status_width, layout);
         response.widget_info(|| {
@@ -198,25 +177,28 @@ impl LabelloApp {
         });
     }
 
-    fn application_overflow_contents(
+    fn application_navigation_contents(
         &mut self,
         ui: &mut egui::Ui,
-        hidden_destinations: &[(AppView, &'static str)],
-        hidden_actions: &[AppBarAction],
+        destinations: &[(AppView, &'static str)],
+        actions: &[AppBarAction],
         include_review_actions: bool,
-        hidden_account: Option<&str>,
-    ) {
+        account: Option<&str>,
+    ) -> bool {
+        let mut action_taken = false;
         ui.set_min_width(theme::MENU_WIDTH);
-        for (view, label) in hidden_destinations {
+        let item_width = ui.available_width().max(theme::MENU_WIDTH);
+        for (view, label) in destinations {
             if ui
                 .add(
                     egui::Button::selectable(self.view == *view, *label)
-                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
+                        .min_size(egui::vec2(item_width, 44.0)),
                 )
                 .clicked()
             {
                 self.open_view(*view);
                 ui.close();
+                action_taken = true;
             }
         }
         if include_review_actions
@@ -231,32 +213,50 @@ impl LabelloApp {
                             ui.ctx(),
                             labello_domain::UserAction::SkipAssignment,
                         ))
-                        .min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
+                        .min_size(egui::vec2(item_width, 44.0)),
                 )
                 .clicked()
         {
             self.trigger_user_action(labello_domain::UserAction::SkipAssignment);
             ui.close();
+            action_taken = true;
         }
-        for action in hidden_actions {
+        for action in actions {
             if ui
                 .add_enabled(
                     *action != AppBarAction::SignOut || !self.loading.logout,
-                    egui::Button::new(action.label()).min_size(egui::vec2(theme::MENU_WIDTH, 44.0)),
+                    egui::Button::new(action.label()).min_size(egui::vec2(item_width, 44.0)),
                 )
                 .clicked()
             {
                 self.perform_app_bar_action(*action);
                 ui.close();
+                action_taken = true;
             }
         }
-        if let Some(account) = hidden_account {
+        if let Some(account) = account {
             ui.separator();
             ui.add_sized(
-                [theme::MENU_WIDTH, 44.0],
+                [item_width, 44.0],
                 egui::Label::new(RichText::new(account).strong()).truncate(),
             );
         }
+        action_taken
+    }
+
+    fn app_bar_actions(&self) -> Vec<AppBarAction> {
+        let mut actions = vec![
+            AppBarAction::Setup,
+            AppBarAction::Settings,
+            AppBarAction::SignOut,
+        ];
+        if self.work_view() && self.selected_task().is_some() {
+            actions.insert(1, AppBarAction::Tutorial);
+        }
+        if self.auth.account.is_none() {
+            actions.retain(|action| *action != AppBarAction::SignOut);
+        }
+        actions
     }
 
     fn app_bar_icon_button(&mut self, ui: &mut egui::Ui, action: AppBarAction) {
@@ -287,6 +287,89 @@ impl LabelloApp {
         );
         if response.clicked() {
             self.perform_app_bar_action(action);
+        }
+    }
+
+    fn paint_navigation_icon(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+        let center = rect.center();
+        let stroke = egui::Stroke::new(1.8, color);
+        for offset in [-5.5, 0.0, 5.5] {
+            ui.painter().line_segment(
+                [
+                    center + egui::vec2(-8.0, offset),
+                    center + egui::vec2(8.0, offset),
+                ],
+                stroke,
+            );
+        }
+    }
+
+    pub(crate) fn application_navigation_drawer(&mut self, ctx: &egui::Context) {
+        if !self.navigation.drawer_open {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let width = 304.0_f32.min((screen.width() - 48.0).max(240.0));
+        let max_height = (screen.height() - 48.0).max(180.0);
+        let id = egui::Id::new("application-navigation-drawer");
+        let area = egui::Modal::default_area(id)
+            .anchor(egui::Align2::LEFT_CENTER, egui::vec2(12.0, 0.0))
+            .default_width(width)
+            .constrain_to(screen);
+        let mut close = false;
+        let mut action_taken = false;
+        let destinations = self.primary_navigation_destinations();
+        let actions = self.app_bar_actions();
+        let account = self
+            .auth
+            .account
+            .as_ref()
+            .map(|account| account.display_name.clone());
+        let include_review_actions =
+            LayoutMode::for_width(screen.width()) != LayoutMode::Wide
+                && self.view == AppView::Review;
+        let response = theme::modal(ctx, id).area(area).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.set_max_height(max_height);
+            ui.horizontal(|ui| {
+                ui.heading("Navigation");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let button =
+                        ui.add(egui::Button::new("Close").min_size(egui::vec2(64.0, 44.0)));
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            "Close navigation",
+                        )
+                    });
+                    close = button.clicked();
+                });
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("application-navigation-scroll")
+                .max_height((max_height - 54.0).max(80.0))
+                .show(ui, |ui| {
+                    action_taken = self.application_navigation_contents(
+                        ui,
+                        &destinations,
+                        &actions,
+                        include_review_actions,
+                        account.as_deref(),
+                    );
+                });
+        });
+        response.response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Window,
+                true,
+                "Application navigation",
+            )
+        });
+        ctx.accesskit_node_builder(response.response.id, |node| node.set_modal());
+        if close || action_taken || response.should_close() {
+            self.navigation.drawer_open = false;
+            self.navigation.restore_drawer_trigger_focus = !action_taken;
         }
     }
 

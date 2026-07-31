@@ -101,6 +101,7 @@ impl LabelloApp {
             },
             datasets: DatasetState::new(),
             admin: AdminToolsState::default(),
+            navigation: NavigationState::default(),
             work,
             view: AppView::Annotate,
             auth_epoch: 0,

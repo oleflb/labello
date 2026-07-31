@@ -15,6 +15,8 @@ explicit feature states:
   identities.
 - `admin`: administration filters, snapshots, roles, and staged configuration.
 - `import`: the import wizard, source registration, planning, and job progress.
+- `navigation`: responsive application-drawer visibility, atomic app-bar
+  collapse ownership, and focus restoration.
 - `work`: assignment, annotation, review, adjudication, migration, canvas, and
   edit-history state.
 

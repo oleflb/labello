@@ -342,6 +342,12 @@ impl DatasetState {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct NavigationState {
+    pub(crate) drawer_open: bool,
+    pub(crate) restore_drawer_trigger_focus: bool,
+}
+
 pub struct WorkState {
     pub(crate) classes: Vec<LabelClass>,
     pub(crate) tasks: Vec<TaskDefinition>,
@@ -451,6 +457,7 @@ pub struct LabelloApp {
     pub(crate) auth: AuthState,
     pub(crate) datasets: DatasetState,
     pub(crate) admin: AdminToolsState,
+    pub(crate) navigation: NavigationState,
     pub(crate) work: WorkState,
     pub(crate) view: AppView,
     pub(crate) auth_epoch: u64,

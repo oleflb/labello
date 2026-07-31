@@ -1127,7 +1127,12 @@ fn migration_primary_actions_stay_visible_without_the_inspector_drawer() {
     object.set_size(egui::vec2(390.0, 667.0));
     object.step();
 
-    click(&mut object, "More application actions");
+    click(&mut object, "Open navigation");
+    assert!(
+        object
+            .query_by_role_and_label(egui::accesskit::Role::Window, "Application navigation")
+            .is_some()
+    );
     assert!(object.query_by_label("Workflow panel").is_none());
     assert!(object.query_by_label("Inspector panel").is_none());
     object.key_press(egui::Key::Escape);

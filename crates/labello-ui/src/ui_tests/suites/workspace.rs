@@ -1802,7 +1802,7 @@ fn dataset_summary_roles_survive_sanitized_metadata_and_show_supported_tabs() {
     );
     harness.set_size(egui::vec2(600.0, 800.0));
     harness.step();
-    click(&mut harness, "More application actions");
+    click(&mut harness, "Open navigation");
     for label in ["Annotate", "Review", "Admin", "Statistics"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
@@ -1893,7 +1893,7 @@ fn annotator_and_reviewer_roles_are_independent_capabilities() {
 
     harness.set_size(egui::vec2(600.0, 800.0));
     harness.step();
-    click(&mut harness, "More application actions");
+    click(&mut harness, "Open navigation");
     for label in ["Annotate", "Review", "Statistics"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),

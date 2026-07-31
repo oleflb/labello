@@ -39,6 +39,10 @@ impl LabelloApp {
             self.settings_modal(ctx);
             return;
         }
+        if self.navigation.drawer_open {
+            self.application_navigation_drawer(ctx);
+            return;
+        }
         if layout != LayoutMode::Wide && self.work_view() {
             let screen = ctx.content_rect();
             let compact = layout == LayoutMode::Compact;

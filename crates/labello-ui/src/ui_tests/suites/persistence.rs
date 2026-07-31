@@ -841,7 +841,7 @@ fn overlays_and_menus_block_background_shortcuts() {
 
     harness.set_size(egui::vec2(320.0, 568.0));
     harness.step();
-    click(&mut harness, "More application actions");
+    click(&mut harness, "Open navigation");
     harness.key_press(egui::Key::ArrowRight);
     harness.step();
     assert_eq!(api.counts().complete_assignment, 0);
