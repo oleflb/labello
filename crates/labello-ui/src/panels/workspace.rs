@@ -58,21 +58,13 @@ impl LabelloApp {
                 (screen.height() - 48.0).max(180.0)
             };
             if let Some(drawer) = self.work.drawer {
-                let (title, align, offset) = match (drawer, compact) {
-                    (Drawer::Workflow, true) => (
+                let (title, align, offset) = match drawer {
+                    Drawer::Workflow => (
                         "Workflow",
-                        egui::Align2::CENTER_BOTTOM,
-                        egui::vec2(0.0, -12.0),
+                        egui::Align2::LEFT_CENTER,
+                        egui::vec2(12.0, 0.0),
                     ),
-                    (Drawer::Workflow, false) => {
-                        ("Workflow", egui::Align2::LEFT_CENTER, egui::vec2(12.0, 0.0))
-                    }
-                    (Drawer::Inspector, true) => (
-                        "Inspector",
-                        egui::Align2::CENTER_BOTTOM,
-                        egui::vec2(0.0, -12.0),
-                    ),
-                    (Drawer::Inspector, false) => (
+                    Drawer::Inspector => (
                         "Inspector",
                         egui::Align2::RIGHT_CENTER,
                         egui::vec2(-12.0, 0.0),

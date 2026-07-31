@@ -1194,6 +1194,64 @@ fn responsive_modes_do_not_switch_at_1240() {
 }
 
 #[test]
+fn responsive_workspace_drawers_are_centered_on_their_respective_sides() {
+    let api = Rc::new(SpyApi::new());
+    let mut harness = loaded_work_harness(api);
+
+    for (width, height) in [
+        (320.0, 320.0),
+        (320.0, 568.0),
+        (390.0, 844.0),
+        (600.0, 800.0),
+        (1287.0, 820.0),
+    ] {
+        harness.set_size(egui::vec2(width, height));
+        for (drawer, label) in [
+            (Drawer::Workflow, "Workflow"),
+            (Drawer::Inspector, "Inspector"),
+        ] {
+            harness.state_mut().work.drawer = Some(drawer);
+            harness.step();
+            harness.step();
+
+            let overlay = harness
+                .get_by_role_and_label(egui::accesskit::Role::Window, label)
+                .rect();
+            assert!(
+                (overlay.center().y - height / 2.0).abs() <= 1.0,
+                "{label} drawer is not vertically centered at {width}x{height}: {overlay:?}",
+            );
+            match drawer {
+                Drawer::Workflow => assert!(
+                    (overlay.left() - 12.0).abs() <= 1.0,
+                    "Workflow drawer is not center-left aligned at {width}x{height}: {overlay:?}",
+                ),
+                Drawer::Inspector => assert!(
+                    (overlay.right() - (width - 12.0)).abs() <= 1.0,
+                    "Inspector drawer is not center-right aligned at {width}x{height}: {overlay:?}",
+                ),
+            }
+            assert!(
+                overlay.left() >= -0.5 && overlay.right() <= width + 0.5,
+                "{label} drawer is outside {width}x{height}: {overlay:?}",
+            );
+            assert!(
+                harness
+                    .query_by_role_and_label(
+                        egui::accesskit::Role::Button,
+                        &format!("Close {label}"),
+                    )
+                    .is_some(),
+                "{label} drawer has no contextual close action at {width}x{height}",
+            );
+
+            harness.state_mut().work.drawer = None;
+            harness.step();
+        }
+    }
+}
+
+#[test]
 fn wide_inspector_uses_the_toolbar_toggle_and_returns_its_width_to_the_canvas() {
     let api = Rc::new(SpyApi::new());
     let mut harness = loaded_work_harness(api);

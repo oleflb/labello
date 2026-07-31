@@ -51,7 +51,9 @@ Only after that continue with the next issue.
   panel UI element borders shortly flash red.
   - Completed on 2026-07-30 by preserving parent widget-ID sequences while
     optional workspace action and side panels are hidden.
-- [ ] Center-align the workflow inspector mobile overlay horizontally
+- [x] Center-align the workflow inspector mobile overlay horizontally
+  - Completed on 2026-07-31 by aligning Workflow center-left and Inspector
+    center-right across responsive layouts.
 - [ ] Refocus buttons should have a shortcut and look better.
 - [ ] Mobile nav menu left drawer instead of burger menu
 - [ ] Add an additional configurable shortcut for panning

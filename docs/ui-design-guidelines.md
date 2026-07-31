@@ -43,7 +43,8 @@ and history.
 - Render each action once per layout. Keep primary work actions visible and move
   secondary actions to overflow when space is limited.
 - Wide work views use workflow, canvas, and inspector panes; Medium and Compact
-  use drawers and bottom actions.
+  use center-left Workflow and center-right Inspector drawers with bottom
+  actions.
 - Use aligned rows or grids for desktop comparison. Use 44-point, touch-friendly
   cards and stacked fields on Compact layouts. Keep forms and pages bounded.
 - Truncate or wrap long content deliberately; expose the complete value by
