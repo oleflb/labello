@@ -304,14 +304,16 @@ See the current [architecture and ownership map](docs/architecture.md), the
 [import](docs/import.md) and [UI](docs/ui-ownership.md) ownership references.
 
 The API server does not serve the browser distribution itself. The supported
-single-host production deployment packages the server, the complete Trunk
-distribution, its public runtime configuration, and Caddy into one immutable
-OCI image. Rootful Podman runs that image as separate API and web containers
-inside one systemd-managed pod.
+production deployment packages the server, complete Trunk distribution,
+public runtime configuration, and a static Caddy server into one immutable OCI
+image. A dedicated `labello` account runs that image as separate API and web
+containers in one rootless Quadlet pod. A separately managed Caddy host
+terminates public TLS and proxies over a protected private network to the two
+Labello backend ports.
 
-On a dedicated systemd Linux host with cgroup v2 and Podman 5.4 or newer,
-configure the two public hostnames in `deploy/.env`, then use the four-recipe
-interface from the deployment directory:
+On a systemd Linux host with cgroup v2 and Podman 5.4 or newer, configure the
+two public hostnames, the Labello host's private IPv4 address, and the Git
+source in `deploy/.env`, then use the four-recipe interface:
 
 ```sh
 cd deploy
@@ -322,10 +324,12 @@ just check
 just deploy
 ```
 
-The host does not need Rust, Trunk, or Caddy installed. `just deploy` builds one
-image with Podman and activates both containers together. See the
-[single-host Podman runbook](docs/operations.md#podman-single-host-runbook) for
-prerequisites, DNS, backup, failure, and data-aware rollback requirements.
+The Labello host does not need Rust, Trunk, or a host Caddy installation.
+`just deploy` builds one image in the `labello` account's rootless Podman store
+and activates both containers together. See the
+[rootless Podman runbook](docs/operations.md#rootless-podman-behind-external-caddy)
+for the external Caddy snippet, firewall contract, prerequisites, backup,
+failure, and data-aware rollback requirements.
 
 `apps/egui-mcp-inspector` is a standalone native development tool outside the
 main workspace. It reuses `labello-ui` with deterministic demo state by default

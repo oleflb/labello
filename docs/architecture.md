@@ -124,19 +124,23 @@ demonstrated need.
 
 ## Production composition
 
-The supported single-host deployment builds one immutable OCI image containing
+The supported deployment builds one immutable OCI image containing
 `labello-server`, the complete Trunk browser distribution, its generated public
-runtime configuration, Caddy, and revision metadata. Rootful Podman runs the
-same image ID twice inside one Quadlet-managed pod: an unprivileged API
-container owns the dataset mount, while an unprivileged Caddy container owns
-only its certificate/configuration state and serves the image's read-only web
-tree. A single `current` image tag therefore changes the browser and API as one
-release without moving deployment policy into an application crate.
+runtime configuration, an HTTP-only static Caddy configuration, and revision
+metadata. A dedicated `labello` account runs the same image ID twice inside one
+rootless Quadlet pod: the API container owns the dataset mount, while the web
+container serves only the image's read-only browser tree. A single `current`
+image tag therefore changes the browser and API as one release without moving
+deployment policy into an application crate.
 
-The API listens on all interfaces only inside the pod. Podman publishes it on
-host loopback and exposes Caddy on public ports 80 and 443. Persistent datasets,
-read-only import roots, Caddy state, runtime configuration, and release metadata
-remain explicit host paths documented in [`operations.md`](operations.md).
+The API listens on `0.0.0.0:8080` and the static server on `:8081` only inside
+the pod. Rootless Podman maps them to fixed high ports on one configured private
+IPv4 address. A separately managed Caddy host terminates public TLS and proxies
+the application and API hostnames directly to those private ports. Persistent
+datasets, read-only import roots, runtime configuration, rootless image storage,
+and release metadata remain explicit host paths documented in
+[`operations.md`](operations.md); public certificate state belongs to the
+external Caddy host.
 
 ## Detailed ownership references
 

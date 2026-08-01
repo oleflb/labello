@@ -29,18 +29,15 @@ RUN { \
 
 FROM docker.io/library/caddy:2.10.2-alpine
 
-ARG LABELLO_UID
-ARG LABELLO_GID
 ARG LABELLO_COMMIT
 ARG LABELLO_BUILD_TIME
 
-RUN test -n "${LABELLO_UID}" \
-    && test -n "${LABELLO_GID}" \
-    && ! awk -F: -v id="${LABELLO_UID}" '$3 == id { found=1 } END { exit !found }' /etc/passwd \
-    && ! awk -F: -v id="${LABELLO_GID}" '$3 == id { found=1 } END { exit !found }' /etc/group \
-    && addgroup -g "${LABELLO_GID}" labello \
+RUN setcap -r /usr/bin/caddy \
+    && ! awk -F: '$3 == 10001 { found=1 } END { exit !found }' /etc/passwd \
+    && ! awk -F: '$3 == 10001 { found=1 } END { exit !found }' /etc/group \
+    && addgroup -g 10001 labello \
     && adduser -D -H -h /nonexistent -s /sbin/nologin \
-        -u "${LABELLO_UID}" -G labello labello
+        -u 10001 -G labello labello
 
 COPY --from=builder /src/target/release/labello-server /usr/local/bin/labello-server
 COPY --from=builder /src/apps/labello-wasm/dist/ /srv/labello/web/

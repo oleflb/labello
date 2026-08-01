@@ -7,12 +7,15 @@ readonly DEPLOYMENTS_DIR=/var/lib/labello/deployments
 readonly RELEASES_DIR=/var/lib/labello/deployments/releases
 readonly LOCK_FILE=/var/lib/labello/deployments/deploy.lock
 readonly BLOCKER=/var/lib/labello/deployments/BLOCKED
+readonly BUILD_ROOT=/var/lib/labello/tmp
 readonly SERVER_CONFIG=/etc/labello/labello.server.toml
 readonly SERVER_ENV=/etc/labello/labello.env
-readonly CADDY_ENV=/etc/labello/caddy.env
 readonly OPERATOR_FILE=/etc/labello/deploy-operator
+readonly ROOTLESS_QUADLET_BASE=/etc/containers/systemd/users
 readonly CURRENT_IMAGE=localhost/labello:current
 readonly PREVIOUS_IMAGE=localhost/labello:previous
+readonly API_BACKEND_PORT=24180
+readonly WEB_BACKEND_PORT=24181
 readonly HEALTH_RESPONSE='{"ok":true,"service":"labello"}'
 
 activated=0
@@ -22,7 +25,9 @@ blocker_was_present=0
 blocker_changed=0
 published=0
 staging_dir=
+build_context=
 temp_dir=
+labello_uid=
 
 fail() {
     printf 'deploy: %s\n' "$*" >&2
@@ -48,16 +53,52 @@ validate_domain() {
     done
 }
 
+validate_ipv4() {
+    local value="$1"
+    local a b c d extra octet
+    IFS='.' read -r a b c d extra <<< "$value"
+    [[ -n "$a" && -n "$b" && -n "$c" && -n "$d" && -z "${extra:-}" ]] || return 1
+    for octet in "$a" "$b" "$c" "$d"; do
+        [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+    (( 10#$a != 0 && 10#$a != 127 && 10#$a < 224 ))
+}
+
+ipv4_is_assigned() {
+    ip -o -4 address show | awk -v expected="$1" '
+        { split($4, address, "/"); if (address[1] == expected) found = 1 }
+        END { exit !found }
+    '
+}
+
+ports_are_free() {
+    ! ss -H -ltn | awk \
+        -v ip="$LABELLO_BACKEND_IP" -v api="$API_BACKEND_PORT" -v web="$WEB_BACKEND_PORT" '
+        {
+            endpoint = $4
+            port = endpoint
+            sub(/^.*:/, "", port)
+            if (port != api && port != web) next
+            address = endpoint
+            sub(/:[^:]*$/, "", address)
+            if (address == ip || address == "0.0.0.0" || address == "*" ||
+                address == "[::]" || address == "::") found = 1
+        }
+        END { exit !found }
+    '
+}
+
 load_deployment_environment() {
     [[ -r "${SCRIPT_DIR}/.env" ]] || fail "missing deploy/.env; run 'just init-env' first"
 
     local actual_keys expected_keys
     actual_keys="$(sed -nE 's/^([A-Z][A-Z0-9_]*)=.*/\1/p' "${SCRIPT_DIR}/.env" | sort)"
-    expected_keys="$(printf '%s\n' \
-        LABELLO_API_DOMAIN LABELLO_APP_DOMAIN LABELLO_GIT_BRANCH LABELLO_GIT_REMOTE | sort)"
+    expected_keys="$(printf '%s\n' LABELLO_API_DOMAIN LABELLO_APP_DOMAIN \
+        LABELLO_BACKEND_IP LABELLO_GIT_BRANCH LABELLO_GIT_REMOTE | sort)"
     [[ "$actual_keys" == "$expected_keys" ]] \
-        || fail "deploy/.env must define exactly the four documented LABELLO variables once"
-    if grep -Ev '^[[:space:]]*(#.*)?$|^(LABELLO_APP_DOMAIN|LABELLO_API_DOMAIN|LABELLO_GIT_REMOTE|LABELLO_GIT_BRANCH)=.+$' \
+        || fail "deploy/.env must define exactly the five documented LABELLO variables once"
+    if grep -Ev '^[[:space:]]*(#.*)?$|^(LABELLO_APP_DOMAIN|LABELLO_API_DOMAIN|LABELLO_BACKEND_IP|LABELLO_GIT_REMOTE|LABELLO_GIT_BRANCH)=.+$' \
         "${SCRIPT_DIR}/.env" | grep -q .; then
         fail "deploy/.env contains an unsupported line"
     fi
@@ -69,6 +110,7 @@ load_deployment_environment() {
     done < "${SCRIPT_DIR}/.env"
     : "${LABELLO_APP_DOMAIN:?LABELLO_APP_DOMAIN is required}"
     : "${LABELLO_API_DOMAIN:?LABELLO_API_DOMAIN is required}"
+    : "${LABELLO_BACKEND_IP:?LABELLO_BACKEND_IP is required}"
     : "${LABELLO_GIT_REMOTE:?LABELLO_GIT_REMOTE is required}"
     : "${LABELLO_GIT_BRANCH:?LABELLO_GIT_BRANCH is required}"
     validate_domain "$LABELLO_APP_DOMAIN" \
@@ -77,53 +119,88 @@ load_deployment_environment() {
         || fail "LABELLO_API_DOMAIN is not an ordinary DNS hostname"
     [[ "${LABELLO_APP_DOMAIN,,}" != "${LABELLO_API_DOMAIN,,}" ]] \
         || fail "application and API domains must be distinct"
+    validate_ipv4 "$LABELLO_BACKEND_IP" \
+        || fail "LABELLO_BACKEND_IP must be a non-loopback unicast IPv4 literal"
+    ipv4_is_assigned "$LABELLO_BACKEND_IP" \
+        || fail "LABELLO_BACKEND_IP is not assigned to this host"
     [[ "$LABELLO_GIT_REMOTE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
         || fail "LABELLO_GIT_REMOTE must be an ordinary Git remote name"
     git check-ref-format --branch "$LABELLO_GIT_BRANCH" >/dev/null \
         || fail "LABELLO_GIT_BRANCH is not a valid branch name"
 }
 
+render() {
+    local source="$1"
+    local destination="$2"
+    sed \
+        -e "s/@LABELLO_APP_DOMAIN@/${LABELLO_APP_DOMAIN}/g" \
+        -e "s/@LABELLO_API_DOMAIN@/${LABELLO_API_DOMAIN}/g" \
+        -e "s/@LABELLO_BACKEND_IP@/${LABELLO_BACKEND_IP}/g" \
+        "$source" > "$destination"
+}
+
+as_labello() {
+    sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/${labello_uid}" "$@"
+}
+
+rootless_systemctl() {
+    as_labello systemctl --user "$@"
+}
+
+set_blocker() {
+    sudo install -m 0640 -o "$(id -un)" -g labello /dev/null "$BLOCKER"
+}
+
 restore_blocker_state() {
     if [[ "$blocker_was_present" -eq 1 ]]; then
-        sudo install -m 0644 -o root -g root /dev/null "$BLOCKER" || true
+        set_blocker || true
     else
         sudo rm -f -- "$BLOCKER" || true
     fi
+}
+
+cleanup_build_context() {
+    [[ -n "$build_context" ]] || return
+    if [[ "$build_context" == "${BUILD_ROOT}/build-"* && "$build_context" != "$BUILD_ROOT" ]]; then
+        as_labello rm -rf -- "$build_context" >/dev/null 2>&1 || true
+    fi
+    build_context=
 }
 
 on_exit() {
     local status="$1"
     trap - EXIT
     [[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"
+    cleanup_build_context
     if [[ "$status" -eq 0 ]]; then
         return
     fi
 
     if [[ "$activated" -eq 1 ]]; then
-        sudo install -m 0644 -o root -g root /dev/null "$BLOCKER" >/dev/null 2>&1 || true
-        sudo systemctl stop labello-web.service >/dev/null 2>&1 || true
-        sudo systemctl stop labello-pod.service >/dev/null 2>&1 || true
+        set_blocker >/dev/null 2>&1 || true
+        rootless_systemctl stop labello-web.service >/dev/null 2>&1 || true
+        rootless_systemctl stop labello-pod.service >/dev/null 2>&1 || true
         printf '%s\n' \
             'Deployment failed after activation. The Labello pod is stopped and boot-blocked; no rollback was attempted.' \
-            'Inspect with:' \
-            '  systemctl status labello-pod.service labello-api.service labello-web.service' \
-            '  journalctl -u labello-api.service -u labello-web.service -n 200 --no-pager' \
-            '  sudo podman image inspect localhost/labello:current' \
+            'Inspect with the rootless labello account:' \
+            "  sudo -H -u labello env XDG_RUNTIME_DIR=/run/user/${labello_uid} systemctl --user status labello-pod.service labello-api.service labello-web.service" \
+            "  sudo -H -u labello env XDG_RUNTIME_DIR=/run/user/${labello_uid} journalctl --user -u labello-api.service -u labello-web.service -n 200 --no-pager" \
+            "  sudo -H -u labello env XDG_RUNTIME_DIR=/run/user/${labello_uid} podman image inspect localhost/labello:current" \
             '  readlink -f /var/lib/labello/deployments/current' \
             '  readlink -f /var/lib/labello/deployments/previous' >&2
     elif [[ "$stop_started" -eq 1 ]]; then
         restore_blocker_state
         if [[ "$old_was_active" -eq 1 ]]; then
-            if ! sudo systemctl start labello-pod.service \
-                || ! sudo systemctl start labello-api.service labello-web.service; then
-                printf '%s\n' 'Could not fully restart the unchanged previous pod.' >&2
+            if ! rootless_systemctl start labello-pod.service; then
+                printf '%s\n' 'Could not restart the unchanged previous pod.' >&2
             fi
         fi
     elif [[ "$blocker_changed" -eq 1 ]]; then
         restore_blocker_state
     fi
 
-    if [[ "$published" -eq 0 && -n "$staging_dir" && -d "$staging_dir" ]]; then
+    if [[ "$published" -eq 0 && -n "$staging_dir" \
+        && "$staging_dir" == "${RELEASES_DIR}/."*.staging.* && -d "$staging_dir" ]]; then
         rm -rf -- "$staging_dir"
     fi
     exit "$status"
@@ -137,10 +214,76 @@ require_operator() {
         || fail "deployment must be run by the operator that performed installation"
 }
 
+require_subids() {
+    local file
+    for file in /etc/subuid /etc/subgid; do
+        sudo awk -F: -v user=labello -v minimum=65536 '
+            NF == 3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 {
+                owner[++count] = $1
+                low[count] = $2
+                high[count] = $2 + $3 - 1
+            }
+            $1 == user {
+                found = 1
+                if (NF != 3 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $3 <= 0) {
+                    malformed = 1
+                } else if ($3 >= minimum) {
+                    adequate = 1
+                }
+            }
+            END {
+                for (i = 1; i <= count; i++) {
+                    if (owner[i] != user) continue
+                    for (j = 1; j <= count; j++) {
+                        if (i == j || owner[j] == user) continue
+                        if (low[i] <= high[j] && low[j] <= high[i]) conflict = 1
+                    }
+                }
+                exit !(found && adequate && !malformed && !conflict)
+            }
+        ' "$file" \
+            || fail "labello needs a valid, non-conflicting 65536-ID range in ${file}"
+    done
+}
+
+require_rootless_installation() {
+    getent passwd labello >/dev/null || fail "labello account is missing; run 'just install' first"
+    labello_uid="$(id -u labello)"
+    [[ "$(getent passwd labello | awk -F: '{ print $6 }')" == /var/lib/labello ]] \
+        || fail "labello home is not /var/lib/labello"
+    require_subids
+    [[ "$(sudo loginctl show-user labello -p Linger --value)" == yes ]] \
+        || fail "systemd lingering is not enabled for labello"
+    sudo systemctl is-active --quiet "user@${labello_uid}.service" \
+        || fail "the labello user systemd manager is not active"
+    [[ "$(as_labello podman info --format '{{.Host.Security.Rootless}}')" == true ]] \
+        || fail "Podman for labello is not rootless"
+    [[ "$(as_labello podman info --format '{{.Host.CgroupsVersion}}')" == v2 ]] \
+        || fail "rootless Podman must use cgroup v2"
+    [[ "$(as_labello podman info --format '{{.Store.GraphRoot}}')" \
+        == /var/lib/labello/.local/share/containers/storage ]] \
+        || fail "labello rootless Podman is using an unexpected image store"
+
+    local quadlet_dir="${ROOTLESS_QUADLET_BASE}/${labello_uid}"
+    local quadlet
+    for quadlet in labello.pod labello-api.container labello-web.container; do
+        sudo test -f "${quadlet_dir}/${quadlet}" \
+            || fail "installed rootless Quadlet is missing: ${quadlet_dir}/${quadlet}"
+    done
+    render "${SCRIPT_DIR}/quadlet/labello.pod.template" "$temp_dir/expected-labello.pod"
+    sudo cmp -s "$temp_dir/expected-labello.pod" "${quadlet_dir}/labello.pod" \
+        || fail "installed pod does not match deploy/.env; rerun 'just install'"
+    sudo cmp -s "${SCRIPT_DIR}/quadlet/labello-api.container" \
+        "${quadlet_dir}/labello-api.container" \
+        || fail "installed API Quadlet is outdated; rerun 'just install'"
+    sudo cmp -s "${SCRIPT_DIR}/quadlet/labello-web.container" \
+        "${quadlet_dir}/labello-web.container" \
+        || fail "installed web Quadlet is outdated; rerun 'just install'"
+}
+
 require_complete_configuration() {
     sudo test -f "$SERVER_CONFIG" || fail "required configuration is missing: $SERVER_CONFIG"
     sudo test -f "$SERVER_ENV" || fail "required secret environment is missing: $SERVER_ENV"
-    sudo test -f "$CADDY_ENV" || fail "required Caddy environment is missing: $CADDY_ENV"
     if sudo grep -Fq REPLACE_ME "$SERVER_CONFIG" \
         || sudo grep -Fq REPLACE_ME "$SERVER_ENV"; then
         fail "replace every REPLACE_ME value in the production configuration"
@@ -163,11 +306,6 @@ require_complete_configuration() {
         || fail "GITHUB_CLIENT_SECRET is missing"
     sudo grep -Fxq "GITHUB_REDIRECT_URI=https://${LABELLO_API_DOMAIN}/auth/github/callback" \
         "$SERVER_ENV" || fail "GITHUB_REDIRECT_URI does not match the configured API domain"
-
-    printf 'LABELLO_APP_DOMAIN=%s\nLABELLO_API_DOMAIN=%s\n' \
-        "$LABELLO_APP_DOMAIN" "$LABELLO_API_DOMAIN" > "$temp_dir/expected-caddy.env"
-    sudo cmp -s "$temp_dir/expected-caddy.env" "$CADDY_ENV" \
-        || fail "installed Caddy domains do not match deploy/.env; rerun 'just install'"
 }
 
 validate_image() {
@@ -176,8 +314,9 @@ validate_image() {
     local build_time="$3"
     local label
 
-    sudo podman run --rm --network none --entrypoint /bin/sh "$image" -ec '
+    as_labello podman run --rm --network none --entrypoint /bin/sh "$image" -ec '
         test -f /usr/local/bin/labello-server
+        test ! -L /usr/local/bin/labello-server
         test -x /usr/local/bin/labello-server
         test -f /usr/share/labello/REVISION
         test -f /srv/labello/web/index.html
@@ -185,14 +324,24 @@ validate_image() {
         test -n "$(find /srv/labello/web -type f -name "*.js" -print -quit)"
         test -n "$(find /srv/labello/web -type f -name "*.wasm" -print -quit)"
         test -z "$(find /srv/labello/web -mindepth 1 ! -type f ! -type d -print -quit)"
+        awk -F: '\''$1 == "labello" && $3 == 10001 && $4 == 10001 { found=1 } END { exit !found }'\'' /etc/passwd
+        awk -F: '\''$1 == "labello" && $3 == 10001 { found=1 } END { exit !found }'\'' /etc/group
+        test -z "$(getcap /usr/bin/caddy)"
+        grep -Fxq ":8081 {" /etc/caddy/Caddyfile
     '
+    [[ "$(as_labello podman run --rm --network none --user labello:labello \
+        --entrypoint /usr/bin/id "$image" -u)" == 10001 ]] \
+        || fail "image labello UID is not 10001"
+    [[ "$(as_labello podman run --rm --network none --user labello:labello \
+        --entrypoint /usr/bin/id "$image" -g)" == 10001 ]] \
+        || fail "image labello GID is not 10001"
 
-    sudo podman run --rm --network none --entrypoint /bin/cat "$image" \
+    as_labello podman run --rm --network none --entrypoint /bin/cat "$image" \
         /srv/labello/web/labello.client.json > "$temp_dir/image-client.json"
     cmp -s "$temp_dir/expected-client.json" "$temp_dir/image-client.json" \
         || fail "image browser configuration does not match deploy/.env"
 
-    sudo podman run --rm --network none --entrypoint /bin/cat "$image" \
+    as_labello podman run --rm --network none --entrypoint /bin/cat "$image" \
         /usr/share/labello/REVISION > "$temp_dir/image-revision"
     grep -Fxq "commit=${commit}" "$temp_dir/image-revision" \
         || fail "image revision does not contain the expected commit"
@@ -203,24 +352,25 @@ validate_image() {
     grep -Fxq 'trunk=trunk 0.21.14' "$temp_dir/image-revision" \
         || fail "image revision has the wrong Trunk version"
 
-    label="$(sudo podman image inspect --format '{{ index .Labels "org.opencontainers.image.revision" }}' "$image")"
+    label="$(as_labello podman image inspect --format '{{ index .Labels "org.opencontainers.image.revision" }}' "$image")"
     [[ "$label" == "$commit" ]] || fail "image revision label does not match"
-    label="$(sudo podman image inspect --format '{{ index .Labels "org.opencontainers.image.created" }}' "$image")"
+    label="$(as_labello podman image inspect --format '{{ index .Labels "org.opencontainers.image.created" }}' "$image")"
     [[ "$label" == "$build_time" ]] || fail "image creation label does not match"
-    label="$(sudo podman image inspect --format '{{ index .Labels "io.labello.rust.version" }}' "$image")"
+    label="$(as_labello podman image inspect --format '{{ index .Labels "io.labello.rust.version" }}' "$image")"
     [[ "$label" == 1.97.1 ]] || fail "image Rust label does not match"
-    label="$(sudo podman image inspect --format '{{ index .Labels "io.labello.trunk.version" }}' "$image")"
+    label="$(as_labello podman image inspect --format '{{ index .Labels "io.labello.trunk.version" }}' "$image")"
     [[ "$label" == 0.21.14 ]] || fail "image Trunk label does not match"
 
-    sudo podman run --rm --network none --env-file "$CADDY_ENV" \
+    as_labello podman run --rm --network none --read-only --read-only-tmpfs \
+        --cap-drop all --security-opt no-new-privileges --user labello:labello \
         --entrypoint /usr/bin/caddy "$image" \
         validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
-    if sudo podman history --no-trunc --format '{{.CreatedBy}}' "$image" \
+    if as_labello podman history --no-trunc --format '{{.CreatedBy}}' "$image" \
         | grep -Eq 'GITHUB_CLIENT_(ID|SECRET)|GITHUB_REDIRECT_URI|REPLACE_ME'; then
         fail "image history contains a secret-setting name or placeholder"
     fi
-    if sudo podman image inspect --format '{{json .Labels}}' "$image" \
+    if as_labello podman image inspect --format '{{json .Labels}}' "$image" \
         | grep -Eq 'GITHUB_CLIENT_(ID|SECRET)|GITHUB_REDIRECT_URI|REPLACE_ME'; then
         fail "image labels contain a secret-setting name or placeholder"
     fi
@@ -240,31 +390,43 @@ curl_body() {
         --max-time 4 "$url"
 }
 
+http_status() {
+    local url="$1"
+    curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+        --noproxy '*' --proto '=http,https' --max-time 4 "$url"
+}
+
 health_checks() {
     local image_id="$1"
     local missing_path="$2"
     local response status api_image web_image
 
-    api_image="$(sudo podman container inspect --format '{{.Image}}' labello-api 2>/dev/null)" \
+    api_image="$(as_labello podman container inspect --format '{{.Image}}' labello-api 2>/dev/null)" \
         || return 1
-    web_image="$(sudo podman container inspect --format '{{.Image}}' labello-web 2>/dev/null)" \
+    web_image="$(as_labello podman container inspect --format '{{.Image}}' labello-web 2>/dev/null)" \
         || return 1
     [[ "$api_image" == "$image_id" && "$web_image" == "$image_id" ]] || return 1
 
-    response="$(curl_body 'http://127.0.0.1:8080/health')" || return 1
+    response="$(curl_body "http://${LABELLO_BACKEND_IP}:${API_BACKEND_PORT}/health")" || return 1
     [[ "$response" == "$HEALTH_RESPONSE" ]] || return 1
+    status="$(http_status "http://${LABELLO_BACKEND_IP}:${WEB_BACKEND_PORT}/index.html")" || return 1
+    [[ "$status" == 200 ]] || return 1
+    curl --fail --silent --show-error --output "$temp_dir/direct-client.json" --noproxy '*' \
+        --proto '=http' --max-time 4 \
+        "http://${LABELLO_BACKEND_IP}:${WEB_BACKEND_PORT}/labello.client.json" || return 1
+    cmp -s "$temp_dir/expected-client.json" "$temp_dir/direct-client.json" || return 1
+    status="$(http_status "http://${LABELLO_BACKEND_IP}:${WEB_BACKEND_PORT}/${missing_path}")" || return 1
+    [[ "$status" == 404 ]] || return 1
+
     response="$(curl_body "https://${LABELLO_API_DOMAIN}/health")" || return 1
     [[ "$response" == "$HEALTH_RESPONSE" ]] || return 1
-    status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-        --noproxy '*' --proto '=https' --max-time 4 \
-        "https://${LABELLO_APP_DOMAIN}/index.html")" || return 1
+    status="$(http_status "https://${LABELLO_APP_DOMAIN}/index.html")" || return 1
     [[ "$status" == 200 ]] || return 1
     curl --fail --silent --show-error --output "$temp_dir/public-client.json" --noproxy '*' \
         --proto '=https' --max-time 4 \
         "https://${LABELLO_APP_DOMAIN}/labello.client.json" || return 1
     cmp -s "$temp_dir/expected-client.json" "$temp_dir/public-client.json" || return 1
-    status="$(curl --silent --output /dev/null --write-out '%{http_code}' --noproxy '*' \
-        --proto '=https' --max-time 4 "https://${LABELLO_APP_DOMAIN}/${missing_path}")" || return 1
+    status="$(http_status "https://${LABELLO_APP_DOMAIN}/${missing_path}")" || return 1
     [[ "$status" == 404 ]]
 }
 
@@ -274,14 +436,19 @@ main() {
     [[ "${EUID}" -ne 0 ]] || fail "run this command as the non-root deployment operator"
     local command
     for command in git curl flock find grep cmp cp cat install mv ln readlink date mktemp sudo \
-        podman systemctl rm chmod sleep sort sed basename id awk; do
+        podman systemctl rm chmod sleep sort sed basename id awk ip ss loginctl getent tar; do
         require_command "$command"
     done
     sudo -v
-    sudo podman info >/dev/null || fail "rootful Podman is unavailable"
 
     load_deployment_environment
     require_operator
+    temp_dir="$(mktemp -d)"
+    require_rootless_installation
+    if ! rootless_systemctl is-active --quiet labello-pod.service; then
+        ports_are_free \
+            || fail "TCP port ${API_BACKEND_PORT} or ${WEB_BACKEND_PORT} conflicts on the configured address"
+    fi
     [[ -d "$RELEASES_DIR" && -w "$RELEASES_DIR" ]] \
         || fail "$RELEASES_DIR is missing or not writable; run 'just install' first"
     [[ -e "$LOCK_FILE" && -w "$LOCK_FILE" ]] \
@@ -290,7 +457,6 @@ main() {
     exec 9>"$LOCK_FILE"
     flock -n 9 || fail "another deployment is already running"
 
-    temp_dir="$(mktemp -d)"
     if sudo test -e "$BLOCKER"; then
         blocker_was_present=1
     fi
@@ -299,7 +465,7 @@ main() {
         > "$temp_dir/expected-client.json"
 
     local repo_root branch remote remote_revision head commit build_time release_id
-    local release_image image_id labello_uid labello_gid
+    local release_image image_id
     repo_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
     cd "$repo_root"
     branch="$(git symbolic-ref --quiet --short HEAD)" \
@@ -322,38 +488,39 @@ main() {
     build_time="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     release_id="$(date -u +'%Y%m%dT%H%M%S%NZ')-${commit}"
     release_image="localhost/labello:${release_id}"
-    labello_uid="$(id -u labello)"
-    labello_gid="$(id -g labello)"
 
-    ! sudo podman image exists "$release_image" || fail "release image already exists: $release_image"
+    ! as_labello podman image exists "$release_image" \
+        || fail "release image already exists: $release_image"
     [[ ! -e "$RELEASES_DIR/$release_id" ]] || fail "release metadata already exists"
 
-    sudo podman build --pull=always --tag "$release_image" \
+    build_context="${BUILD_ROOT}/build-${release_id}.$$"
+    as_labello install -d -m 0700 "$build_context"
+    git archive --format=tar HEAD | as_labello tar -xf - -C "$build_context"
+    as_labello podman build --pull=always --tag "$release_image" \
         --build-arg "LABELLO_API_DOMAIN=${LABELLO_API_DOMAIN}" \
         --build-arg "LABELLO_COMMIT=${commit}" \
         --build-arg "LABELLO_BUILD_TIME=${build_time}" \
-        --build-arg "LABELLO_UID=${labello_uid}" \
-        --build-arg "LABELLO_GID=${labello_gid}" \
-        --file deploy/Containerfile .
+        --file "${build_context}/deploy/Containerfile" "$build_context"
 
-    image_id="$(sudo podman image inspect --format '{{.Id}}' "$release_image")"
+    image_id="$(as_labello podman image inspect --format '{{.Id}}' "$release_image")"
     [[ -n "$image_id" ]] || fail "built image has no image ID"
     validate_image "$release_image" "$commit" "$build_time"
+    cleanup_build_context
 
     staging_dir="$RELEASES_DIR/.${release_id}.staging.$$"
-    install -d -m 0755 "$staging_dir"
+    install -d -m 0750 "$staging_dir"
     printf '%s\n' "$image_id" > "$staging_dir/IMAGE_ID"
     cp "$temp_dir/image-revision" "$staging_dir/REVISION"
-    chmod 0444 "$staging_dir/IMAGE_ID" "$staging_dir/REVISION"
-    chmod 0555 "$staging_dir"
+    chmod 0440 "$staging_dir/IMAGE_ID" "$staging_dir/REVISION"
+    chmod 0550 "$staging_dir"
     mv "$staging_dir" "$RELEASES_DIR/$release_id"
     staging_dir=
     published=1
 
     local old_target= old_image_id= current_exists=0
-    if sudo podman image exists "$CURRENT_IMAGE"; then
+    if as_labello podman image exists "$CURRENT_IMAGE"; then
         current_exists=1
-        old_image_id="$(sudo podman image inspect --format '{{.Id}}' "$CURRENT_IMAGE")"
+        old_image_id="$(as_labello podman image inspect --format '{{.Id}}' "$CURRENT_IMAGE")"
     fi
     if [[ -L "$DEPLOYMENTS_DIR/current" ]]; then
         old_target="$(readlink "$DEPLOYMENTS_DIR/current")"
@@ -374,32 +541,32 @@ main() {
             || fail "current image tag and release IMAGE_ID disagree"
     fi
 
-    if sudo systemctl is-active --quiet labello-pod.service; then
+    if rootless_systemctl is-active --quiet labello-pod.service; then
         old_was_active=1
     fi
-    sudo install -m 0644 -o root -g root /dev/null "$BLOCKER"
+    set_blocker
     blocker_changed=1
     stop_started=1
-    if sudo systemctl is-active --quiet labello-web.service; then
-        sudo systemctl stop labello-web.service
+    if rootless_systemctl is-active --quiet labello-web.service; then
+        rootless_systemctl stop labello-web.service
     fi
     if [[ "$old_was_active" -eq 1 ]]; then
-        sudo systemctl stop labello-pod.service
+        rootless_systemctl stop labello-pod.service
     fi
 
     if [[ -n "$old_image_id" ]]; then
-        sudo podman tag "$old_image_id" "$PREVIOUS_IMAGE"
+        as_labello podman tag "$old_image_id" "$PREVIOUS_IMAGE"
         atomic_symlink "$old_target" "$DEPLOYMENTS_DIR/previous"
     fi
-    sudo podman tag "$release_image" "$CURRENT_IMAGE"
+    as_labello podman tag "$release_image" "$CURRENT_IMAGE"
     activated=1
-    [[ "$(sudo podman image inspect --format '{{.Id}}' "$CURRENT_IMAGE")" == "$image_id" ]] \
+    [[ "$(as_labello podman image inspect --format '{{.Id}}' "$CURRENT_IMAGE")" == "$image_id" ]] \
         || fail "current image tag did not resolve to the new image"
     atomic_symlink "releases/${release_id}" "$DEPLOYMENTS_DIR/current"
 
     sudo rm -f -- "$BLOCKER"
-    sudo systemctl start labello-pod.service
-    sudo install -m 0644 -o root -g root /dev/null "$BLOCKER"
+    rootless_systemctl start labello-pod.service
+    set_blocker
 
     local deadline=$((SECONDS + 60)) healthy=0
     local missing_path=".labello-deploy-missing-${release_id}"

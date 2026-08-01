@@ -1,8 +1,9 @@
 # Copy this file to labello.server.toml and adjust it for your environment.
 # The uncommented values are Labello's defaults.
 
-# The Podman deployment uses 0.0.0.0:8080 inside its isolated pod and publishes
-# that port only on host loopback. Keep the loopback default for host execution.
+# The rootless Podman deployment uses 0.0.0.0:8080 inside its isolated pod and
+# publishes it as private IPv4 port 24180 for external Caddy. Keep the loopback
+# default for direct host execution.
 bind = "127.0.0.1:8080"
 datasetsRoot = "datasets"
 bootstrapAdmins = ["admin"]

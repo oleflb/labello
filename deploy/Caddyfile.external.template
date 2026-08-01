@@ -1,0 +1,7 @@
+@LABELLO_APP_DOMAIN@ {
+	reverse_proxy http://@LABELLO_BACKEND_IP@:24181
+}
+
+@LABELLO_API_DOMAIN@ {
+	reverse_proxy http://@LABELLO_BACKEND_IP@:24180
+}

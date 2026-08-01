@@ -175,34 +175,64 @@ Retain logs according to local audit policy while preserving the redaction
 rules above. Restrict access to logs because safe identifiers and aggregate
 activity still reveal operational metadata.
 
-### Podman Single-Host Runbook
+### Rootless Podman Behind External Caddy
 
-The supported repository deployment targets one dedicated systemd Linux host
-with cgroup v2 and rootful Podman 5.4 or newer. Install and maintain Podman with
-Quadlet support, `git`, `curl`, `just`, `sudo`, `util-linux` (`flock`), `iproute`
-or the distribution's equivalent providing `ss`, and ordinary GNU core/find
-utilities. The host does not need Caddy, Rust, Cargo, Rustup, a WASM target, or
-Trunk: pinned build and runtime toolchains live in the container build.
-The operator and rootful Podman storage must be able to reach the configured
-Git remote, Docker Hub, crates.io, and the Rust/Trunk build-time download
-endpoints.
+The supported repository deployment uses two hosts. A separately managed Caddy
+host owns public DNS, ports 80/443, TLS, and ACME state. The Labello host runs
+the API and static browser server in one rootless Podman pod and exposes only
+two HTTP backends on a stable private or VPN IPv4 address:
 
-This is a fresh-install interface. `just install` refuses a legacy host
-`labello.service`, an active or enabled host `caddy.service`, or occupied ports
-80, 443, or 8080. It never disables or migrates those services. Remove an old
-host-native deployment explicitly before using this runbook.
+```text
+https://<app-domain> -> external Caddy -> http://<backend-ip>:24181
+https://<api-domain> -> external Caddy -> http://<backend-ip>:24180
+```
 
-Create DNS A records for two distinct hostnames before installation: one for
-the browser and one for the API. Both must resolve to the host. Permit TCP
-80 and TCP/UDP 443 through the host firewall; Podman publishes the API only on
-host loopback port 8080.
+Install and maintain systemd, cgroup v2, Podman 5.4 or newer with Quadlet,
+rootless networking (`pasta` or the installed Podman alternative),
+`newuidmap`/`newgidmap`, Git, Just, curl, sudo, `flock`, `ss`, `ip`, tar,
+`findmnt`, and ordinary GNU utilities on the Labello host. Rootless image
+storage must use a supported local filesystem. The host does not need Caddy,
+Rust, Cargo, Rustup, a WASM target, or Trunk. The operator and dedicated
+`labello` account must reach the Git remote, Docker Hub, crates.io, and the
+Rust/Trunk build sources.
+
+Public A/AAAA records for both domains point to the external Caddy host, not the
+Labello host. Configure that Caddy before the first deployment:
+
+```caddyfile
+labello.example.com {
+	reverse_proxy http://10.0.0.20:24181
+}
+
+api.labello.example.com {
+	reverse_proxy http://10.0.0.20:24180
+}
+```
+
+Replace the names and address with the deployment values. Permit TCP 24180 and
+24181 on the Labello host only from the Caddy host. Plain HTTP is supported only
+across a trusted private LAN, VLAN, WireGuard, or equivalent VPN. Firewall and
+external Caddy configuration are explicit operator responsibilities. That
+host's configuration, ACME account, and certificate state are outside the
+Labello scripts and Labello backup scope. The Labello host must retain local
+access to its own backend address and must resolve and reach both public HTTPS
+names so deployment can verify the direct and complete proxy paths.
+Use ordinary `reverse_proxy` behavior so Caddy supplies its standard forwarded
+headers; do not add an SPA rewrite. Application deployments do not require an
+external-Caddy reload.
+
+This is a fresh-install interface. `just install` rejects legacy host-native or
+rootful Labello units, pods, containers, images, and Caddy state instead of
+migrating them. It permits unrelated Caddy and Podman workloads. The configured
+backend IPv4 address must be assigned locally, and ports 24180/24181 must be
+free.
 
 From the deployment checkout, as one non-root operator with working `sudo`:
 
 ```sh
 cd deploy
 just init-env
-# Edit .env: application domain, API domain, Git remote, and branch only.
+# Edit .env: app domain, API domain, backend IPv4, Git remote, and branch.
 just install
 sudoedit /etc/labello/labello.server.toml
 sudoedit /etc/labello/labello.env
@@ -211,94 +241,107 @@ just check
 just deploy
 ```
 
-`just install` records that operator, creates the non-login `labello` account,
-installs rootful Quadlets, and reloads systemd without starting the pod. It is
-idempotent: reruns update Quadlets and the non-secret Caddy domain environment
-but do not overwrite the server configuration or OAuth environment. A
-`BLOCKED` marker prevents boot activation until the first deployment passes.
-Do not enable the generated transient service directly; the Quadlet pod's
-tracked `[Install]` section supplies its `multi-user.target` boot dependency.
+`just install` records the operator; creates the locked, non-login `labello`
+account; provisions collision-free subordinate UID/GID ranges when absent;
+enables systemd lingering; initializes rootless Podman; and installs
+administrator-managed user Quadlets beneath
+`/etc/containers/systemd/users/<labello-uid>`. Reruns update Quadlets while
+preserving the server configuration, OAuth environment, subordinate IDs,
+images, and data. A `BLOCKED` marker prevents the user service from starting
+before a release passes health validation. Quadlet's `[Install]` section links
+the pod into the user manager's `default.target`; do not enable the generated
+transient service directly.
 
 The fixed runtime layout is:
 
 ```text
-/etc/labello/{labello.server.toml,labello.env,caddy.env,deploy-operator}
-/etc/containers/systemd/{labello.pod,labello-api.container,labello-web.container}
+/etc/labello/{labello.server.toml,labello.env,deploy-operator}
+/etc/containers/systemd/users/<uid>/{labello.pod,labello-api.container,labello-web.container}
+/var/lib/labello/.config/
+/var/lib/labello/.local/share/containers/storage/
 /var/lib/labello/datasets/
 /var/lib/labello/imports/
-/var/lib/labello/caddy/{data,config}/
+/var/lib/labello/tmp/
 /var/lib/labello/deployments/current -> releases/<release-id>
 /var/lib/labello/deployments/previous -> releases/<previous-release-id>
 /var/lib/labello/deployments/releases/<release-id>/{IMAGE_ID,REVISION}
 ```
 
-The `labello` account privately owns datasets and Caddy state. The deployment
-operator owns import staging and release metadata; the `labello` group can read
-the import tree. Configure server filesystem import roots only beneath
-`/var/lib/labello/imports`. Mount external source filesystems beneath that host
-directory when required; the API container always receives the tree read-only.
+The `labello` account privately owns datasets, temporary build contexts, and
+its rootless image store. The operator owns import staging and release metadata;
+the `labello` group can read imports. `/etc/labello/labello.env` is
+`root:labello` mode 0640 because the rootless service manager must load it.
+Configure filesystem import roots only beneath `/var/lib/labello/imports` and
+mount external storage there read-only. On SELinux hosts, `just install` labels
+the tracked mount roots; separately mounted filesystems require an equivalent
+container-readable label supplied by the operator.
 
 One immutable image contains the server, browser files, public browser
-configuration, Caddyfile, and revision. `labello-api` and `labello-web` run the
-same image ID in the `labello` pod with different entrypoints and mount sets.
-The API listens on `0.0.0.0:8080` only inside the pod; Podman exposes it as
-`127.0.0.1:8080` on the host. Caddy serves the image's read-only web tree and
-proxies the API through pod loopback. Its writable certificate state persists
-across releases.
+configuration, HTTP-only static Caddyfile, and revision. `labello-api` and
+`labello-web` run the same image ID with a fixed image UID/GID of 10001 mapped
+to the host `labello` account through `keep-id`. The API listens on pod port
+8080 and maps to private port 24180; the web server listens on pod port 8081 and
+maps to private port 24181. The web container has no certificate state, API
+proxy, capability, or writable mount.
 
 Static serving has no SPA fallback. A missing path, especially a missing
-`labello.client.json`, returns a real 404. Caddy applies `no-store` to the
-runtime file, `no-cache, must-revalidate` to the index, and normal gzip/zstd
-compression to eligible assets.
+`labello.client.json`, returns a real 404. The internal web server applies
+`no-store` to the runtime file, `no-cache, must-revalidate` to the index, and
+normal gzip/zstd compression. External Caddy must pass these responses through
+without rewriting them.
 
-`just deploy` locks against concurrent runs, fast-forwards the configured
-branch to its fetched remote tip, builds a uniquely tagged image with rootful
-Podman, and validates its contents, revision, labels, public configuration, and
-Caddyfile before stopping the old pod. It points both containers at one new
-`current` image tag, starts them, and for up to 60 seconds verifies their image
-IDs, exact local and public API health responses, the public index and client
-configuration, and a real public 404.
+`just deploy` fast-forwards the configured branch to its fetched remote tip,
+exports only that commit with `git archive`, and builds inside the `labello`
+account's rootless Podman store. It validates content, fixed identities,
+revision, labels, public configuration, Caddyfile, and secret exclusion before
+stopping the old pod. A single `current` tag activates both containers. For up
+to 60 seconds it checks their image IDs, direct private API/web responses,
+public HTTPS API/web responses, exact client configuration, and direct/public
+404 behavior.
 
-Fetch, build, and preactivation validation failures leave the active image and
-pod untouched. If stopping the old pod fails, the unchanged pod is restarted.
-Once `current` changes, deployment is forward-only: a startup or health failure
-leaves `current`, `previous`, every immutable image tag, release metadata, and
-journal evidence in place, stops the pod, and retains `BLOCKED` so reboot cannot
-start the failed release. No automatic rollback is attempted because startup
-may already have migrated persistent data.
+Fetch, build, and preactivation failures leave the active release untouched.
+Once `current` changes, deployment is forward-only: failure retains `current`,
+`previous`, immutable rootless image tags, metadata, and journal evidence;
+stops the pod; and retains `BLOCKED`. It never automatically starts an older
+image because startup may already have migrated persistent data. An outage or
+misconfiguration on the external Caddy path therefore fails deployment health
+and leaves the new release stopped and blocked.
 
 Backups are an external operator responsibility. Before an upgrade that may
 change persistent schemas, stop traffic and create and verify a complete backup
 of `/var/lib/labello/datasets` plus matching `/etc/labello` configuration and
 secrets. `just deploy` neither creates nor verifies a backup.
 
-For a data-aware rollback, keep the pod stopped, preserve the failed dataset
-root, restore the complete backup matching the intended immutable release, tag
-that release as `localhost/labello:current`, update the `current` and `previous`
-metadata symlinks, remove `BLOCKED`, and start `labello-pod.service`. Repeat the
-public and local health checks, inspect migration logs, authenticate, and read
-representative datasets. Never run an older image against data touched by a
-newer one unless exact reverse compatibility is documented.
+For a data-aware rollback, keep the rootless pod stopped, preserve the failed
+dataset, restore the complete backup matching the selected immutable image,
+retag that image as `localhost/labello:current` in the `labello` Podman store,
+update `current` and `previous` metadata symlinks, remove `BLOCKED`, and start
+the user pod. Repeat direct and public health checks before restoring traffic.
+Never run an older image against data touched by a newer release unless exact
+reverse compatibility is documented.
 
-Images and release metadata are never removed automatically. After verifying
-that a release is neither `current` nor `previous` and no longer has diagnostic
-or recovery value, remove only its named Podman image tag and matching metadata
-directory through the operator's normal maintenance process. Do not use broad
-image-prune commands on a shared host.
+Images and release metadata are never removed automatically. Remove only a
+named immutable tag and its matching metadata after confirming it is neither
+`current` nor `previous` and has no diagnostic or recovery value. Do not use
+broad image-prune commands.
 
 Useful inspection commands are:
 
 ```sh
-systemctl status labello-pod.service labello-api.service labello-web.service
-journalctl -u labello-api.service -u labello-web.service -n 200 --no-pager
-sudo podman pod inspect labello
-sudo podman ps --pod
-sudo podman image inspect localhost/labello:current
-sudo podman logs labello-api
-sudo podman logs labello-web
+uid="$(id -u labello)"
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" \
+  systemctl --user status labello-pod.service labello-api.service labello-web.service
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" \
+  journalctl --user -u labello-api.service -u labello-web.service -n 200 --no-pager
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" podman pod inspect labello
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" podman ps --pod
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" \
+  podman image inspect localhost/labello:current
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" podman logs labello-api
+sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/$uid" podman logs labello-web
 readlink -f /var/lib/labello/deployments/current
 cat /var/lib/labello/deployments/current/REVISION
-curl --fail http://127.0.0.1:8080/health
+curl --fail http://10.0.0.20:24180/health
 ```
 
 ## Capacity Planning

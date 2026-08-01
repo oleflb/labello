@@ -83,12 +83,15 @@ public artifact and must never contain OAuth credentials, cookies, tokens, or
 other secrets. Static hosting must return a real 404 for an absent
 `labello.client.json`, rather than rewriting that path to `index.html`.
 
-The Podman single-host deployment generates this public file from
-`LABELLO_API_DOMAIN` while building the immutable release image. Change the
-domain in `deploy/.env`, rerun `just install` to update the Caddy environment,
-reconcile the preserved server and OAuth configuration, and run `just deploy`.
-The new browser runtime file becomes visible only when that image is activated;
-the active image is never modified in place.
+The rootless Podman deployment generates this public file from
+`LABELLO_API_DOMAIN` while building the immutable release image. The URL is the
+public HTTPS API hostname served by the external Caddy host, not the private
+HTTP backend address. To change a public domain, update `deploy/.env` and the
+external Caddy configuration, reconcile the preserved server browser origin and
+OAuth callback, and run `just deploy`. The new browser runtime file becomes
+visible only when that image is activated; the active image is never modified
+in place. Changing `LABELLO_BACKEND_IP` additionally requires `just install` to
+render the rootless Quadlet and an external-Caddy/firewall update.
 
 ## Complete Configuration
 

@@ -12,9 +12,9 @@ User=labello
 Group=labello
 Environment=LABELLO_CONFIG=/etc/labello/labello.server.toml
 EnvironmentFile=/etc/labello/labello.env
-Volume=/etc/labello/labello.server.toml:/etc/labello/labello.server.toml:ro,Z
-Volume=/var/lib/labello/datasets:/var/lib/labello/datasets:rw,Z
-Volume=/var/lib/labello/imports:/var/lib/labello/imports:ro,Z
+Volume=/etc/labello/labello.server.toml:/etc/labello/labello.server.toml:ro
+Volume=/var/lib/labello/datasets:/var/lib/labello/datasets:rw
+Volume=/var/lib/labello/imports:/var/lib/labello/imports:ro
 ReadOnly=true
 ReadOnlyTmpfs=true
 NoNewPrivileges=true
