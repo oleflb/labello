@@ -29,6 +29,55 @@ labello_failure_action() {
   fi
 }
 
+labello_locked_package_version() {
+  local lock_file="$1" package_name="$2"
+
+  awk -v expected_name="$package_name" '
+    function finish_package() {
+      if (name == expected_name) {
+        matches += 1
+        matched_version = version
+      }
+    }
+    /^\[\[package\]\]$/ {
+      finish_package()
+      name = ""
+      version = ""
+      in_package = 1
+      next
+    }
+    in_package && $0 == "name = \"" expected_name "\"" {
+      name = expected_name
+      next
+    }
+    in_package && /^version = "[^"]+"$/ {
+      version = substr($0, 12, length($0) - 12)
+      next
+    }
+    END {
+      finish_package()
+      if (matches != 1 || matched_version == "") exit 1
+      print matched_version
+    }
+  ' "$lock_file"
+}
+
+labello_pinned_tool_digests() {
+  local manifest="$1" version="$2" target="$3"
+
+  awk -v version="$version" -v target="$target" '
+    $1 == version && $2 == target {
+      matches += 1
+      archive = $3
+      binary = $4
+    }
+    END {
+      if (matches != 1) exit 1
+      print archive, binary
+    }
+  ' "$manifest"
+}
+
 # The caller provides labello_sync_path and initializes published_archive and
 # published_manifest. Keeping final names set until the directory sync lets the
 # outer cleanup remove either half of an interrupted publication.

@@ -610,7 +610,7 @@ _deploy action:
     [[ "$active_commit" =~ ^[0-9a-f]{40}$ ]] ||
       die "active release name does not contain a valid commit"
     [[ "$target_sha" == "$active_commit" ]] ||
-      die "just start may only restart the active commit; use the documented backup-restore workflow for a downgrade"
+      die "just start only restarts the active commit; use 'just update' for a new commit or the documented backup-restore workflow for a downgrade"
   fi
 
   client_config_sha="$(sha256sum "$LABELLO_CLIENT_CONFIG" | awk '{print $1}')"
@@ -702,6 +702,90 @@ _deploy action:
       --locked \
       --manifest-path "$source_dir/Cargo.toml"
 
+    wasm_bindgen_version="$(
+      git -C "$LABELLO_REPO_DIR" show "$target_sha:Cargo.lock" |
+        labello_locked_package_version - wasm-bindgen
+    )" || die "target commit's Cargo.lock must contain exactly one wasm-bindgen package"
+    [[ "$wasm_bindgen_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+      die "Cargo.lock contains an unsupported wasm-bindgen version"
+    case "$(uname -m)" in
+      x86_64)
+        wasm_bindgen_target=x86_64-unknown-linux-musl
+        ;;
+      aarch64 | arm64)
+        wasm_bindgen_target=aarch64-unknown-linux-musl
+        ;;
+      *)
+        die "no pinned wasm-bindgen release artifact is configured for architecture $(uname -m)"
+        ;;
+    esac
+    wasm_bindgen_digest_file="{{ justfile_directory() }}/wasm-bindgen.sha256"
+    [[ -f "$wasm_bindgen_digest_file" && ! -L "$wasm_bindgen_digest_file" ]] ||
+      die "wasm-bindgen digest manifest must be a regular file"
+    read -r expected_wasm_bindgen_archive_sha expected_wasm_bindgen_binary_sha < <(
+      labello_pinned_tool_digests \
+        "$wasm_bindgen_digest_file" \
+        "$wasm_bindgen_version" \
+        "$wasm_bindgen_target"
+    ) || die "wasm-bindgen digest manifest has no unique entry for the locked version and architecture"
+    [[ "$expected_wasm_bindgen_archive_sha" =~ ^[0-9a-f]{64}$ ]] &&
+      [[ "$expected_wasm_bindgen_binary_sha" =~ ^[0-9a-f]{64}$ ]] ||
+      die "wasm-bindgen digest manifest contains an invalid SHA-256"
+
+    wasm_bindgen_binary="$build_home/.cargo/bin/wasm-bindgen"
+    installed_wasm_bindgen_sha=""
+    if run_as_builder test -f "$wasm_bindgen_binary" &&
+      run_as_builder test ! -L "$wasm_bindgen_binary"; then
+      installed_wasm_bindgen_sha="$(
+        run_as_builder sha256sum "$wasm_bindgen_binary" | awk '{print $1}'
+      )"
+    fi
+    if [[ "$installed_wasm_bindgen_sha" != "$expected_wasm_bindgen_binary_sha" ]]; then
+      log "Installing wasm-bindgen CLI $wasm_bindgen_version for $LABELLO_BUILD_USER"
+      wasm_bindgen_temporary="$(
+        run_as_builder mktemp -d "$temporary_root/wasm-bindgen.XXXXXXXX"
+      )"
+      wasm_bindgen_archive_name="wasm-bindgen-$wasm_bindgen_version-$wasm_bindgen_target.tar.gz"
+      wasm_bindgen_archive="$wasm_bindgen_temporary/$wasm_bindgen_archive_name"
+      wasm_bindgen_release_url="https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$wasm_bindgen_version"
+      run_networked_builder curl \
+        --fail \
+        --location \
+        --proto '=https' \
+        --proto-redir '=https' \
+        --show-error \
+        --silent \
+        --output "$wasm_bindgen_archive" \
+        "$wasm_bindgen_release_url/$wasm_bindgen_archive_name"
+      actual_wasm_bindgen_archive_sha="$(
+        run_as_builder sha256sum "$wasm_bindgen_archive" | awk '{print $1}'
+      )"
+      [[ "$actual_wasm_bindgen_archive_sha" == "$expected_wasm_bindgen_archive_sha" ]] ||
+        die "downloaded wasm-bindgen archive does not match the locally pinned SHA-256"
+      wasm_bindgen_archive_root="wasm-bindgen-$wasm_bindgen_version-$wasm_bindgen_target"
+      run_as_builder tar \
+        -xzf "$wasm_bindgen_archive" \
+        -C "$wasm_bindgen_temporary" \
+        -- "$wasm_bindgen_archive_root/wasm-bindgen"
+      extracted_wasm_bindgen="$wasm_bindgen_temporary/$wasm_bindgen_archive_root/wasm-bindgen"
+      if ! run_as_builder test -f "$extracted_wasm_bindgen" ||
+        run_as_builder test -L "$extracted_wasm_bindgen"; then
+        die "downloaded wasm-bindgen executable is not a regular file"
+      fi
+      [[ "$(run_as_builder sha256sum "$extracted_wasm_bindgen" | awk '{print $1}')" == \
+        "$expected_wasm_bindgen_binary_sha" ]] ||
+        die "downloaded wasm-bindgen executable does not match the locally pinned SHA-256"
+      run_as_builder install -d -m 0755 "$(dirname -- "$wasm_bindgen_binary")"
+      run_as_builder install -m 0755 "$extracted_wasm_bindgen" "$wasm_bindgen_binary"
+      run_as_builder rm -rf -- "$wasm_bindgen_temporary"
+    fi
+    [[ "$(run_isolated_builder sha256sum "$wasm_bindgen_binary" | awk '{print $1}')" == \
+      "$expected_wasm_bindgen_binary_sha" ]] ||
+      die "installed wasm-bindgen executable does not match the locally pinned SHA-256"
+    [[ "$(run_isolated_builder "$wasm_bindgen_binary" --version)" == \
+      "wasm-bindgen $wasm_bindgen_version" ]] ||
+      die "installed wasm-bindgen executable does not match Cargo.lock"
+
     if [[ "$LABELLO_RUN_TESTS" == true ]]; then
       log "Running workspace tests as $LABELLO_BUILD_USER"
       run_isolated_builder \
@@ -727,8 +811,10 @@ _deploy action:
     run_isolated_builder \
       env \
       CARGO_TARGET_DIR="$cargo_target_dir" \
+      PATH="$build_home/.cargo/bin:$rustup_bin_dir:/usr/local/bin:/usr/bin:/bin" \
       RUSTUP_TOOLCHAIN="$LABELLO_RUST_TOOLCHAIN" \
       "$deployment_trunk" build \
+      --offline=true \
       --config "$source_dir/apps/labello-wasm/Trunk.toml" \
       --release \
       --locked=true \

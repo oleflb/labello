@@ -355,8 +355,12 @@ denies loopback access except for the systemd-resolved DNS stub and terminates
 all descendants. Tests, Cargo builds, Trunk, and artifact collection run in
 transient systemd services with a private
 network namespace, a strict filesystem view, and cgroup-wide descendant
-cleanup. Cargo and Trunk both use locked, offline dependency resolution during
-those build steps and the configured pinned versions. Completed artifacts are
+cleanup. Before Trunk enters that namespace, the networked fetch cgroup installs
+the `wasm-bindgen` CLI version selected by `Cargo.lock`; both its release archive
+and executable must match the values in
+[`deploy/wasm-bindgen.sha256`](../deploy/wasm-bindgen.sha256). Cargo and Trunk
+then use locked, offline dependency resolution during those build steps and the
+configured pinned versions. Completed artifacts are
 streamed into a service-owned handoff; root never copies from a builder-writable
 path.
 

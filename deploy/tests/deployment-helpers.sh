@@ -24,6 +24,45 @@ assert_eq "$(labello_failure_action true true true true)" disable
 
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "$test_root"' EXIT
+lock_file="$test_root/Cargo.lock"
+cat >"$lock_file" <<'EOF'
+version = 4
+
+[[package]]
+name = "another-package"
+version = "1.2.3"
+
+[[package]]
+name = "wasm-bindgen"
+version = "0.2.126"
+EOF
+assert_eq "$(labello_locked_package_version "$lock_file" wasm-bindgen)" 0.2.126
+cat >>"$lock_file" <<'EOF'
+
+[[package]]
+name = "wasm-bindgen"
+version = "0.2.127"
+EOF
+if labello_locked_package_version "$lock_file" wasm-bindgen >/dev/null; then
+  fail "duplicate locked package versions were accepted"
+fi
+locked_wasm_bindgen_version="$(
+  git -C "$repository_root" show HEAD:Cargo.lock |
+    labello_locked_package_version - wasm-bindgen
+)"
+for wasm_bindgen_target in \
+  x86_64-unknown-linux-musl \
+  aarch64-unknown-linux-musl; do
+  read -r archive_sha binary_sha < <(
+    labello_pinned_tool_digests \
+      "$repository_root/deploy/wasm-bindgen.sha256" \
+      "$locked_wasm_bindgen_version" \
+      "$wasm_bindgen_target"
+  ) || fail "locked wasm-bindgen release lacks pinned digests for $wasm_bindgen_target"
+  [[ "$archive_sha" =~ ^[0-9a-f]{64}$ && "$binary_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "wasm-bindgen digest manifest contains an invalid SHA-256"
+done
+
 temporary_archive="$test_root/archive.tmp"
 temporary_manifest="$test_root/manifest.tmp"
 archive="$test_root/archive.tar"
