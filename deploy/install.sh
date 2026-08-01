@@ -12,6 +12,20 @@ readonly WEB_BACKEND_PORT=24181
 readonly SUBID_COUNT=65536
 
 labello_uid=
+temp_dir=
+
+report_error() {
+    local status="$?"
+    local line="$1"
+    if (( BASH_SUBSHELL > 0 )); then
+        return "$status"
+    fi
+    printf 'install: command failed at line %s with exit status %s\n' \
+        "$line" "$status" >&2
+    exit "$status"
+}
+
+trap 'report_error "$LINENO"' ERR
 
 fail() {
     printf 'install: %s\n' "$*" >&2
@@ -144,7 +158,10 @@ render() {
 }
 
 as_labello() {
-    sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/${labello_uid}" "$@"
+    (
+        cd /var/lib/labello
+        sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/${labello_uid}" "$@"
+    )
 }
 
 subid_state() {
@@ -198,12 +215,16 @@ free_subid_start() {
 
 ensure_subids() {
     local uid_state gid_state start end
-    set +e
-    subid_state /etc/subuid
-    uid_state=$?
-    subid_state /etc/subgid
-    gid_state=$?
-    set -e
+    if subid_state /etc/subuid; then
+        uid_state=0
+    else
+        uid_state=$?
+    fi
+    if subid_state /etc/subgid; then
+        gid_state=0
+    else
+        gid_state=$?
+    fi
     (( uid_state != 2 )) \
         || fail "labello has malformed, undersized, or conflicting entries in /etc/subuid"
     (( gid_state != 2 )) \
@@ -231,13 +252,15 @@ reject_rootful_labello() {
     done
     [[ ! -e /etc/labello/caddy.env && ! -e /var/lib/labello/caddy ]] \
         || fail "rootful Labello Caddy state exists; automatic migration is not supported"
-    ! sudo podman pod exists labello \
+    sudo podman --log-level=fatal info >/dev/null \
+        || fail "rootful Podman state cannot be inspected"
+    ! sudo podman --log-level=fatal pod exists labello \
         || fail "a rootful Labello pod exists; automatic migration is not supported"
-    ! sudo podman container exists labello-api \
+    ! sudo podman --log-level=fatal container exists labello-api \
         || fail "a rootful labello-api container exists; automatic migration is not supported"
-    ! sudo podman container exists labello-web \
+    ! sudo podman --log-level=fatal container exists labello-web \
         || fail "a rootful labello-web container exists; automatic migration is not supported"
-    ! sudo podman image exists localhost/labello:current \
+    ! sudo podman --log-level=fatal image exists localhost/labello:current \
         || fail "a rootful Labello current image exists; automatic migration is not supported"
 }
 
@@ -262,7 +285,7 @@ main() {
     reject_rootful_labello
 
     local podman_version
-    podman_version="$(podman version --format '{{.Client.Version}}')"
+    podman_version="$(podman --log-level=fatal version --format '{{.Client.Version}}')"
     podman_version="${podman_version#v}"
     version_at_least "$podman_version" 5.4.0 \
         || fail "Podman 5.4 or newer is required (found ${podman_version})"
@@ -331,11 +354,13 @@ main() {
                 || fail "existing rootless Labello state is not associated with an installation: ${existing_path}"
         done
     elif ! sudo grep -Fxq \
-        "PublishPort=${LABELLO_BACKEND_IP}:${API_BACKEND_PORT}:8080/tcp" \
-        "${rootless_quadlet_dir}/labello.pod" 2>/dev/null \
+            "PublishPort=${LABELLO_BACKEND_IP}:${API_BACKEND_PORT}:8080/tcp" \
+            "${rootless_quadlet_dir}/labello.pod" 2>/dev/null \
         || ! sudo grep -Fxq \
             "PublishPort=${LABELLO_BACKEND_IP}:${WEB_BACKEND_PORT}:8081/tcp" \
-            "${rootless_quadlet_dir}/labello.pod" 2>/dev/null; then
+            "${rootless_quadlet_dir}/labello.pod" 2>/dev/null \
+        || ! as_labello systemctl --user is-active --quiet labello-pod.service \
+            2>/dev/null; then
         ports_are_free \
             || fail "the new backend address conflicts on TCP port ${API_BACKEND_PORT} or ${WEB_BACKEND_PORT}"
     fi
@@ -362,9 +387,8 @@ main() {
             "$DEPLOYMENTS_DIR/deploy.lock"
     fi
 
-    local temp_dir
     temp_dir="$(mktemp -d)"
-    trap 'rm -rf -- "${temp_dir}"' EXIT
+    trap '[[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"' EXIT
 
     if ! sudo test -e /etc/labello/labello.server.toml; then
         render "${SCRIPT_DIR}/labello.server.toml.template" "$temp_dir/labello.server.toml"
@@ -420,7 +444,7 @@ main() {
     graph_root="$(as_labello podman info --format '{{.Store.GraphRoot}}')"
     [[ "$graph_root" == /var/lib/labello/.local/share/containers/storage ]] \
         || fail "labello rootless Podman graph root must use /var/lib/labello/.local/share/containers/storage"
-    graph_fs="$(findmnt -T "$graph_root" -n -o FSTYPE)"
+    graph_fs="$(sudo findmnt -T /var/lib/labello/.local/share -n -o FSTYPE)"
     [[ ! "$graph_fs" =~ ^(nfs|nfs4|cifs|smb3|lustre|gpfs)$ ]] \
         || fail "rootless Podman storage is unsupported on ${graph_fs}"
 

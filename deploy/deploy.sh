@@ -140,7 +140,10 @@ render() {
 }
 
 as_labello() {
-    sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/${labello_uid}" "$@"
+    (
+        cd /var/lib/labello
+        sudo -H -u labello env XDG_RUNTIME_DIR="/run/user/${labello_uid}" "$@"
+    )
 }
 
 rootless_systemctl() {

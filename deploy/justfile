@@ -56,9 +56,9 @@ check:
     if getent passwd labello >/dev/null 2>&1; then
         labello_uid="$(id -u labello)"
         rootless=(sudo -n -H -u labello env "XDG_RUNTIME_DIR=/run/user/${labello_uid}" podman)
-        if "${rootless[@]}" image exists localhost/labello:current 2>/dev/null; then
-            "${rootless[@]}" run --rm --interactive --network none --read-only --read-only-tmpfs --cap-drop all --security-opt no-new-privileges --user labello:labello --entrypoint /usr/bin/caddy localhost/labello:current validate --config - --adapter caddyfile < "$temp_dir/Caddyfile"
-            "${rootless[@]}" run --rm --interactive --network none --read-only --read-only-tmpfs --cap-drop all --security-opt no-new-privileges --user labello:labello --entrypoint /usr/bin/caddy localhost/labello:current validate --config - --adapter caddyfile < "$temp_dir/Caddyfile.external"
+        if (cd /var/lib/labello && "${rootless[@]}" image exists localhost/labello:current 2>/dev/null); then
+            (cd /var/lib/labello && "${rootless[@]}" run --rm --interactive --network none --read-only --read-only-tmpfs --cap-drop all --security-opt no-new-privileges --user labello:labello --entrypoint /usr/bin/caddy localhost/labello:current validate --config - --adapter caddyfile) < "$temp_dir/Caddyfile"
+            (cd /var/lib/labello && "${rootless[@]}" run --rm --interactive --network none --read-only --read-only-tmpfs --cap-drop all --security-opt no-new-privileges --user labello:labello --entrypoint /usr/bin/caddy localhost/labello:current validate --config - --adapter caddyfile) < "$temp_dir/Caddyfile.external"
         else
             printf '%s\n' 'check: no accessible rootless current image; Caddy binary validation is deferred to deploy'
         fi
