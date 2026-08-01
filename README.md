@@ -303,12 +303,15 @@ See the current [architecture and ownership map](docs/architecture.md), the
 [persistence and recovery contract](docs/persistence.md), and the detailed
 [import](docs/import.md) and [UI](docs/ui-ownership.md) ownership references.
 
-The API server does not serve the browser distribution. Build and deploy
-`apps/labello-wasm/dist` separately.
+The API server does not serve the browser distribution itself. The supported
+single-host production deployment packages the server, the complete Trunk
+distribution, its public runtime configuration, and Caddy into one immutable
+OCI image. Rootful Podman runs that image as separate API and web containers
+inside one systemd-managed pod.
 
-For a production installation on one dedicated Debian host, configure the two
-public hostnames in `deploy/.env`, then run the four-recipe interface from the
-deployment directory:
+On a dedicated systemd Linux host with cgroup v2 and Podman 5.4 or newer,
+configure the two public hostnames in `deploy/.env`, then use the four-recipe
+interface from the deployment directory:
 
 ```sh
 cd deploy
@@ -319,10 +322,10 @@ just check
 just deploy
 ```
 
-This builds the API and browser into one immutable release, activates them
-together, and uses systemd plus the distro-managed Caddy service. See the
-[single-host runbook](docs/operations.md#debian-single-host-runbook) for DNS,
-backup, failure, and data-aware rollback requirements.
+The host does not need Rust, Trunk, or Caddy installed. `just deploy` builds one
+image with Podman and activates both containers together. See the
+[single-host Podman runbook](docs/operations.md#podman-single-host-runbook) for
+prerequisites, DNS, backup, failure, and data-aware rollback requirements.
 
 `apps/egui-mcp-inspector` is a standalone native development tool outside the
 main workspace. It reuses `labello-ui` with deterministic demo state by default

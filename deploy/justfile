@@ -12,5 +12,34 @@ deploy:
     ./deploy.sh
 
 check:
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
     bash -n install.sh deploy.sh
-    grep -Fxq 'ExecStart=/opt/labello/current/labello-server' labello.service; tmp_dir="$(mktemp -d)"; trap 'rm -rf "${tmp_dir}"' EXIT; sed 's#ExecStart=/opt/labello/current/labello-server#ExecStart=/bin/true#' labello.service > "${tmp_dir}/labello.service"; systemd-analyze verify "${tmp_dir}/labello.service"; sed -e "s/@LABELLO_APP_DOMAIN@/${LABELLO_APP_DOMAIN}/g" -e "s/@LABELLO_API_DOMAIN@/${LABELLO_API_DOMAIN}/g" Caddyfile.template > "${tmp_dir}/Caddyfile"; caddy validate --config "${tmp_dir}/Caddyfile" --adapter caddyfile
+    for command in git podman sudo systemd-analyze sed sort grep cp mktemp; do command -v "$command" >/dev/null || { printf 'check: required command not found: %s\n' "$command" >&2; exit 1; }; done
+    [[ -r .env ]] || { printf "check: missing deploy/.env; run 'just init-env' first\n" >&2; exit 1; }
+    actual_keys="$(sed -nE 's/^([A-Z][A-Z0-9_]*)=.*/\1/p' .env | sort)"
+    expected_keys="$(printf '%s\n' LABELLO_API_DOMAIN LABELLO_APP_DOMAIN LABELLO_GIT_BRANCH LABELLO_GIT_REMOTE | sort)"
+    [[ "$actual_keys" == "$expected_keys" ]] || { printf 'check: deploy/.env must define exactly the four documented variables once\n' >&2; exit 1; }
+    if grep -Ev '^[[:space:]]*(#.*)?$|^(LABELLO_APP_DOMAIN|LABELLO_API_DOMAIN|LABELLO_GIT_REMOTE|LABELLO_GIT_BRANCH)=.+$' .env | grep -q .; then printf 'check: deploy/.env contains an unsupported line\n' >&2; exit 1; fi
+    validate_domain() { local domain="$1" label; local -a labels; (( ${#domain} <= 253 )) && [[ "$domain" == *.* && "$domain" != *..* ]] || return 1; IFS='.' read -r -a labels <<< "$domain"; for label in "${labels[@]}"; do (( ${#label} >= 1 && ${#label} <= 63 )) && [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1; done; }
+    validate_domain "$LABELLO_APP_DOMAIN" || { printf 'check: invalid LABELLO_APP_DOMAIN\n' >&2; exit 1; }
+    validate_domain "$LABELLO_API_DOMAIN" || { printf 'check: invalid LABELLO_API_DOMAIN\n' >&2; exit 1; }
+    [[ "${LABELLO_APP_DOMAIN,,}" != "${LABELLO_API_DOMAIN,,}" ]] || { printf 'check: application and API domains must be distinct\n' >&2; exit 1; }
+    [[ "$LABELLO_GIT_REMOTE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { printf 'check: invalid Git remote name\n' >&2; exit 1; }
+    git check-ref-format --branch "$LABELLO_GIT_BRANCH" >/dev/null || { printf 'check: invalid Git branch name\n' >&2; exit 1; }
+    grep -Fxq 'FROM docker.io/library/rust:1.97.1-alpine3.22 AS builder' Containerfile
+    grep -Fxq 'FROM docker.io/library/caddy:2.10.2-alpine' Containerfile
+    grep -Fq 'cargo install trunk --version 0.21.14 --locked' Containerfile
+    grep -Fxq 'deploy/.env' ../.containerignore
+    grep -Fxq 'labello.server.toml' ../.containerignore
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf -- "$temp_dir"' EXIT
+    generator=
+    for candidate in /usr/lib/systemd/system-generators/podman-system-generator /usr/libexec/podman/quadlet /usr/libexec/podman/podman-system-generator; do if [[ -x "$candidate" ]]; then generator="$candidate"; break; fi; done
+    [[ -n "$generator" ]] || { printf 'check: Podman Quadlet generator not found\n' >&2; exit 1; }
+    mkdir -p "$temp_dir/normal" "$temp_dir/early" "$temp_dir/late"
+    QUADLET_UNIT_DIRS="$PWD/quadlet" "$generator" "$temp_dir/normal" "$temp_dir/early" "$temp_dir/late"
+    systemd-analyze verify "$temp_dir/normal/labello-pod.service" "$temp_dir/normal/labello-api.service" "$temp_dir/normal/labello-web.service"
+    printf 'LABELLO_APP_DOMAIN=%s\nLABELLO_API_DOMAIN=%s\n' "$LABELLO_APP_DOMAIN" "$LABELLO_API_DOMAIN" > "$temp_dir/caddy.env"
+    cp Caddyfile "$temp_dir/Caddyfile"
+    if sudo -n podman image exists localhost/labello:current 2>/dev/null; then sudo -n podman run --rm --network none --env-file "$temp_dir/caddy.env" --volume "$temp_dir/Caddyfile:/tmp/Labello.Caddyfile:ro,Z" --entrypoint /usr/bin/caddy localhost/labello:current validate --config /tmp/Labello.Caddyfile --adapter caddyfile; else printf '%s\n' 'check: no local current image; Caddy binary validation is deferred to deploy'; fi

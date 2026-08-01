@@ -1,0 +1,12 @@
+.git
+.gitignore
+.containerignore
+target
+datasets
+labello.server.toml
+apps/egui-mcp-inspector/target
+apps/labello-wasm/dist
+apps/labello-wasm/labello.client.json
+deploy/.env
+*.tmp
+.worktrees

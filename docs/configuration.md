@@ -83,11 +83,12 @@ public artifact and must never contain OAuth credentials, cookies, tokens, or
 other secrets. Static hosting must return a real 404 for an absent
 `labello.client.json`, rather than rewriting that path to `index.html`.
 
-The Debian single-host installation writes the public runtime file to
-`/etc/labello/labello.client.json`. Edit that installed file when the API URL
-must change; the next `just deploy` copies its exact bytes into the new
-immutable browser release. Editing it does not alter the already active
-release.
+The Podman single-host deployment generates this public file from
+`LABELLO_API_DOMAIN` while building the immutable release image. Change the
+domain in `deploy/.env`, rerun `just install` to update the Caddy environment,
+reconcile the preserved server and OAuth configuration, and run `just deploy`.
+The new browser runtime file becomes visible only when that image is activated;
+the active image is never modified in place.
 
 ## Complete Configuration
 

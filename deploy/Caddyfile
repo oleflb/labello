@@ -1,0 +1,20 @@
+{
+	admin off
+}
+
+{$LABELLO_APP_DOMAIN} {
+	root * /srv/labello/web
+	encode zstd gzip
+
+	@client_config path /labello.client.json
+	header @client_config Cache-Control "no-store"
+
+	@index path / /index.html
+	header @index Cache-Control "no-cache, must-revalidate"
+
+	file_server
+}
+
+{$LABELLO_API_DOMAIN} {
+	reverse_proxy 127.0.0.1:8080
+}

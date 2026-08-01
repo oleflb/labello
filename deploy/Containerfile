@@ -1,0 +1,54 @@
+FROM docker.io/library/rust:1.97.1-alpine3.22 AS builder
+
+RUN apk add --no-cache build-base musl-dev perl pkgconf openssl-dev
+RUN rustup target add wasm32-unknown-unknown \
+    && cargo install trunk --version 0.21.14 --locked
+
+WORKDIR /src
+COPY . .
+
+ARG LABELLO_API_DOMAIN
+ARG LABELLO_COMMIT
+ARG LABELLO_BUILD_TIME
+
+RUN test -n "${LABELLO_API_DOMAIN}" \
+    && test -n "${LABELLO_COMMIT}" \
+    && test -n "${LABELLO_BUILD_TIME}" \
+    && cargo build --locked --release -p labello-server \
+    && cd apps/labello-wasm \
+    && trunk build --release --locked=true \
+    && printf '{"apiBaseUrl":"https://%s"}\n' "${LABELLO_API_DOMAIN}" \
+        > dist/labello.client.json
+
+RUN { \
+        printf 'commit=%s\n' "${LABELLO_COMMIT}"; \
+        printf 'builtAt=%s\n' "${LABELLO_BUILD_TIME}"; \
+        printf 'rust=%s\n' "$(rustc --version)"; \
+        printf 'trunk=%s\n' "$(trunk --version)"; \
+    } > /tmp/REVISION
+
+FROM docker.io/library/caddy:2.10.2-alpine
+
+ARG LABELLO_UID
+ARG LABELLO_GID
+ARG LABELLO_COMMIT
+ARG LABELLO_BUILD_TIME
+
+RUN test -n "${LABELLO_UID}" \
+    && test -n "${LABELLO_GID}" \
+    && ! awk -F: -v id="${LABELLO_UID}" '$3 == id { found=1 } END { exit !found }' /etc/passwd \
+    && ! awk -F: -v id="${LABELLO_GID}" '$3 == id { found=1 } END { exit !found }' /etc/group \
+    && addgroup -g "${LABELLO_GID}" labello \
+    && adduser -D -H -h /nonexistent -s /sbin/nologin \
+        -u "${LABELLO_UID}" -G labello labello
+
+COPY --from=builder /src/target/release/labello-server /usr/local/bin/labello-server
+COPY --from=builder /src/apps/labello-wasm/dist/ /srv/labello/web/
+COPY --from=builder /tmp/REVISION /usr/share/labello/REVISION
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+
+LABEL org.opencontainers.image.title="Labello" \
+      org.opencontainers.image.revision="${LABELLO_COMMIT}" \
+      org.opencontainers.image.created="${LABELLO_BUILD_TIME}" \
+      io.labello.rust.version="1.97.1" \
+      io.labello.trunk.version="0.21.14"

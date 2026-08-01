@@ -1,0 +1,20 @@
+[Unit]
+Description=Labello application pod
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/labello/deployments/BLOCKED
+
+[Pod]
+PodName=labello
+PublishPort=80:80/tcp
+PublishPort=443:443/tcp
+PublishPort=443:443/udp
+PublishPort=127.0.0.1:8080:8080/tcp
+StopTimeout=300
+
+[Service]
+TimeoutStartSec=120
+TimeoutStopSec=360
+
+[Install]
+WantedBy=multi-user.target

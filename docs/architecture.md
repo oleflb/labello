@@ -122,6 +122,22 @@ generic repository, dependency-injection, event-bus, reducer-registry,
 workflow-engine, or client-side domain-model frameworks without a separately
 demonstrated need.
 
+## Production composition
+
+The supported single-host deployment builds one immutable OCI image containing
+`labello-server`, the complete Trunk browser distribution, its generated public
+runtime configuration, Caddy, and revision metadata. Rootful Podman runs the
+same image ID twice inside one Quadlet-managed pod: an unprivileged API
+container owns the dataset mount, while an unprivileged Caddy container owns
+only its certificate/configuration state and serves the image's read-only web
+tree. A single `current` image tag therefore changes the browser and API as one
+release without moving deployment policy into an application crate.
+
+The API listens on all interfaces only inside the pod. Podman publishes it on
+host loopback and exposes Caddy on public ports 80 and 443. Persistent datasets,
+read-only import roots, Caddy state, runtime configuration, and release metadata
+remain explicit host paths documented in [`operations.md`](operations.md).
+
 ## Detailed ownership references
 
 - [`structural-refactor-policy-ownership.md`](plans/structural-refactor-policy-ownership.md)
