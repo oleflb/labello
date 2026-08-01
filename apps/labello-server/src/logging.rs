@@ -10,8 +10,8 @@ enum LogFormat {
 }
 
 pub fn init() -> anyhow::Result<()> {
-    let filter = filter(std::env::var("RUST_LOG").ok().as_deref())?;
-    match log_format(std::env::var("LABELLO_LOG_FORMAT").ok().as_deref())? {
+    let (filter, format) = environment()?;
+    match format {
         LogFormat::Text => tracing_subscriber::fmt()
             .with_env_filter(filter)
             .try_init()
@@ -23,6 +23,16 @@ pub fn init() -> anyhow::Result<()> {
             .try_init()
             .map_err(|error| anyhow::anyhow!("could not initialize JSON logging: {error}")),
     }
+}
+
+pub fn validate_environment() -> anyhow::Result<()> {
+    environment().map(|_| ())
+}
+
+fn environment() -> anyhow::Result<(EnvFilter, LogFormat)> {
+    let filter = filter(std::env::var("RUST_LOG").ok().as_deref())?;
+    let format = log_format(std::env::var("LABELLO_LOG_FORMAT").ok().as_deref())?;
+    Ok((filter, format))
 }
 
 fn filter(value: Option<&str>) -> anyhow::Result<EnvFilter> {

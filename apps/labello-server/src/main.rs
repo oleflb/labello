@@ -61,6 +61,10 @@ impl Default for ServerConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if check_logging_requested()? {
+        logging::validate_environment()?;
+        return Ok(());
+    }
     logging::init()?;
 
     let mut config = load_or_create_config()?;
@@ -107,6 +111,17 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tracing::info!(event = "server.stopped", "labello server stopped");
     Ok(())
+}
+
+fn check_logging_requested() -> anyhow::Result<bool> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--check-logging")) {
+        return Ok(false);
+    }
+    if arguments.next().is_some() {
+        bail!("--check-logging does not accept additional arguments");
+    }
+    Ok(true)
 }
 
 async fn shutdown_signal() {

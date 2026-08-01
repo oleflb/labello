@@ -300,10 +300,10 @@ require_rootless_installation() {
         || fail "installed web Quadlet is outdated; rerun 'just install'"
 }
 
-validate_oauth_environment() {
+validate_server_environment() {
     local environment_file="$1"
     local expected_redirect="$2"
-    local oauth_status=0
+    local environment_status=0
     local -a awk_command=(awk)
     [[ -r "$environment_file" ]] || awk_command=(sudo awk)
     "${awk_command[@]}" -v expected_redirect="$expected_redirect" '
@@ -311,6 +311,8 @@ validate_oauth_environment() {
             allowed["GITHUB_CLIENT_ID"] = 1
             allowed["GITHUB_CLIENT_SECRET"] = 1
             allowed["GITHUB_REDIRECT_URI"] = 1
+            allowed["RUST_LOG"] = 1
+            allowed["LABELLO_LOG_FORMAT"] = 1
         }
         /^[[:space:]]*($|#)/ { next }
         {
@@ -328,6 +330,9 @@ validate_oauth_environment() {
             count[key]++
             if (value == "") empty[key] = 1
             if (key == "GITHUB_REDIRECT_URI" && value != expected_redirect) mismatch = 1
+            if (key == "LABELLO_LOG_FORMAT" && value != "text" && value != "json") {
+                invalid_log_format = 1
+            }
         }
         END {
             if (invalid) exit 2
@@ -337,15 +342,21 @@ validate_oauth_environment() {
             if (empty["GITHUB_CLIENT_ID"] || empty["GITHUB_CLIENT_SECRET"] ||
                 empty["GITHUB_REDIRECT_URI"]) exit 4
             if (mismatch) exit 5
+            if (count["RUST_LOG"] > 1 || count["LABELLO_LOG_FORMAT"] > 1) exit 6
+            if (count["RUST_LOG"] == 1 && empty["RUST_LOG"]) exit 7
+            if (invalid_log_format) exit 8
         }
-    ' "$environment_file" || oauth_status=$?
-    case "$oauth_status" in
+    ' "$environment_file" || environment_status=$?
+    case "$environment_status" in
         0) ;;
-        2) fail "OAuth environment contains an unsupported assignment" ;;
+        2) fail "server environment contains an unsupported assignment" ;;
         3) fail "each required OAuth environment key must occur exactly once" ;;
         4) fail "OAuth environment values must not be empty" ;;
         5) fail "GITHUB_REDIRECT_URI does not match the configured API domain" ;;
-        *) fail "OAuth environment could not be validated" ;;
+        6) fail "optional logging environment keys must not occur more than once" ;;
+        7) fail "RUST_LOG must not be empty when configured" ;;
+        8) fail "LABELLO_LOG_FORMAT must be text or json" ;;
+        *) fail "server environment could not be validated" ;;
     esac
 }
 
@@ -368,7 +379,7 @@ require_complete_configuration() {
     sudo grep -Fxq "browserOrigins = [\"https://${LABELLO_APP_DOMAIN}\"]" "$SERVER_CONFIG" \
         || fail "browserOrigins must contain only the configured HTTPS application origin"
 
-    validate_oauth_environment "$SERVER_ENV" \
+    validate_server_environment "$SERVER_ENV" \
         "https://${LABELLO_API_DOMAIN}/auth/github/callback"
 }
 
@@ -429,6 +440,11 @@ validate_image() {
         --cap-drop all --security-opt no-new-privileges --user labello:labello \
         --entrypoint /usr/bin/caddy "$image" \
         validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+    as_labello podman run --rm --network none --read-only --read-only-tmpfs \
+        --cap-drop all --security-opt no-new-privileges --user labello:labello \
+        --env-file "$SERVER_ENV" --entrypoint /usr/local/bin/labello-server "$image" \
+        --check-logging
 
     if as_labello podman history --no-trunc --format '{{.CreatedBy}}' "$image" \
         | grep -Eq 'GITHUB_CLIENT_(ID|SECRET)|GITHUB_REDIRECT_URI|REPLACE_ME'; then

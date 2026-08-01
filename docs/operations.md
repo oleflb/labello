@@ -302,10 +302,12 @@ without rewriting them.
 exports only that commit with `git archive`, and builds inside the `labello`
 account's rootless Podman store. It validates content, fixed identities,
 revision, labels, public configuration, Caddyfile, and secret exclusion before
-stopping the old pod. A single `current` tag activates both containers. For up
-to 60 seconds it checks their image IDs, direct private API/web responses,
-public HTTPS API/web responses, exact client configuration, and direct/public
-404 behavior.
+stopping the old pod. It also runs the candidate server's real logging parser
+against the production environment, so an invalid `RUST_LOG` cannot reach
+activation. A single `current` tag activates both containers. For up to 60
+seconds it checks their image IDs, direct private API/web responses, public
+HTTPS API/web responses, exact client configuration, and direct/public 404
+behavior.
 
 Fetch, build, and preactivation failures leave the active release untouched.
 Once `current` changes, deployment is forward-only: failure retains `current`,
