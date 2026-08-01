@@ -4,7 +4,11 @@ umask 022
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly OPERATOR_FILE=/etc/labello/deploy-operator
+readonly INSTALL_TRANSACTION=/etc/labello/installing
 readonly DEPLOYMENTS_DIR=/var/lib/labello/deployments
+readonly INSTALL_LOCK=/var/lib/labello/install.lock
+readonly DEPLOY_LOCK=/var/lib/labello/deployments/deploy.lock
+readonly ACTIVATION_PERMIT=/var/lib/labello/deployments/ACTIVATING
 readonly ROOTFUL_QUADLET_DIR=/etc/containers/systemd
 readonly ROOTLESS_QUADLET_BASE=/etc/containers/systemd/users
 readonly API_BACKEND_PORT=24180
@@ -13,6 +17,7 @@ readonly SUBID_COUNT=65536
 
 labello_uid=
 temp_dir=
+deploy_lock_acquired=0
 
 report_error() {
     local status="$?"
@@ -164,6 +169,58 @@ as_labello() {
     )
 }
 
+acquire_install_lock() {
+    local operator_record="$1"
+    local operator="$2"
+    local operator_group="$3"
+
+    sudo install -d -m 0755 -o root -g root /var/lib/labello
+    if ! sudo test -e "$INSTALL_LOCK"; then
+        if ! sudo sh -c 'set -C; umask 077; printf "%s\n" "$1" > "$2"' \
+                sh "$operator_record" "$INSTALL_LOCK" 2>/dev/null; then
+            sudo test -f "$INSTALL_LOCK" \
+                || fail "could not initialize the installation lock"
+        fi
+    fi
+    sudo test -f "$INSTALL_LOCK" || fail "installation lock is not a regular file"
+    [[ "$(sudo cat "$INSTALL_LOCK")" == "$operator_record" ]] \
+        || fail "an installation transaction belongs to a different deployment operator"
+    sudo chown "$operator:$operator_group" "$INSTALL_LOCK"
+    sudo chmod 0600 "$INSTALL_LOCK"
+    exec 8<>"$INSTALL_LOCK"
+    flock -n 8 || fail "another installation is already running"
+}
+
+acquire_deploy_lock() {
+    [[ "$deploy_lock_acquired" -eq 0 ]] || return
+    [[ -f "$DEPLOY_LOCK" && ! -L "$DEPLOY_LOCK" && -w "$DEPLOY_LOCK" ]] \
+        || fail "deployment lock is missing or not writable"
+    exec 9<>"$DEPLOY_LOCK"
+    flock -n 9 || fail "an installation or deployment is already running"
+    deploy_lock_acquired=1
+}
+
+reject_unassociated_rootless_state() {
+    local existing_path
+    local -a existing_paths=(
+        /var/lib/labello/.local/share/containers/storage
+        "$DEPLOYMENTS_DIR"
+    )
+    if getent passwd labello >/dev/null; then
+        local existing_uid
+        existing_uid="$(id -u labello)"
+        existing_paths+=(
+            "${ROOTLESS_QUADLET_BASE}/${existing_uid}/labello.pod"
+            "${ROOTLESS_QUADLET_BASE}/${existing_uid}/labello-api.container"
+            "${ROOTLESS_QUADLET_BASE}/${existing_uid}/labello-web.container"
+        )
+    fi
+    for existing_path in "${existing_paths[@]}"; do
+        ! sudo test -e "$existing_path" \
+            || fail "existing rootless Labello state is not associated with an installation: ${existing_path}"
+    done
+}
+
 subid_state() {
     local file="$1"
     sudo awk -F: -v user=labello -v minimum="$SUBID_COUNT" '
@@ -272,7 +329,7 @@ main() {
     local command
     for command in git just curl sudo podman systemctl systemd-analyze useradd usermod \
         getent id install sed sort head mktemp cmp tee ss ip awk grep find flock cat \
-        loginctl newuidmap newgidmap findmnt tar chown chmod; do
+        loginctl newuidmap newgidmap findmnt tar chown chmod sh; do
         require_command "$command"
     done
     if ! command -v pasta >/dev/null 2>&1 && ! command -v slirp4netns >/dev/null 2>&1; then
@@ -281,6 +338,29 @@ main() {
     quadlet_generator >/dev/null || fail "the Podman Quadlet system generator is missing"
 
     sudo -v
+
+    local operator operator_uid operator_group operator_record
+    operator="$(id -un)"
+    operator_uid="$(id -u)"
+    operator_group="$(id -gn)"
+    operator_record="${operator}:${operator_uid}"
+    if sudo test -e "$OPERATOR_FILE"; then
+        sudo test -f "$OPERATOR_FILE" \
+            || fail "installation metadata is not a regular file"
+        [[ "$(sudo cat "$OPERATOR_FILE")" == "$operator_record" ]] \
+            || fail "installation belongs to a different deployment operator"
+    fi
+    if sudo test -e "$INSTALL_TRANSACTION"; then
+        sudo test -f "$INSTALL_TRANSACTION" \
+            || fail "installation transaction marker is not a regular file"
+        [[ "$(sudo cat "$INSTALL_TRANSACTION")" == "$operator_record" ]] \
+            || fail "an incomplete installation belongs to a different deployment operator"
+    fi
+    acquire_install_lock "$operator_record" "$operator" "$operator_group"
+
+    temp_dir="$(mktemp -d)"
+    trap '[[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"' EXIT
+
     load_deployment_environment
     reject_rootful_labello
 
@@ -290,14 +370,11 @@ main() {
     version_at_least "$podman_version" 5.4.0 \
         || fail "Podman 5.4 or newer is required (found ${podman_version})"
 
-    local operator operator_uid operator_group operator_record first_install=0
-    operator="$(id -un)"
-    operator_uid="$(id -u)"
-    operator_group="$(id -gn)"
-    operator_record="${operator}:${operator_uid}"
+    local first_install=0
     if sudo test -e "$OPERATOR_FILE"; then
         [[ "$(sudo cat "$OPERATOR_FILE")" == "$operator_record" ]] \
             || fail "installation belongs to a different deployment operator"
+        acquire_deploy_lock
         getent passwd labello >/dev/null \
             || fail "installation metadata exists without the labello account"
         local installed_uid installed_quadlet
@@ -308,6 +385,18 @@ main() {
         done
     else
         first_install=1
+        if sudo test -e "$INSTALL_TRANSACTION"; then
+            sudo test -f "$INSTALL_TRANSACTION" \
+                || fail "installation transaction marker is not a regular file"
+            [[ "$(sudo cat "$INSTALL_TRANSACTION")" == "$operator_record" ]] \
+                || fail "an incomplete installation belongs to a different deployment operator"
+        else
+            reject_unassociated_rootless_state
+            sudo install -d -m 0755 -o root -g root /etc/labello
+            printf '%s\n' "$operator_record" > "$temp_dir/installing"
+            sudo install -m 0600 -o root -g root "$temp_dir/installing" \
+                "$INSTALL_TRANSACTION"
+        fi
     fi
     if [[ "$first_install" -eq 1 ]]; then
         ports_are_free \
@@ -342,25 +431,14 @@ main() {
     labello_uid="$(id -u labello)"
 
     local rootless_quadlet_dir="${ROOTLESS_QUADLET_BASE}/${labello_uid}"
-    if [[ "$first_install" -eq 1 ]]; then
-        local existing_path
-        for existing_path in \
-            "${rootless_quadlet_dir}/labello.pod" \
-            "${rootless_quadlet_dir}/labello-api.container" \
-            "${rootless_quadlet_dir}/labello-web.container" \
-            /var/lib/labello/.local/share/containers/storage \
-            "$DEPLOYMENTS_DIR"; do
-            ! sudo test -e "$existing_path" \
-                || fail "existing rootless Labello state is not associated with an installation: ${existing_path}"
-        done
-    elif ! sudo grep -Fxq \
+    if [[ "$first_install" -eq 0 ]] && { ! sudo grep -Fxq \
             "PublishPort=${LABELLO_BACKEND_IP}:${API_BACKEND_PORT}:8080/tcp" \
             "${rootless_quadlet_dir}/labello.pod" 2>/dev/null \
         || ! sudo grep -Fxq \
             "PublishPort=${LABELLO_BACKEND_IP}:${WEB_BACKEND_PORT}:8081/tcp" \
             "${rootless_quadlet_dir}/labello.pod" 2>/dev/null \
         || ! as_labello systemctl --user is-active --quiet labello-pod.service \
-            2>/dev/null; then
+            2>/dev/null; }; then
         ports_are_free \
             || fail "the new backend address conflicts on TCP port ${API_BACKEND_PORT} or ${WEB_BACKEND_PORT}"
     fi
@@ -382,13 +460,15 @@ main() {
     [[ ! "$storage_fs" =~ ^(nfs|nfs4|cifs|smb3|lustre|gpfs)$ ]] \
         || fail "rootless Podman storage is unsupported on ${storage_fs}"
 
-    if ! sudo test -e "$DEPLOYMENTS_DIR/deploy.lock"; then
-        sudo install -m 0600 -o "$operator" -g "$operator_group" /dev/null \
-            "$DEPLOYMENTS_DIR/deploy.lock"
+    if ! sudo test -e "$DEPLOY_LOCK"; then
+        sudo install -m 0640 -o "$operator" -g labello /dev/null "$DEPLOY_LOCK"
     fi
-
-    temp_dir="$(mktemp -d)"
-    trap '[[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"' EXIT
+    sudo test -f "$DEPLOY_LOCK" && ! sudo test -L "$DEPLOY_LOCK" \
+        || fail "deployment lock is not a regular file"
+    acquire_deploy_lock
+    sudo rm -f -- "$ACTIVATION_PERMIT"
+    sudo chown "$operator:labello" "$DEPLOY_LOCK"
+    sudo chmod 0640 "$DEPLOY_LOCK"
 
     if ! sudo test -e /etc/labello/labello.server.toml; then
         render "${SCRIPT_DIR}/labello.server.toml.template" "$temp_dir/labello.server.toml"
@@ -405,20 +485,25 @@ main() {
     sudo chmod 0640 /etc/labello/labello.server.toml /etc/labello/labello.env
 
     render "${SCRIPT_DIR}/quadlet/labello.pod.template" "$temp_dir/labello.pod"
+    local quadlets_changed=0
+    sudo cmp -s "$temp_dir/labello.pod" "$rootless_quadlet_dir/labello.pod" \
+        || quadlets_changed=1
+    local quadlet
+    for quadlet in labello-api.container labello-web.container; do
+        sudo cmp -s "${SCRIPT_DIR}/quadlet/${quadlet}" \
+            "${rootless_quadlet_dir}/${quadlet}" || quadlets_changed=1
+    done
+    if [[ "$quadlets_changed" -eq 1 || ! -L "$DEPLOYMENTS_DIR/current" ]]; then
+        sudo install -m 0640 -o "$operator" -g labello /dev/null \
+            "$DEPLOYMENTS_DIR/BLOCKED"
+    fi
+
     sudo install -m 0644 -o root -g root "$temp_dir/labello.pod" \
         "$rootless_quadlet_dir/labello.pod"
-    local quadlet
     for quadlet in labello-api.container labello-web.container; do
         sudo install -m 0644 -o root -g root "${SCRIPT_DIR}/quadlet/${quadlet}" \
             "${rootless_quadlet_dir}/${quadlet}"
     done
-
-    printf '%s\n' "$operator_record" > "$temp_dir/deploy-operator"
-    sudo install -m 0644 -o root -g root "$temp_dir/deploy-operator" "$OPERATOR_FILE"
-
-    if [[ "$first_install" -eq 1 || ! -L "$DEPLOYMENTS_DIR/current" ]]; then
-        sudo install -m 0640 -o "$operator" -g labello /dev/null "$DEPLOYMENTS_DIR/BLOCKED"
-    fi
 
     if [[ -e /sys/fs/selinux/enforce ]]; then
         require_command chcon
@@ -448,6 +533,10 @@ main() {
     [[ ! "$graph_fs" =~ ^(nfs|nfs4|cifs|smb3|lustre|gpfs)$ ]] \
         || fail "rootless Podman storage is unsupported on ${graph_fs}"
 
+    printf '%s\n' "$operator_record" > "$temp_dir/deploy-operator"
+    sudo install -m 0644 -o root -g root "$temp_dir/deploy-operator" "$OPERATOR_FILE"
+    sudo rm -f -- "$INSTALL_TRANSACTION"
+
     render "${SCRIPT_DIR}/Caddyfile.external.template" "$temp_dir/Caddyfile.external"
     printf '%s\n' \
         'Labello rootless Podman host setup is complete.' \
@@ -457,6 +546,10 @@ main() {
         "Allow TCP ${API_BACKEND_PORT} and ${WEB_BACKEND_PORT} on ${LABELLO_BACKEND_IP} only from the Caddy host." \
         'Edit /etc/labello/labello.server.toml and /etc/labello/labello.env,' \
         "replace every REPLACE_ME value, run 'just check', then run 'just deploy'."
+    if [[ "$quadlets_changed" -eq 1 && -L "$DEPLOYMENTS_DIR/current" ]]; then
+        printf '%s\n' \
+            'Installed Quadlets changed. Labello remains boot-blocked until the next successful deployment.'
+    fi
 }
 
 main "$@"

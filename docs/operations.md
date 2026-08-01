@@ -248,9 +248,15 @@ administrator-managed user Quadlets beneath
 `/etc/containers/systemd/users/<labello-uid>`. Reruns update Quadlets while
 preserving the server configuration, OAuth environment, subordinate IDs,
 images, and data. A `BLOCKED` marker prevents the user service from starting
-before a release passes health validation. Quadlet's `[Install]` section links
-the pod into the user manager's `default.target`; do not enable the generated
-transient service directly.
+before a release passes health validation. Install and deploy operations share
+an exclusive lock. A deployment may start the pod for validation while it holds
+that lock and a short-lived `ACTIVATING` marker without removing `BLOCKED`;
+unattended boot has neither authorization. A stale marker cannot bypass the
+lock after a crash. When an install rerun changes any Quadlet, it creates
+`BLOCKED` before replacing the installed files and leaves it in place until the
+next successful deployment. Quadlet's
+`[Install]` section links the pod into the user manager's `default.target`; do
+not enable the generated transient service directly.
 
 The fixed runtime layout is:
 
@@ -262,6 +268,8 @@ The fixed runtime layout is:
 /var/lib/labello/datasets/
 /var/lib/labello/imports/
 /var/lib/labello/tmp/
+/var/lib/labello/install.lock
+/var/lib/labello/deployments/{BLOCKED,deploy.lock}
 /var/lib/labello/deployments/current -> releases/<release-id>
 /var/lib/labello/deployments/previous -> releases/<previous-release-id>
 /var/lib/labello/deployments/releases/<release-id>/{IMAGE_ID,REVISION}

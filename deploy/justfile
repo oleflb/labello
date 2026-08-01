@@ -41,6 +41,7 @@ check:
     grep -Fxq 'UserNS=keep-id:uid=10001,gid=10001' quadlet/labello.pod.template
     grep -Fxq 'PublishPort=@LABELLO_BACKEND_IP@:24180:8080/tcp' quadlet/labello.pod.template
     grep -Fxq 'PublishPort=@LABELLO_BACKEND_IP@:24181:8081/tcp' quadlet/labello.pod.template
+    grep -Fxq "ExecCondition=/bin/sh -c 'test ! -e /var/lib/labello/deployments/BLOCKED || { test -e /var/lib/labello/deployments/ACTIVATING && test -f /var/lib/labello/deployments/deploy.lock && test ! -L /var/lib/labello/deployments/deploy.lock && flock -n -E 0 /var/lib/labello/deployments/deploy.lock false; }'" quadlet/labello.pod.template
     temp_dir="$(mktemp -d)"
     trap 'rm -rf -- "$temp_dir"' EXIT
     sed -e "s/@LABELLO_BACKEND_IP@/${LABELLO_BACKEND_IP}/g" quadlet/labello.pod.template > "$temp_dir/labello.pod"

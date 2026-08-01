@@ -7,6 +7,7 @@ readonly DEPLOYMENTS_DIR=/var/lib/labello/deployments
 readonly RELEASES_DIR=/var/lib/labello/deployments/releases
 readonly LOCK_FILE=/var/lib/labello/deployments/deploy.lock
 readonly BLOCKER=/var/lib/labello/deployments/BLOCKED
+readonly ACTIVATION_PERMIT=/var/lib/labello/deployments/ACTIVATING
 readonly BUILD_ROOT=/var/lib/labello/tmp
 readonly SERVER_CONFIG=/etc/labello/labello.server.toml
 readonly SERVER_ENV=/etc/labello/labello.env
@@ -23,6 +24,7 @@ stop_started=0
 old_was_active=0
 blocker_was_present=0
 blocker_changed=0
+lock_acquired=0
 published=0
 staging_dir=
 build_context=
@@ -154,6 +156,15 @@ set_blocker() {
     sudo install -m 0640 -o "$(id -un)" -g labello /dev/null "$BLOCKER"
 }
 
+start_pod_with_permit() {
+    sudo install -m 0640 -o "$(id -un)" -g labello /dev/null "$ACTIVATION_PERMIT"
+    if ! rootless_systemctl start labello-pod.service; then
+        sudo rm -f -- "$ACTIVATION_PERMIT"
+        return 1
+    fi
+    sudo rm -f -- "$ACTIVATION_PERMIT"
+}
+
 restore_blocker_state() {
     if [[ "$blocker_was_present" -eq 1 ]]; then
         set_blocker || true
@@ -173,6 +184,9 @@ cleanup_build_context() {
 on_exit() {
     local status="$1"
     trap - EXIT
+    if [[ "$lock_acquired" -eq 1 ]]; then
+        sudo rm -f -- "$ACTIVATION_PERMIT" >/dev/null 2>&1 || true
+    fi
     [[ -z "$temp_dir" ]] || rm -rf -- "$temp_dir"
     cleanup_build_context
     if [[ "$status" -eq 0 ]]; then
@@ -194,7 +208,7 @@ on_exit() {
     elif [[ "$stop_started" -eq 1 ]]; then
         restore_blocker_state
         if [[ "$old_was_active" -eq 1 ]]; then
-            if ! rootless_systemctl start labello-pod.service; then
+            if ! start_pod_with_permit; then
                 printf '%s\n' 'Could not restart the unchanged previous pod.' >&2
             fi
         fi
@@ -266,6 +280,8 @@ require_rootless_installation() {
     [[ "$(as_labello podman info --format '{{.Store.GraphRoot}}')" \
         == /var/lib/labello/.local/share/containers/storage ]] \
         || fail "labello rootless Podman is using an unexpected image store"
+    as_labello test -r "$LOCK_FILE" \
+        || fail "labello cannot read the deployment lock used by the boot gate"
 
     local quadlet_dir="${ROOTLESS_QUADLET_BASE}/${labello_uid}"
     local quadlet
@@ -282,6 +298,55 @@ require_rootless_installation() {
     sudo cmp -s "${SCRIPT_DIR}/quadlet/labello-web.container" \
         "${quadlet_dir}/labello-web.container" \
         || fail "installed web Quadlet is outdated; rerun 'just install'"
+}
+
+validate_oauth_environment() {
+    local environment_file="$1"
+    local expected_redirect="$2"
+    local oauth_status=0
+    local -a awk_command=(awk)
+    [[ -r "$environment_file" ]] || awk_command=(sudo awk)
+    "${awk_command[@]}" -v expected_redirect="$expected_redirect" '
+        BEGIN {
+            allowed["GITHUB_CLIENT_ID"] = 1
+            allowed["GITHUB_CLIENT_SECRET"] = 1
+            allowed["GITHUB_REDIRECT_URI"] = 1
+        }
+        /^[[:space:]]*($|#)/ { next }
+        {
+            separator = index($0, "=")
+            if (separator == 0) {
+                invalid = 1
+                next
+            }
+            key = substr($0, 1, separator - 1)
+            value = substr($0, separator + 1)
+            if (!(key in allowed)) {
+                invalid = 1
+                next
+            }
+            count[key]++
+            if (value == "") empty[key] = 1
+            if (key == "GITHUB_REDIRECT_URI" && value != expected_redirect) mismatch = 1
+        }
+        END {
+            if (invalid) exit 2
+            if (count["GITHUB_CLIENT_ID"] != 1 ||
+                count["GITHUB_CLIENT_SECRET"] != 1 ||
+                count["GITHUB_REDIRECT_URI"] != 1) exit 3
+            if (empty["GITHUB_CLIENT_ID"] || empty["GITHUB_CLIENT_SECRET"] ||
+                empty["GITHUB_REDIRECT_URI"]) exit 4
+            if (mismatch) exit 5
+        }
+    ' "$environment_file" || oauth_status=$?
+    case "$oauth_status" in
+        0) ;;
+        2) fail "OAuth environment contains an unsupported assignment" ;;
+        3) fail "each required OAuth environment key must occur exactly once" ;;
+        4) fail "OAuth environment values must not be empty" ;;
+        5) fail "GITHUB_REDIRECT_URI does not match the configured API domain" ;;
+        *) fail "OAuth environment could not be validated" ;;
+    esac
 }
 
 require_complete_configuration() {
@@ -303,12 +368,8 @@ require_complete_configuration() {
     sudo grep -Fxq "browserOrigins = [\"https://${LABELLO_APP_DOMAIN}\"]" "$SERVER_CONFIG" \
         || fail "browserOrigins must contain only the configured HTTPS application origin"
 
-    sudo grep -Eq '^GITHUB_CLIENT_ID=.+$' "$SERVER_ENV" \
-        || fail "GITHUB_CLIENT_ID is missing"
-    sudo grep -Eq '^GITHUB_CLIENT_SECRET=.+$' "$SERVER_ENV" \
-        || fail "GITHUB_CLIENT_SECRET is missing"
-    sudo grep -Fxq "GITHUB_REDIRECT_URI=https://${LABELLO_API_DOMAIN}/auth/github/callback" \
-        "$SERVER_ENV" || fail "GITHUB_REDIRECT_URI does not match the configured API domain"
+    validate_oauth_environment "$SERVER_ENV" \
+        "https://${LABELLO_API_DOMAIN}/auth/github/callback"
 }
 
 validate_image() {
@@ -446,19 +507,22 @@ main() {
 
     load_deployment_environment
     require_operator
+    [[ -d "$RELEASES_DIR" && -w "$RELEASES_DIR" ]] \
+        || fail "$RELEASES_DIR is missing or not writable; run 'just install' first"
+    [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && -w "$LOCK_FILE" ]] \
+        || fail "$LOCK_FILE is missing or not writable; run 'just install' first"
+
+    exec 9<>"$LOCK_FILE"
+    flock -n 9 || fail "an installation or deployment is already running"
+    lock_acquired=1
+    sudo rm -f -- "$ACTIVATION_PERMIT"
+
     temp_dir="$(mktemp -d)"
     require_rootless_installation
     if ! rootless_systemctl is-active --quiet labello-pod.service; then
         ports_are_free \
             || fail "TCP port ${API_BACKEND_PORT} or ${WEB_BACKEND_PORT} conflicts on the configured address"
     fi
-    [[ -d "$RELEASES_DIR" && -w "$RELEASES_DIR" ]] \
-        || fail "$RELEASES_DIR is missing or not writable; run 'just install' first"
-    [[ -e "$LOCK_FILE" && -w "$LOCK_FILE" ]] \
-        || fail "$LOCK_FILE is missing or not writable; run 'just install' first"
-
-    exec 9>"$LOCK_FILE"
-    flock -n 9 || fail "another deployment is already running"
 
     if sudo test -e "$BLOCKER"; then
         blocker_was_present=1
@@ -567,9 +631,7 @@ main() {
         || fail "current image tag did not resolve to the new image"
     atomic_symlink "releases/${release_id}" "$DEPLOYMENTS_DIR/current"
 
-    sudo rm -f -- "$BLOCKER"
-    rootless_systemctl start labello-pod.service
-    set_blocker
+    start_pod_with_permit
 
     local deadline=$((SECONDS + 60)) healthy=0
     local missing_path=".labello-deploy-missing-${release_id}"
@@ -587,4 +649,6 @@ main() {
     printf 'Activated release %s at commit %s (%s)\n' "$release_id" "$commit" "$image_id"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

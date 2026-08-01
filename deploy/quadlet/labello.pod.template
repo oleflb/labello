@@ -2,7 +2,6 @@
 Description=Labello application pod
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=!/var/lib/labello/deployments/BLOCKED
 
 [Pod]
 PodName=labello
@@ -12,6 +11,7 @@ PublishPort=@LABELLO_BACKEND_IP@:24181:8081/tcp
 StopTimeout=300
 
 [Service]
+ExecCondition=/bin/sh -c 'test ! -e /var/lib/labello/deployments/BLOCKED || { test -e /var/lib/labello/deployments/ACTIVATING && test -f /var/lib/labello/deployments/deploy.lock && test ! -L /var/lib/labello/deployments/deploy.lock && flock -n -E 0 /var/lib/labello/deployments/deploy.lock false; }'
 TimeoutStartSec=120
 TimeoutStopSec=360
 
