@@ -97,8 +97,14 @@ Only after that continue with the next issue.
 - [ ] Remove start correction pass.
 - [ ] Investigate api errors not showing up in server log.
 - [ ] Normal non-migration annotation view need major. 
-- [ ] Allow review correction does not seem to work. Causes api errors when accepting and not correction UI are available. 
+- [ ] Allow review correction does not seem to work. Causes api errors when accepting and not correction UI are available.
+- [ ] See if rejection during review is currently working and if it able to be reannotated
+- [ ] During review, one should be able to add missing objects with a location as a rejection reason  
+- [ ] Review inspector with a bit of context on the current active item.
 - [ ] Debounce/edge trigger submission/accept buttons. Holding the button should only do one accept.
+- [ ] Review on mobile does not show the workflow type, making it imposibble to now what is being reviewed.
+- [ ] Mobile touch zoom behavior in annotation review is funky. Jumping when starting to zoom.  
+- [ ] While having no internet connection, actions like submit understandibly fail. But currently give no feedback instead silently doing nothing. 
 
 ## Documentation deep-dive findings
 
